@@ -1,22 +1,20 @@
 @echo off
-title Hangeul Admin API & Telegram Agent
+cd /d "%~dp0"
+title Hangeul Admin API ^& Telegram Agent
 echo ============================================================
-echo Starting Hangeul Admin API, Local LLM & Telegram Agent...
+echo Starting Hangeul Admin API, Local LLM ^& Telegram Agent...
 echo ============================================================
 
-set PYTHON_EXE=C:\Users\User\AppData\Local\Programs\Python\Python311\python.exe
+set "PYTHON_EXE=%~dp0.venv\Scripts\python.exe"
+if not exist "%PYTHON_EXE%" goto :nopython
 
-if not exist "%PYTHON_EXE%" (
-    python --version >nul 2>&1
-    if %errorlevel% equ 0 (
-        set PYTHON_EXE=python
-    ) else (
-        echo [ERROR] Python 3.11 is not found! Please check Python installation.
-        pause
-        exit /b 1
-    )
-)
-
-echo Using Python: %PYTHON_EXE%
+echo Using Python: "%PYTHON_EXE%"
 "%PYTHON_EXE%" run.py
 pause
+exit /b
+
+:nopython
+echo [ERROR] "%PYTHON_EXE%" is missing.
+echo Create the Python 3.12 environment in this folder first (see the top of requirements.txt).
+pause
+exit /b 1

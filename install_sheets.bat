@@ -5,6 +5,8 @@ echo ============================================================
 echo    HANGEUL BOT  -  INSTALL PROGRESS-SHEET FEATURE
 echo ============================================================
 echo.
+set "PY=%~dp0.venv\Scripts\python.exe"
+if not exist "%PY%" goto :nopython
 if not exist "src\sheets" mkdir "src\sheets"
 type nul > "src\sheets\__init__.py"
 set "SRC="
@@ -21,18 +23,25 @@ if defined SRC (
   echo   installed  src\sheets\progress_builder.py
 ) else (
   echo   ERROR: progress_builder.py not found.
-  echo   Put progress_builder.py into E:\BOT and run this again.
+  echo   Put progress_builder.py into this folder and run this again.
   pause
   exit /b 1
 )
 echo   created    src\sheets\__init__.py
 echo.
 echo Installing Google libraries (one-time)...
-python -m pip install --quiet --disable-pip-version-check google-api-python-client google-auth-httplib2 google-auth-oauthlib
+"%PY%" -m pip install --quiet --disable-pip-version-check google-api-python-client google-auth-httplib2 google-auth-oauthlib
 echo.
 echo DONE.  Next steps:
-echo   1) make sure credentials.json is in E:\BOT
+echo   1) make sure credentials.json is in this folder
 echo   2) double-click  gauth.bat        (one-time Google login)
 echo   3) double-click  build_sheets.bat (build the four sheets)
 echo.
 pause
+exit /b
+
+:nopython
+echo   ERROR: "%PY%" is missing.
+echo   Create the Python 3.12 environment in this folder first (see the top of requirements.txt).
+pause
+exit /b 1

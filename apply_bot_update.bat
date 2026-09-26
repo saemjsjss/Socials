@@ -6,7 +6,7 @@ echo    HANGEUL BOT  -  APPLY UPDATE ^& RESTART  (one click)
 echo ============================================================
 echo.
 
-REM --- 1) locate fresh files (E:\BOT first, then newest in Downloads) ---
+REM --- 1) locate fresh files (this folder first, then newest in Downloads) ---
 set "BOTFILE="
 if exist "%~dp0telegram_bot.py" set "BOTFILE=%~dp0telegram_bot.py"
 if not defined BOTFILE (
@@ -26,10 +26,10 @@ if not defined CFGFILE (
 )
 :cfgdone
 
-REM --- 2) stop every running bot copy (this also frees port 8000) ---
-echo [1/5] Stopping any running bot processes (python)...
-taskkill /F /IM python.exe  >nul 2>&1
-taskkill /F /IM pythonw.exe >nul 2>&1
+REM --- 2) stop this folder's bot and its jobs (this also frees port 8000) ---
+REM     stop.bat leaves every other Python process on this PC alone.
+echo [1/5] Stopping the running bot...
+call "%~dp0stop.bat" nopause
 timeout /t 2 /nobreak >nul
 
 REM --- 3) install the fresh files into the right folders ---
@@ -47,8 +47,10 @@ if defined CFGFILE (
 )
 
 REM --- 4) clear compiled cache so Python recompiles from the NEW source ---
+REM     Only the bot's own code: .venv holds the installed packages' caches.
 echo [3/5] Clearing __pycache__ (forces a fresh compile)...
-for /d /r "%~dp0" %%d in (__pycache__) do @if exist "%%d" rd /s /q "%%d" 2>nul
+if exist "%~dp0__pycache__" rd /s /q "%~dp0__pycache__" 2>nul
+for /d /r "%~dp0src" %%d in (__pycache__) do @if exist "%%d" rd /s /q "%%d" 2>nul
 
 REM --- 5) verify BOTH files are the new versions ---
 echo [4/5] Verifying installed files...
@@ -57,10 +59,10 @@ findstr /C:"crosscheck_range" "%~dp0src\bot\telegram_bot.py" >nul 2>&1 || set "O
 findstr /C:"def authorized_ids" "%~dp0src\config.py" >nul 2>&1 || set "OK=0"
 if "!OK!"=="0" (
   echo.
-  echo    !!!  UPDATE INCOMPLETE:
+  echo    ***  UPDATE INCOMPLETE:
   findstr /C:"crosscheck_range" "%~dp0src\bot\telegram_bot.py" >nul 2>&1 || echo        - src\bot\telegram_bot.py is missing 'crosscheck_range'
   findstr /C:"def authorized_ids" "%~dp0src\config.py" >nul 2>&1 || echo        - src\config.py is missing 'authorized_ids'
-  echo    Put the file(s) I sent into E:\BOT (this folder) and run this again.
+  echo    Put the files I sent into this folder and run this again.
   echo.
   pause
   exit /b 1
