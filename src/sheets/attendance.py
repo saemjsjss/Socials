@@ -4,7 +4,7 @@ Office attendance, read from the Google Sheet the office PC updates
 
 Used by the 09:05 daily report: who arrived, at what time, and who was late.
 
-CLI (run from E:\\BOT):
+CLI (run from the BOT folder):
   python -m src.sheets.attendance          # today's attendance as it will be reported
 """
 from __future__ import annotations

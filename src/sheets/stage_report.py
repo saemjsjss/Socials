@@ -5,7 +5,7 @@ Reads the live portal (read-only students.php?export=csv, Direct students only â
 same students as the progress sheets) and groups one program + intake's students by
 their current stage.
 
-CLI (run from E:\\BOT):
+CLI (run from the BOT folder):
   python -m src.sheets.stage_report --program KLP                      # list its intakes (JSON)
   python -m src.sheets.stage_report --program KLP --intake "MARCH 2027"  # stage report
   python -m src.sheets.stage_report --program KLP --intake NONE          # students with no intake

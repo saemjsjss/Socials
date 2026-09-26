@@ -30,9 +30,10 @@ import time
 from pathlib import Path
 
 import src  # noqa: F401  — sets the CA bundle before any HTTPS call
+from src.config import settings
 
 BOT = Path(__file__).resolve().parent
-DOCS = Path(r"E:\VERIFIED STUDENT DOCUMENTS")
+DOCS = settings.docs_root()
 PY = sys.executable
 
 
@@ -98,10 +99,10 @@ def phase_4() -> bool:
 
 def phase_5() -> bool:
     print(f"\n{'=' * 74}\nPHASE 6 of 6 — hand over to the bot\n{'=' * 74}")
-    print("""
+    print(f"""
 From here the bot keeps everything current by itself:
 
-    wscript.exe "E:\\BOT\\start_background.vbs"
+    wscript.exe "{BOT / 'start_background.vbs'}"
 
 Then, every 15 minutes, it rebuilds only the sheets whose students changed,
 downloads anyone newly verified, checks those documents, and messages you on

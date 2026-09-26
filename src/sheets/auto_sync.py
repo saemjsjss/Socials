@@ -7,8 +7,9 @@ Each run:
      removed, or any field edited) gets its main tab rebuilt; university tabs are
      never touched.
   2. Documents — downloads students who became document-verified since the last run into
-     E:\\VERIFIED STUDENT DOCUMENTS\\<PROGRAM>\\<NAME (PASSPORT)>\\ and shrinks any file over 2 MB
-     (original backed up).
+     <DOCS_ROOT>\\<PROGRAM>\\<NAME (PASSPORT)>\\ and shrinks any file over 2 MB (original
+     backed up).  DOCS_ROOT defaults to the VERIFIED STUDENT DOCUMENTS folder beside the
+     BOT folder; see .env.example.
   3. Review — sends a short Telegram summary of what changed (nothing is sent when
      nothing changed).
   4. Verification — every student whose documents or portal record changed is checked
@@ -17,7 +18,7 @@ Each run:
 
 Portal access is read-only (GET) throughout.
 
-CLI (run from E:\\BOT):
+CLI (run from the BOT folder):
   python -m src.sheets.auto_sync              # one sync run
   python -m src.sheets.auto_sync --no-notify  # same, without the Telegram message
 """
@@ -30,9 +31,9 @@ import json
 import logging
 import os
 import time
-from pathlib import Path
 from typing import Dict, List
 
+from src.config import settings
 from src.sheets import progress_builder as pb
 from src.sheets import verified_docs as vd
 
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 DATA_DIR = pb.BOT_ROOT / "data"
 STATE_PATH = DATA_DIR / "sheet_state.json"
 LOCK_PATH = DATA_DIR / "auto_sync.lock"
-DOCS_ROOT = Path(r"E:\VERIFIED STUDENT DOCUMENTS")
+DOCS_ROOT = settings.docs_root()
 LOCK_STALE_SECONDS = 2 * 3600
 MAX_NAMES = 8  # names listed per section in the Telegram summary
 
@@ -195,7 +196,6 @@ def verify_docs() -> List[str]:
 # --- 4) Telegram review ----------------------------------------------------------------
 def notify(lines: List[str], title: str = "🔄 Portal sync — changes found") -> None:
     import httpx
-    from src.config import settings
     token = settings.TELEGRAM_BOT_TOKEN
     ids = settings.brief_recipient_ids()
     if not token or not ids:

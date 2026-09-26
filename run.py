@@ -34,7 +34,7 @@ from src.llm.ollama_client import ollama_client
 
 console = Console(file=sys.stdout)
 
-handlers = [logging.FileHandler("hangeul_bot.log", encoding="utf-8")]
+handlers = [logging.FileHandler(LOG_DIR / "hangeul_bot.log", encoding="utf-8")]
 if sys.stdout:
     handlers.append(logging.StreamHandler(sys.stdout))
 

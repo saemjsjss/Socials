@@ -15,7 +15,7 @@ What it does per student:
 
 Verdicts: PASS · FLAG (needs a human eye) · FAIL · MISSING
 
-CLI (run from E:\\BOT):
+CLI (run from the BOT folder):
   python -m src.verify.doc_verifier --student "NAHID SAFWANUL ISLAM"
   python -m src.verify.doc_verifier --passport A00990016
   python -m src.verify.doc_verifier --all                  # every downloaded student
@@ -31,13 +31,14 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from src.config import settings
 from src.verify import page_checks as PC
 from src.verify import rules as R
 
 logger = logging.getLogger(__name__)
 
-DOCS_ROOTS = [Path(r"E:\VERIFIED STUDENT DOCUMENTS"), Path(r"E:\KONYANG DOCUMENTS")]
-REPORT_DIR = Path(r"E:\BOT\data\verification")
+DOCS_ROOTS = [settings.docs_root(), settings.konyang_root()]   # an absent one is skipped
+REPORT_DIR = settings.verification_dir()
 TODAY = dt.date.today()
 
 PASS, FLAG, FAIL, MISSING = "PASS", "FLAG", "FAIL", "MISSING"

@@ -11,7 +11,7 @@ What counts as missing:
     subject for students currently in undergraduate (no final degree/CGPA yet).
   * Not counted: IELTS/TOPIK (optional) and Passport Issue (no such field on the portal).
 
-CLI (run from E:\\BOT):
+CLI (run from the BOT folder):
   python -m src.sheets.missing_report               # build + send the report
   python -m src.sheets.missing_report --no-notify   # build only (prints the summary)
   python -m src.sheets.missing_report --student HNG-2026-925   # one student

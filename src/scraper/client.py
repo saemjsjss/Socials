@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any, List
 import httpx
 from bs4 import BeautifulSoup
 
-from src.config import settings
+from src.config import BOT_ROOT, settings
 from src.scraper.parsers import (
     extract_csrf_token,
     parse_dashboard_metrics,
@@ -338,7 +338,7 @@ class HangeulAdminClient:
 
         # Check / download file from live portal
         local_path = None
-        passports_dir = os.path.join(os.getcwd(), "passports")
+        passports_dir = os.path.join(BOT_ROOT, "passports")
         os.makedirs(passports_dir, exist_ok=True)
 
         if doc_filename:

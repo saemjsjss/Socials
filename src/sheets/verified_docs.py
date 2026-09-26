@@ -12,11 +12,11 @@ where <PROGRAM> is one of the four program folders (KLP, EAP, BACHELOR'S, MASTER
 Re-runnable: a student folder that finished completely is skipped; a half-finished one
 only gets the files it is missing.  Nothing is ever deleted or overwritten.
 
-CLI (run from E:\\BOT):
+CLI (run from the BOT folder):
   python -m src.sheets.verified_docs            # copy all verified students
   python -m src.sheets.verified_docs --list     # just list who would be copied
   python -m src.sheets.verified_docs --limit 2  # try the first 2 students only
-  python -m src.sheets.verified_docs --local "E:\\VERIFIED STUDENT DOCUMENTS"   # save on this PC
+  python -m src.sheets.verified_docs --local "..\\VERIFIED STUDENT DOCUMENTS"   # save on this PC
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from src.config import settings
 from src.sheets.progress_builder import PARENT_FOLDER_ID, PROGRAMS, _services, program_matches
 
 logger = logging.getLogger(__name__)
@@ -244,7 +245,7 @@ LOCAL_DONE_MARKER = ".download_complete"
 # BACKUP_ROOT first (same sub-path).
 MAX_FILE_BYTES = 2 * 1024 * 1024
 _TARGET_BYTES = int(1.95 * 1024 * 1024)
-BACKUP_ROOT = Path(r"E:\VERIFIED STUDENT DOCUMENTS - ORIGINALS OVER 2MB")
+BACKUP_ROOT = settings.docs_originals_root()
 _A4 = (595, 842)
 
 
@@ -415,7 +416,7 @@ def main() -> None:
     ap.add_argument("--list", action="store_true", help="only list the students")
     ap.add_argument("--limit", type=int, default=0, help="only the first N students")
     ap.add_argument("--local", metavar="FOLDER", help="save on this PC instead of Drive, e.g. "
-                    "\"E:\\VERIFIED STUDENT DOCUMENTS\"")
+                    f"\"{settings.docs_root()}\"")
     ap.add_argument("--include-drive-done", action="store_true",
                     help="with --local: also download students already finished in Drive")
     args = ap.parse_args()

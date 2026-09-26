@@ -4,7 +4,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from zoneinfo import ZoneInfo
-from src.config import settings
+from src.config import BOT_ROOT, settings
 from src.scraper.client import admin_client
 from src.llm.ollama_client import ollama_client
 from bs4 import BeautifulSoup
@@ -17,7 +17,7 @@ logger = logging.getLogger("hangeul.scheduler")
 scheduler = AsyncIOScheduler()
 
 # Cache file to avoid duplicate Telegram alerts
-ALERTED_CACHE_FILE = os.path.join(os.getcwd(), "data", "alerted_passport_issues.json")
+ALERTED_CACHE_FILE = os.path.join(BOT_ROOT, "data", "alerted_passport_issues.json")
 
 def get_alerted_cache() -> set:
     if os.path.exists(ALERTED_CACHE_FILE):

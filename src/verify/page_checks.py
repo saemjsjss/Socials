@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from src.config import settings
 from src.verify import rules as R
 
 
@@ -291,7 +292,7 @@ def seal_present(path: Path) -> bool:
 
 
 # --- academic documents: e-Apostille and the certificate that follows it ----------------
-APOSTILLE_SUBJECTS = Path(r"E:\BOT\data\verification\apostille.json")
+APOSTILLE_SUBJECTS = settings.verification_dir() / "apostille.json"
 
 
 def apostille_subject(url: str) -> Optional[str]:

@@ -11,7 +11,7 @@ For each checkable field the value is looked for in the documents that could car
   DIFFERS    that document clearly holds a different value (worth a human's eye)
   UNREADABLE the document is there but OCR could not read that part
 
-CLI (run from E:\\BOT):
+CLI (run from the BOT folder):
   python -m src.verify.field_check --passport A00990016
   python -m src.verify.field_check --program BACHELOR
   python -m src.verify.field_check --program MASTER --report master_fields.xlsx

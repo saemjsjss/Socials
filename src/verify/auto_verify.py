@@ -20,7 +20,7 @@ a check, with what it was, what it is now, and whether the change fixed the prob
 OCR is slow (minutes per student), so each pass has a budget of students whose documents
 are new; whatever is left over is picked up by the next pass.
 
-CLI (run from E:\\BOT):
+CLI (run from the BOT folder):
   python -m src.verify.auto_verify                # check what is pending (default budget)
   python -m src.verify.auto_verify --budget 0     # no limit: drain the whole queue
   python -m src.verify.auto_verify --pending      # just list what is waiting
@@ -40,9 +40,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from src.config import settings
+
 logger = logging.getLogger(__name__)
 
-REPORT_DIR = Path(r"E:\BOT\data\verification")
+REPORT_DIR = settings.verification_dir()
 STORE_PATH = REPORT_DIR / "results.json"
 TEXT_DIR = REPORT_DIR / "text"          # OCR output, kept so nothing is read twice
 LOCK_PATH = REPORT_DIR / "auto_verify.lock"
@@ -538,7 +540,7 @@ def summary_lines(result: Dict[str, Any]) -> List[str]:
     if result.get("waiting"):
         out.append(f"   {result['waiting']} more waiting — they run on the next passes.")
     if bad:
-        out.append("   Reports: DOCUMENT CHECK.xlsx / FIELD CHECK.xlsx in E:\\BOT\\data\\verification")
+        out.append(f"   Reports: DOCUMENT CHECK.xlsx / FIELD CHECK.xlsx in {REPORT_DIR}")
     return out
 
 

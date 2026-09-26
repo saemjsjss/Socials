@@ -22,7 +22,7 @@ Runtime: a Google OAuth login as rahmansaem@gmail.com (credentials.json -> token
 the bot root), plus the portal login the bot already has.  Runs on the PC only (the
 portal is unreachable from the cloud).
 
-CLI (run from E:\\BOT):
+CLI (run from the BOT folder):
   python -m src.sheets.progress_builder --auth            # one-time Google login
   python -m src.sheets.progress_builder --dump-profile HNG-2026-920   # inspect portal fields
   python -m src.sheets.progress_builder --program KLP     # build one program's sheet
@@ -41,7 +41,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Bot root (E:\BOT) — where credentials.json / token.json live.
+# Bot root (the BOT folder, wherever it is) — where credentials.json / token.json live.
 BOT_ROOT = Path(__file__).resolve().parent.parent.parent
 CREDENTIALS_PATH = BOT_ROOT / "credentials.json"
 TOKEN_PATH = BOT_ROOT / "token.json"
@@ -374,7 +374,7 @@ def _load_credentials(interactive: bool = False):
         if doubled.exists():
             cred_path = doubled
         else:
-            raise RuntimeError(f"credentials.json not found at {CREDENTIALS_PATH}. Put it in E:\\BOT.")
+            raise RuntimeError(f"credentials.json not found at {CREDENTIALS_PATH}. Put it in {BOT_ROOT}.")
     flow = InstalledAppFlow.from_client_secrets_file(str(cred_path), SCOPES)
     creds = flow.run_local_server(port=0)
     TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
