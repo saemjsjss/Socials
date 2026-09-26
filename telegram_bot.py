@@ -27,10 +27,11 @@ def is_authorized(update: Update) -> bool:
     allowed = settings.authorized_ids()
 
     if not allowed:
-        # Nothing configured yet: allow & bind the first sender (bootstrap).
-        settings.TELEGRAM_ADMIN_CHAT_ID = chat_id
-        logger.info(f"Auto-bound TELEGRAM_ADMIN_CHAT_ID to {chat_id}")
-        return True
+        # Nothing configured: refuse everyone. Binding the first sender handed the bot
+        # (student data, /sendmail) to whoever found it first, again after every restart.
+        logger.warning(f"TELEGRAM_ADMIN_CHAT_ID is not set; refused chat {chat_id}. "
+                       f"Put your own ID in .env as TELEGRAM_ADMIN_CHAT_ID and restart.")
+        return False
 
     return chat_id in allowed
 
