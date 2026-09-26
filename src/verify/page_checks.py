@@ -428,9 +428,11 @@ def academic_check(path: Path, pages_text: List[str]) -> List[tuple]:
 
         levels = {lv for _, lv in named}
         where = ", ".join(str(pg) for pg, _ in named)
+        # FLAG, not FAIL: a transcript that names two exams reads as "mixed" (HANDOFF §5.1);
+        # it stays a FLAG until proven against real documents (HANDOFF §8.1).
         if len(levels) > 1:
             detail = ", ".join(f"page {pg}: {lv}" for pg, lv in named)
-            out.append(("FAIL", f"the pages after the e-Apostille on page {start + 1} are not all "
+            out.append(("FLAG", f"the pages after the e-Apostille on page {start + 1} are not all "
                                 f"for one qualification ({detail}) — each apostille covers one "
                                 f"certificate and one transcript"))
             continue

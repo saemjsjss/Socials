@@ -730,9 +730,11 @@ def check_bank(text: str, student, sizes, program: str, path=None, others=None) 
     if len(pages) >= 2:
         sol = document_date(pages[0])
         stm = statement_date(pages[1:])
+        # FLAG, not FAIL: this rule produced false failures (HANDOFF §5.1) and its rewritten
+        # date logic has not yet been proven against real statements (HANDOFF §8.1).
         if sol and stm:
             out.append((PASS, f"solvency certificate and statement both dated {sol}") if sol == stm
-                       else (FAIL, f"the solvency certificate is dated {sol} but the statement was "
+                       else (FLAG, f"the solvency certificate is dated {sol} but the statement was "
                                    f"generated on {stm} — they must carry the SAME date"))
         elif sol and not stm:
             out.append((NOTE, f"solvency certificate dated {sol}; the statement's generation "
