@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# Secrets — never commit these. They are live credentials.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+token.json
+credentials.json
+credentials.json.json
+*.key
+*.pem
+
+# ---------------------------------------------------------------------------
+# Student personal data — passport numbers, dates of birth, parents' names,
+# bank balances, and the scans themselves. None of this belongs on a hosted
+# service, private repository or not.
+# ---------------------------------------------------------------------------
+data/
+passports/
+passports_001/
+*.csv
+*.xlsx
+*.xls
+*.zip
+VERIFIED STUDENT DOCUMENTS/
+KONYANG DOCUMENTS/
+
+# OCR'd text of passports, NIDs and bank statements
+**/verification/
+**/text/
+
+# ---------------------------------------------------------------------------
+# Logs — they quote student names and portal responses
+# ---------------------------------------------------------------------------
+*.log
+hangeul_*.log
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# Generated reports and scratch scripts that quote real students
+# ---------------------------------------------------------------------------
+bachelor_portal_audit.md
+run_one_student.py
+*_audit_*.md
