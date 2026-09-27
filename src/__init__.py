@@ -32,7 +32,8 @@ if _CA.exists():
 import logging as _logging
 import re as _re
 
-_TOKEN_RE = _re.compile(r"bot\d{6,}:[A-Za-z0-9_-]{30,}")
+# The ":" is URL-encoded as "%3A" in file-download URLs (api.telegram.org/file/bot<token>/...).
+_TOKEN_RE = _re.compile(r"bot\d{6,}(?::|%3[Aa])[A-Za-z0-9_-]{30,}")
 
 
 class _RedactBotToken(_logging.Filter):

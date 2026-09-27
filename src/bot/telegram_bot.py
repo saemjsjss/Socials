@@ -2,6 +2,7 @@ import logging
 import re
 from typing import Optional, Dict, Any, List
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -1736,7 +1737,13 @@ async def handle_natural_language_message(update: Update, context: ContextTypes.
         }
 
         answer = await ollama_client.answer_agent_query(query=query, context=context_data)
-        await status_msg.edit_text(answer, parse_mode="Markdown")
+        try:
+            await status_msg.edit_text(answer, parse_mode="Markdown")
+        except BadRequest as e:
+            # The LLM's Markdown does not always parse ("Can't parse entities"): send it plain.
+            if "parse entities" not in str(e).lower():
+                raise
+            await status_msg.edit_text(answer)
     except Exception as e:
         logger.error(f"Error answering query: {e}")
         await status_msg.edit_text(f"❌ Error: `{e}`", parse_mode="Markdown")
