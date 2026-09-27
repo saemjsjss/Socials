@@ -20,3 +20,27 @@ if _CA.exists():
     for _var in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
                  "HTTPX_SSL_CERT_FILE", "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH"):
         _os.environ.setdefault(_var, str(_CA))
+
+
+# Keep the Telegram bot token out of the logs.
+#
+# httpx logs every request URL at INFO, and a Telegram API URL carries the bot token
+# (https://api.telegram.org/bot<token>/sendMessage), so anyone who could read
+# hangeul_bot.log could take over the bot.  The request lines stay, as they help diagnose
+# the portal and Telegram, but the token itself is replaced.  This package is imported by
+# the bot and by every scheduled job, so they all get the filter.
+import logging as _logging
+import re as _re
+
+_TOKEN_RE = _re.compile(r"bot\d{6,}:[A-Za-z0-9_-]{30,}")
+
+
+class _RedactBotToken(_logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        if _TOKEN_RE.search(msg):
+            record.msg, record.args = _TOKEN_RE.sub("bot<token>", msg), ()
+        return True
+
+
+_logging.getLogger("httpx").addFilter(_RedactBotToken())
