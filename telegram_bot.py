@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Optional, Dict, Any, List
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -1605,12 +1606,17 @@ async def crosscheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Error in crosscheck: {e}")
         await update.message.reply_text(f"❌ Error during cross-check: `{e}`")
 
-async def handle_natural_language_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process natural language questions through the local LLM agent."""
+async def handle_natural_language_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                          query: Optional[str] = None):
+    """Process natural language questions through the local LLM agent.
+    A typed message is read from update.message.text; a voice note (src/bot/voice.py),
+    which has no text, passes its English query as `query` instead."""
     if not is_authorized(update):
         return
 
-    query = (update.message.text or "").strip()
+    if query is None:
+        query = update.message.text or ""
+    query = query.strip()
     query_lower = query.lower()
 
     # 0. If a /sendmail conversation is in progress, this message belongs to it.
@@ -1975,6 +1981,13 @@ def build_telegram_application():
 
     # Natural language message handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_natural_language_message))
+
+    # Jennie's voice: voice notes in, text + voice notes out (only when switched on in .env).
+    # block=False: a voice round trip can take a minute, and must not hold up everyone's typed commands.
+    if settings.JENNIE_VOICE_ENABLED:
+        from src.bot.voice import handle_voice_message
+        app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message, block=False))
+        logger.info(f"Jennie voice replies enabled (voice service {settings.JENNIE_VOICE_URL}).")
 
     # Setup background cron scheduler
     setup_scheduler(app)

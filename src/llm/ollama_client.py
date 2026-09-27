@@ -39,8 +39,11 @@ class OllamaClient:
             "target_model_ready": False
         }
 
-    async def generate_response(self, prompt: str, system: Optional[str] = None) -> str:
-        """Call Ollama /api/generate endpoint."""
+    async def generate_response(self, prompt: str, system: Optional[str] = None,
+                                keep_alive: Optional[str] = None) -> str:
+        """Call Ollama /api/generate endpoint.
+        keep_alive (e.g. "30s", "0s") sets how long Ollama keeps the model in VRAM after
+        this call; None leaves Ollama's own default (5 minutes)."""
         health = await self.check_health()
         if not health.get("reachable"):
             return self._fallback_response(prompt)
@@ -56,6 +59,8 @@ class OllamaClient:
         }
         if system:
             payload["system"] = system
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
 
         try:
             resp = await self.client.post(f"{self.base_url}/api/generate", json=payload)

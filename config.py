@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     GMAIL_ADDRESS: str = ""
     GMAIL_APP_PASSWORD: str = ""
 
+    # Jennie's voice — the local voice service (speech-to-text + CosyVoice2 speech) on this PC.
+    # Off by default: while it is false the bot ignores voice notes exactly as before.
+    JENNIE_VOICE_ENABLED: bool = False
+    JENNIE_VOICE_URL: str = "http://127.0.0.1:8765"   # must be this PC (127.0.0.1 / localhost)
+    JENNIE_SPOKEN_BRIEF: bool = True                  # also speak the daily brief (needs the above on)
+
     # API Server
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000

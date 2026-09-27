@@ -131,6 +131,16 @@ async def send_daily_briefing(bot_application):
         logger.info("Scheduled briefing dispatched successfully.")
     except Exception as e:
         logger.error(f"Failed to dispatch scheduled briefing: {e}")
+        return
+
+    # Jennie reads a short summary of it aloud. Only after the text brief went out, and
+    # nothing here may ever touch the text brief: every failure just skips the voice note.
+    if settings.JENNIE_VOICE_ENABLED and settings.JENNIE_SPOKEN_BRIEF:
+        try:
+            from src.bot.voice import send_spoken_brief
+            await send_spoken_brief(bot_application.bot, chat_id, report_text)
+        except Exception as e:
+            logger.error(f"Spoken daily brief skipped (the text brief was sent): {e}")
 
 SYNC_LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                              "hangeul_sync.log")
