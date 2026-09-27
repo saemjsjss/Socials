@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Optional, Dict, Any, List
 import httpx
@@ -349,9 +350,17 @@ class HangeulAdminClient:
                 doc_url = f"{self.base_url}/view_doc.php?f={doc_filename}"
                 try:
                     resp = await self.client.get(doc_url)
-                    if resp.status_code == 200 and len(resp.content) > 1000:
-                        with open(local_path, "wb") as f:
+                    # Look again now the GET is back: another audit of this student (the watcher
+                    # and a /crosscheck) may have saved the scan while we waited, and its OCR
+                    # thread may be reading it. The check, the write and the rename never yield
+                    # the loop, so a scan is saved once and never rewritten under a reader, and
+                    # the rename means a reader finds either no scan or the whole one.
+                    if (resp.status_code == 200 and len(resp.content) > 1000
+                            and (not os.path.exists(local_path) or os.path.getsize(local_path) < 1000)):
+                        part_path = os.path.join(passports_dir, f".{student_id}_{doc_filename}.part")
+                        with open(part_path, "wb") as f:
                             f.write(resp.content)
+                        os.replace(part_path, local_path)
                 except Exception as e:
                     logger.error(f"Error downloading passport doc for {student_id}: {e}")
         else:
@@ -362,7 +371,13 @@ class HangeulAdminClient:
             elif matches:
                 local_path = matches[0]
 
-        return validate_passport_data(student_id, form_data, local_path, live_audit=force_live)
+        # EasyOCR on the CPU plus the MRZ and image work take seconds per scan. Run them in a
+        # worker thread so the bot keeps answering Telegram (Jennie's voice notes included)
+        # while the 30-minute passport watcher audits every student. Same function, same
+        # arguments, same result; the portal GETs above stay on the event loop.
+        return await asyncio.to_thread(
+            validate_passport_data, student_id, form_data, local_path, live_audit=force_live
+        )
 
 
 

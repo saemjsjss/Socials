@@ -1,6 +1,7 @@
 import os
 import re
 import logging
+import threading
 from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime
 import cv2
@@ -199,18 +200,28 @@ AUDIT_REGISTRY: Dict[str, Dict[str, Any]] = {
 # Lazy-loaded EasyOCR reader instance
 _reader = None
 
+# Audits run in a worker thread (client.py hands validate_passport_data to asyncio.to_thread)
+# so the bot's event loop keeps answering Telegram while EasyOCR grinds on the CPU. On the
+# loop they could only ever run one at a time; this lock keeps it that way off the loop too:
+# the shared EasyOCR reader is loaded once and never used by two threads at once, and a PDF
+# scan's <name>_extracted.jpg is never being written by one audit while another reads it.
+# Re-entrant, because validate_passport_data holds it while the helpers below take it again.
+_ocr_lock = threading.RLock()
+
 def get_ocr_reader():
     """Lazily load the EasyOCR reader with GPU support or CPU fallback."""
     global _reader
     if _reader is None:
-        try:
-            import easyocr
-            logger.info("Initializing EasyOCR reader for passport verification...")
-            _reader = easyocr.Reader(['en'], gpu=False, verbose=False)
-            logger.info("EasyOCR reader initialized successfully.")
-        except Exception as e:
-            logger.error(f"Failed to initialize EasyOCR: {e}")
-            _reader = None
+        with _ocr_lock:
+            if _reader is None:
+                try:
+                    import easyocr
+                    logger.info("Initializing EasyOCR reader for passport verification...")
+                    _reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+                    logger.info("EasyOCR reader initialized successfully.")
+                except Exception as e:
+                    logger.error(f"Failed to initialize EasyOCR: {e}")
+                    _reader = None
     return _reader
 
 
@@ -302,7 +313,8 @@ def extract_mrz_from_image(image_path: str) -> Optional[Dict[str, Any]]:
         return None
 
     try:
-        results = reader.readtext(mrz_crop, detail=0)
+        with _ocr_lock:
+            results = reader.readtext(mrz_crop, detail=0)
     except Exception as e:
         logger.error(f"OCR reading failed for {image_path}: {e}")
         return None
@@ -569,7 +581,8 @@ def extract_visual_fields_from_image(image_path: str) -> Dict[str, Any]:
         return default_res
 
     try:
-        results = reader.readtext(upper_crop, detail=0)
+        with _ocr_lock:
+            results = reader.readtext(upper_crop, detail=0)
     except Exception as e:
         logger.error(f"Visual OCR reading failed for {image_path}: {e}")
         return {"father": "", "mother": "", "address": "", "has_emergency_page": False}
@@ -643,6 +656,18 @@ def compare_address(portal_addr: str, portal_dist: str, doc_addr: str) -> Tuple[
 
 
 def validate_passport_data(
+    student_id: str,
+    form_data: Dict[str, Any],
+    image_path: Optional[str] = None,
+    live_audit: bool = True
+) -> Dict[str, Any]:
+    """Cross-check a student's portal entries against the passport scan (see
+    _validate_passport_data). Safe to call from any thread: audits run one at a time."""
+    with _ocr_lock:
+        return _validate_passport_data(student_id, form_data, image_path, live_audit)
+
+
+def _validate_passport_data(
     student_id: str,
     form_data: Dict[str, Any],
     image_path: Optional[str] = None,
