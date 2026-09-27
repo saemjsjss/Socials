@@ -54,7 +54,10 @@ def _ocr_reader():
     if _reader is None:
         import easyocr
         import torch
-        _reader = easyocr.Reader(["en"], gpu=torch.cuda.is_available())
+        # verbose=False: the first-run model download draws a "█" progress bar, which a
+        # Windows console (cp1252) cannot print. The download then dies and every scan
+        # reads as unreadable.
+        _reader = easyocr.Reader(["en"], gpu=torch.cuda.is_available(), verbose=False)
     return _reader
 
 
