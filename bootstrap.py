@@ -68,7 +68,10 @@ def phase_1b() -> bool:
 
 def phase_2() -> bool:
     ok = True
-    for program in ("KLP", "EAP", "Bachelor's Degree", "Master's Degree"):
+    # The portal's own program names (matched case-insensitively). "KLP" and "EAP" alone
+    # match no student, so those two programs were silently never audited.
+    for program in ("Korean Language Program (KLP)", "EAP (English for Academic Purpose)",
+                    "Bachelor's Degree", "Master's Degree"):
         ok &= run(f"PHASE 3 of 6 — passport audit: {program}",
                   ["audit_program.py", program],
                   "Downloads each student's passport scan only (not the full document\n"

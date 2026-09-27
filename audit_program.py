@@ -64,15 +64,26 @@ async def fetch_program_student_ids(program: str):
     if not admin_client.is_authenticated:
         await admin_client.login()
 
-    url = f"{admin_client.base_url}/students.php?prog={quote_plus(program)}"
-    resp = await admin_client.client.get(url)
-    if "login.php" in str(resp.url):  # session expired -> re-auth and retry
-        admin_client.is_authenticated = False
-        await admin_client.login()
-        resp = await admin_client.client.get(url)
-
-    soup = BeautifulSoup(resp.text, "html.parser")
+    # The list shows 50 students per page ("Page 1 of 5"); read every page, not just the
+    # first, or larger programs are silently cut short.
     by_id = {}
+    page, pages = 1, 1
+    while page <= pages:
+        url = f"{admin_client.base_url}/students.php?prog={quote_plus(program)}&pg={page}"
+        resp = await admin_client.client.get(url)
+        if "login.php" in str(resp.url):  # session expired -> re-auth and retry
+            admin_client.is_authenticated = False
+            await admin_client.login()
+            resp = await admin_client.client.get(url)
+        m = re.search(r"Page \d+ of (\d+)", resp.text)
+        pages = int(m.group(1)) if m else page
+        _collect_rows(BeautifulSoup(resp.text, "html.parser"), by_id)
+        page += 1
+    return list(by_id.values())
+
+
+def _collect_rows(soup, by_id):
+    """Add every student row on one list page to by_id (keyed by student id)."""
     for tr in soup.find_all("tr"):
         edit_a = tr.find("a", href=re.compile(r"student_edit\.php\?id=\d+"))
         if not edit_a:
@@ -87,7 +98,6 @@ async def fetch_program_student_ids(program: str):
             "name": name_m.group(1).strip() if name_m else "",
             "doc_filename": doc_filename,
         }
-    return list(by_id.values())
 
 
 def classify(audit: dict):
@@ -137,7 +147,7 @@ async def main():
         print("Nothing to check. Confirm the program name matches the portal exactly, "
               "and that MOCK_MODE=false with a valid read-only login in .env.")
         await admin_client.close()
-        return
+        return 1  # non-zero exit, so bootstrap does not count an empty run as success
 
     print("Cross-checking each passport LIVE (OCR can take a few minutes)...\n")
     rows = []
@@ -221,4 +231,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))
