@@ -142,6 +142,62 @@ async def send_daily_briefing(bot_application):
         except Exception as e:
             logger.error(f"Spoken daily brief skipped (the text brief was sent): {e}")
 
+async def warm_brain(attempts: int = 3, retry_after: float = 30.0) -> bool:
+    """Load Jennie's brain (the local LLM, settings.OLLAMA_MODEL) into VRAM and keep it there, so
+    the first question, typed or spoken, is answered warm; then render any missing voice filler
+    clips. A model that landed partly on the CPU (the GPU was busy at that moment, e.g. the voice
+    service warming up) is loaded again once there is room. Never raises.
+    -> True when the whole model is on the GPU."""
+    import asyncio
+    on_gpu = False
+    try:
+        for attempt in range(1, attempts + 1):
+            state = await ollama_client.warm_up()
+            if state.get("loaded") and state.get("on_gpu"):
+                on_gpu = True
+                logger.info(f"Brain {settings.OLLAMA_MODEL} resident on the GPU: {state.get('vram_gb')} GB, "
+                            f"num_ctx {state.get('num_ctx')}, ready in {state.get('seconds')} s.")
+                break
+            if state.get("loaded"):
+                logger.warning(f"Brain {settings.OLLAMA_MODEL} is only partly on the GPU "
+                               f"({state.get('vram_gb')} of {state.get('size_gb')} GB) - it answers slowly.")
+                if attempt < attempts:
+                    await ollama_client.unload()
+            else:
+                logger.warning(f"Brain {settings.OLLAMA_MODEL} did not load (is Ollama running?).")
+            if attempt < attempts:
+                await asyncio.sleep(retry_after)
+    except Exception as e:
+        logger.error(f"Brain warm-up failed: {e}")
+
+    if settings.JENNIE_VOICE_ENABLED:
+        try:
+            from src.bot.voice import prepare_fillers
+            await prepare_fillers()
+        except Exception as e:
+            logger.error(f"Voice filler clips not prepared: {e}")
+    return on_gpu
+
+
+async def keep_brain_warm():
+    """Load the brain again if Ollama lost it (a restart or an update), or if it sits partly on the
+    CPU: Ollama never moves a loaded model, and with keep_alive -1 never unloads it, so a model that
+    loaded while the GPU was full (the voice service keeps its speech model there for a few minutes
+    after each reply) would answer slowly until the bot restarts. It is unloaded and loaded again;
+    if the GPU is still full, the next check (10 minutes later) tries again. Otherwise nothing to do."""
+    try:
+        state = await ollama_client.residency()
+        if state.get("loaded") and state.get("on_gpu"):
+            return
+        if state.get("loaded"):
+            logger.warning(f"Brain {settings.OLLAMA_MODEL} is only partly on the GPU ({state.get('vram_gb')} of "
+                           f"{state.get('size_gb')} GB) - loading it again.")
+            await ollama_client.unload()
+        await warm_brain(attempts=1)
+    except Exception as e:
+        logger.error(f"Brain keep-warm check failed: {e}")
+
+
 SYNC_LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                              "hangeul_sync.log")
 
@@ -254,6 +310,16 @@ def setup_scheduler(bot_application):
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,
+    )
+
+    # 6. Jennie's brain stays in VRAM (loaded at startup by post_init); reload it if Ollama lost it
+    scheduler.add_job(
+        keep_brain_warm,
+        IntervalTrigger(minutes=10),
+        id="brain_keep_warm",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
 
     scheduler.start()

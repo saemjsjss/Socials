@@ -25,9 +25,21 @@ class Settings(BaseSettings):
     HANGEUL_USERNAME: str = "admin"
     HANGEUL_PASSWORD: str = "password"
     
-    # Local LLM
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
-    OLLAMA_MODEL: str = "qwen2.5:7b"
+    # Local LLM ("Jennie's brain"): one model for everything (typed questions, the daily brief,
+    # e-mails, voice notes), kept resident in VRAM. 127.0.0.1, not localhost: on this PC
+    # "localhost" tries IPv6 first and loses ~2 s on every new connection.
+    OLLAMA_BASE_URL: str = "http://127.0.0.1:11434"
+    OLLAMA_MODEL: str = "qwen3:4b-instruct"
+    # Context window of EVERY Ollama call. Ollama reloads the model whenever this differs from
+    # the loaded copy, so it is one number for all calls. Measured with qwen3:4b-instruct on the
+    # RTX 5060 (Ollama /api/ps, 28 Sep 2026): 2048 -> 2.68 GiB, 3072 -> 2.82 GiB. 3072 fits the
+    # daily brief (~1,300-1,600 tokens + its answer; 2048 would cut it) and leaves ~3.2-3.4 GiB beside
+    # the desktop and the idle voice service, while a Korean speech render peaks at ~3.6 GiB: right at
+    # the edge (some renders spill into shared memory and slow down). Setting OLLAMA_FLASH_ATTENTION=1
+    # and OLLAMA_KV_CACHE_TYPE=q8_0 on the Ollama server (Windows environment, not this file) makes
+    # the model ~0.35 GiB smaller at the same num_ctx (measured: 3072 -> 2.81 GB instead of 3.18 GB).
+    # Ollama cuts an over-long prompt silently; ollama_client logs a warning when one may not fit.
+    OLLAMA_NUM_CTX: int = 3072
     
     # Telegram Bot
     TELEGRAM_BOT_TOKEN: str = ""

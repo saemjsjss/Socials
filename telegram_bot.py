@@ -1933,6 +1933,11 @@ async def post_init(application: Application):
         except Exception as e:
             logger.debug(f"Startup pin notification skipped: {e}")
 
+    # Jennie's brain: load the local LLM now and keep it in VRAM, so the first question (typed or
+    # spoken) is answered warm; then the voice filler clips. In the background: startup never waits.
+    from src.bot.scheduler import warm_brain
+    application.create_task(warm_brain(), name="brain-warm-up")
+
 def build_telegram_application():
     """Build and configure the Telegram application instance."""
     token = settings.TELEGRAM_BOT_TOKEN
