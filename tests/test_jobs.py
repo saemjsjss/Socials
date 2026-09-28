@@ -552,13 +552,19 @@ def test_stage_comes_from_the_student_list_not_the_csv(export):
                          ("HNG-2026-937", "SARKAR MD MILON", "Payment Verified", ""),
                          ("HNG-2026-930", "BEPARI MD ROBIN", "Payment Verified", ""),
                          ("HNG-2026-911", "OTHER INTAKE", "Documents Verified", ""))
-    text = stage_report.stage_report("KLP", "MARCH 2027", listed=portal_list)
+    # Each student's status and % are their own progress page's, never the CSV's stale ones.
+    progress = {"1": {"pct": 11, "stage": "Application Received", "status": "Submitted"},
+                "2": {"pct": 22, "stage": "Payment Verified", "status": "Verified"},
+                "3": {"pct": 22, "stage": "Payment Verified", "status": "Verified"}}
+    text = stage_report.stage_report("KLP", "MARCH 2027", listed=portal_list, progress=progress)
     assert "— 4 students" in text
     assert "• Application Received: 1\n• Payment Verified: 2\n• ⚠️ Stage not found on the student list: 1" in text
-    assert "🔹 Application Received (1)\n   (no ID) MATIN RASEL — Pending verification — 11%" in text
+    assert "🔹 Application Received (1)\n   (no ID) MATIN RASEL — Submitted — 11%" in text
     assert ("🔹 Payment Verified (2)\n   HNG-2026-930 BEPARI MD ROBIN — Verified — 22%\n"
-            "   HNG-2026-937 SARKAR MD MILON — Pending verification — 22%") in text
+            "   HNG-2026-937 SARKAR MD MILON — Verified — 22%") in text
     assert "🔹 ⚠️ Stage not found on the student list (1)\n   HNG-2026-999 NOT LISTED" in text
+    assert "Pending verification" not in text                      # the CSV's "Current Status"
+    assert "Status and % from each student's own progress page (progress.php), read just now." in text
 
 
 def test_two_students_of_one_name_are_told_apart_by_mobile():
@@ -573,17 +579,22 @@ def test_two_students_of_one_name_are_told_apart_by_mobile():
 
 
 def test_the_stage_report_reads_every_page_with_its_own_session(monkeypatch, export):
-    export.rows = csv_rows(("Direct", "HNG-2026-555", "S55", "", KLP, "MARCH 2027", "Payment Verified", "", ""))
+    export.rows = csv_rows(("Direct", "HNG-2026-555", "S55", "", KLP, "MARCH 2027", "Payment Verified",
+                            "Not Started", "33"))
     made = []
 
     class Client:
         def __init__(self):
             made.append(self)
-            self.closed, self.calls = False, []
+            self.closed, self.calls, self.pages = False, [], []
 
         async def read_students(self, params=None, *, all_pages=True):
             self.calls.append(all_pages)
             return listed(("HNG-2026-555", "S55", "Documents Verified", ""))
+
+        async def fetch_html(self, path, timeout=60.0, params=None):
+            self.pages.append((path, params))
+            return PROGRESS_PAGE.format(pct=44, stage="Documents Verified", status="Verified")
 
         async def close(self):
             self.closed = True
@@ -592,6 +603,68 @@ def test_the_stage_report_reads_every_page_with_its_own_session(monkeypatch, exp
     text = stage_report.stage_report("KLP", "MARCH 2027")
     assert "• Documents Verified: 1" in text
     assert made[0].calls == [True] and made[0].closed
+    # The progress page, read-only, with a session of its own: its status and %, not the CSV's.
+    assert made[1].pages == [("progress.php", {"uid": "1"})] and made[1].closed
+    assert "   HNG-2026-555 S55 — Verified — 44%" in text and "Not Started" not in text and "33%" not in text
+
+
+# progress.php's summary block as the portal lays it out (Sep 2026).
+PROGRESS_PAGE = ('<html><body><div class="pg-sum-top"><div class="pg-ring" style="--p:{pct}" title="Overall progress">'
+                 '<b>{pct}%</b></div><div class="pg-now"><div class="pg-k">Current stage</div>'
+                 '<div class="pg-stage">{stage}</div><div class="pg-status">{status}</div></div></div>'
+                 '<ol><li class="tm-item done">1. Application Received Submitted</li></ol></body></html>')
+
+
+def test_the_progress_page_is_read_by_its_own_classes():
+    from src.scraper.parsers import StudentListLayoutError, parse_progress_page
+    page_ = PROGRESS_PAGE.format(pct=22, stage="Payment Verified", status="Verified")
+    assert parse_progress_page(page_) == {"pct": 22, "stage": "Payment Verified", "status": "Verified"}
+    with pytest.raises(StudentListLayoutError):
+        parse_progress_page("<html><body>a new layout</body></html>")
+
+
+def test_a_progress_page_on_another_stage_or_not_read_is_said_so(export):
+    export.rows = csv_rows(
+        ("Direct", "HNG-2026-922", "ALPHA", "", KLP, "DECEMBER 2026", "", "Verified", "44"),
+        ("Direct", "HNG-2026-923", "BETA", "", KLP, "DECEMBER 2026", "", "Verified", "44"),
+        ("Direct", "HNG-2026-924", "GAMMA", "", KLP, "DECEMBER 2026", "", "Verified", "44"))
+    portal_list = listed(("HNG-2026-922", "ALPHA", "Documents Verified", ""),
+                         ("HNG-2026-923", "BETA", "Documents Verified", ""),
+                         ("HNG-2026-924", "GAMMA", "Documents Verified", ""))
+    progress = {"1": {"pct": 33, "stage": "Documents Under Review", "status": "Submitted"},
+                "2": {"error": "progress.php: the portal did not answer in time (ReadTimeout)"},
+                "3": {"pct": 44, "stage": "Documents Verified", "status": "Verified"}}
+    text = stage_report.stage_report("KLP", "DECEMBER 2026", listed=portal_list, progress=progress)
+    # The bucket is the stage the list stores (what the portal's filter and dashboard count); the
+    # progress page's own, other stage is shown as the page's, never silently.
+    assert "• Documents Verified: 3" in text
+    assert "   HNG-2026-922 ALPHA — progress page: Documents Under Review · Submitted — 33%" in text
+    assert "   HNG-2026-923 BETA — progress page not read" in text
+    assert "   HNG-2026-924 GAMMA — Verified — 44%" in text
+    assert ("⚠️ 1 of the 3 progress pages could not be read (progress.php: the portal did not answer in time "
+            "(ReadTimeout)): those lines show no status or %.") in text
+
+
+def test_reading_progress_pages_stops_once_the_portal_is_gone(monkeypatch):
+    made = []
+
+    class Client:
+        def __init__(self):
+            made.append(self)
+            self.asked, self.closed = [], False
+
+        async def fetch_html(self, path, timeout=60.0, params=None):
+            self.asked.append(params["uid"])
+            raise PortalUnavailable("progress.php: could not connect to the portal (ConnectError)", unreachable=True)
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(client_module, "HangeulAdminClient", Client)
+    got = stage_report.read_progress([str(n) for n in range(1, 60)])
+    assert made[0].asked == ["1"] and made[0].closed              # one try, not 59 timeouts in a row
+    assert len(got) == 59 and all(p == {"error": "progress.php: could not connect to the portal (ConnectError)"}
+                                  for p in got.values())
 
 
 def test_a_stage_report_that_cannot_read_the_portal_says_so(monkeypatch, export, capsys):

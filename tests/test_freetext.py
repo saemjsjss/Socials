@@ -110,18 +110,21 @@ def window_page(*statuses):
     return f"<table>{head}{rows}</table>"
 
 
-def rm_item(title, kind, sub, progress=""):
+def rm_item(title, kind, sub, progress="", eid=""):
     bar = f'<div style="margin-top:6px"><div style="font-size:10.5px">{progress}</div></div>' if progress else ""
+    href = f"calendar.php?ym=2026-09&amp;view=month&amp;edit={eid}" if eid else "calendar.php"
     return ('<div class="rm-item"><span><i></i></span><div style="flex:1;min-width:0">'
-            f'<a href="calendar.php?edit=1" class="rm-title">{title}</a>'
+            f'<a href="{href}" class="rm-title">{title}</a>'
             f'<div style="font-size:11.5px"><span style="font-weight:700">{kind}</span> {sub}</div>{bar}</div>'
             '<form><button class="rm-done">Complete</button></form></div>')
 
 
-def ev_row(day, month, title, kind, sub, status):
+def ev_row(day, month, title, kind, sub, status, eid="", note=""):
+    href = f"calendar.php?ym=2026-09&amp;view=month&amp;edit={eid}" if eid else "calendar.php"
+    note = f'<div style="font-size:11.5px;color:#475569;margin-top:2px">{note}</div>' if note else ""
     return (f'<div class="ev-row"><div class="li-date"><div class="d">{day}</div><div class="w">{month}</div></div>'
-            f'<span class="ev-ic"><i></i></span><div class="ev-main"><a class="ev-title" href="calendar.php?edit=2">{title}</a>'
-            f'<div class="ev-sub"><span style="font-weight:700">{kind}</span> {sub}</div></div>'
+            f'<span class="ev-ic"><i></i></span><div class="ev-main"><a class="ev-title" href="{href}">{title}</a>'
+            f'<div class="ev-sub"><span style="font-weight:700">{kind}</span> {sub}</div>{note}</div>'
             f'<span class="st ok">{status}</span></div>')
 
 
@@ -142,21 +145,23 @@ EV = [
 
 
 def calendar_html(ev=EV, with_ev=True):
-    reminders = (rm_item("SEJONG DHL", "DHL to send", "· 26 Sep–28 Sep · 14:00 · Sejong University")
-                 + rm_item("JEONBUK DHL", "DHL to send", "· 26 Sep–05 Oct · 14:00 · Jeonbuk University")
+    # Each entry carries its event's own id in its edit link, as the portal's do (the EV list's "id").
+    reminders = (rm_item("SEJONG DHL", "DHL to send", "· 26 Sep–28 Sep · 14:00 · Sejong University", eid=1)
+                 + rm_item("JEONBUK DHL", "DHL to send", "· 26 Sep–05 Oct · 14:00 · Jeonbuk University", eid=2)
                  + rm_item("Jeonbuk University - Application open", "Application period",
-                           "· 21 Sep–02 Oct · 14:00 · Jeonbuk University", "64% of window elapsed · 4 days left")
+                           "· 21 Sep–02 Oct · 14:00 · Jeonbuk University", "64% of window elapsed · 4 days left",
+                           eid=3)
                  + rm_item("FAR EAST UNIVERSITY- APPLICATION OPEN", "Application period",
-                           "· 01 Sep–09 Oct · FAR EAST UNIVERSITY", "71% of window elapsed · 11 days left"))
+                           "· 01 Sep–09 Oct · FAR EAST UNIVERSITY", "71% of window elapsed · 11 days left", eid=6))
     upcoming = (ev_row(21, "Sep", "Jeonbuk University - Application open", "Application period",
-                       "· 21 Sep · <b>14:00</b> – 02 Oct 2026 · Jeonbuk University", "Closes in 4 days")
-                + ev_row(26, "Sep", "SEJONG DHL", "DHL to send", "· 26 Sep · Sejong University", "Today")
-                + ev_row(26, "Sep", "JEONBUK DHL", "DHL to send", "· 26 Sep · Jeonbuk University", "In 7 days")
+                       "· 21 Sep · <b>14:00</b> – 02 Oct 2026 · Jeonbuk University", "Closes in 4 days", eid=3)
+                + ev_row(26, "Sep", "SEJONG DHL", "DHL to send", "· 26 Sep · Sejong University", "Today", eid=1)
+                + ev_row(26, "Sep", "JEONBUK DHL", "DHL to send", "· 26 Sep · Jeonbuk University", "In 7 days", eid=2)
                 # Next month's events are only on the 45-day timeline, never in the month's event list.
                 + ev_row(7, "Oct", "GACHON UNIVERSITY - APPLICATION OPEN", "Application period",
-                         "· 07 Oct – 14 Oct 2026 · GACHON UNIVERSITY", "Opens in 9 days")
+                         "· 07 Oct – 14 Oct 2026 · GACHON UNIVERSITY", "Opens in 9 days", eid=7)
                 + ev_row(8, "Oct", "DANKOOK UNIVERSITY DHL", "DHL to send", "· 08 Oct · DANKOOK UNIVERSITY",
-                         "In 10 days"))
+                         "In 10 days", eid=8))
     script = f"<script>var EV = {json.dumps(ev)};\nvar X = 1;</script>" if with_ev else ""
     return ('<div class="cal-layout">'
             '<div class="cal-card"><div class="sec-h"><i></i>Reminders for today<small>· Monday, 28 Sep 2026 · 4 items'
@@ -451,7 +456,7 @@ def test_the_facts_the_llm_picks_are_shown_word_for_word(live, monkeypatch):
 def test_deadlines_this_week_apply_real_dates(live):
     text, _, _ = ask_bot("any deadlines this week")
     assert "📅 *Deadlines — this week (Mon 28 Sep – Sun 04 Oct 2026)*" in text
-    assert "• Deadlines: `2`" in text
+    assert "• Deadlines still open: `2`" in text
     assert "*SEJONG DHL* — DHL to send · Sejong University · 26 Sep–28 Sep — due *today* (Mon 28 Sep)" in text
     assert "closes Fri 02 Oct (4 days left)" in text
     assert "FAR EAST" not in text and "HANYANG" not in text and "GACHON" not in text
@@ -461,11 +466,11 @@ def test_deadlines_this_week_apply_real_dates(live):
 
 def test_dhl_questions_and_searches(live):
     text, _, _ = ask_bot("DHL shipping status")
-    assert "• DHL shipments: `3`" in text and "DANKOOK UNIVERSITY DHL" in text     # from the 45-day timeline
+    assert "• DHL shipments still to send: `3`" in text and "DANKOOK UNIVERSITY DHL" in text     # from the 45-day timeline
     assert "due Thu 08 Oct (10 days left)" in text
     assert "_Marked done: HANYANG BACHELOR (due 22 Sep)._" in text
     text, _, _ = ask_bot("any DHL shipping due this week")
-    assert "• DHL shipments: `1`" in text and "SEJONG DHL" in text and "JEONBUK DHL, due Mon 05 Oct" in text
+    assert "• DHL shipments still to send: `1`" in text and "SEJONG DHL" in text and "JEONBUK DHL, due Mon 05 Oct" in text
     chat, _ = run(telegram_bot.calendar_command, "/calendar Hanyang", ["Hanyang"])
     text = report_of(chat)
     assert "matching “hanyang”" in text and "HANYANG UNIVERSITY - APPLICATION OPEN" in text

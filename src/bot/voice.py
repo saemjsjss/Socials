@@ -25,6 +25,7 @@ Voice service contract (127.0.0.1 only):
              -> OGG/Opus body, headers X-Duration / X-Seconds (text over 600 chars -> 413)
 """
 import asyncio
+import calendar
 import json
 import logging
 import os
@@ -553,9 +554,86 @@ async def route(heard: str, turns=()) -> Optional[dict]:
         return None
     query = re.sub(r"\s+", " ", _plain(str(data.get("english_query") or ""))).strip()[:200]
     day = _iso_day(data.get("date"))
+    problem = None
     if data["command"] in _DATED_COMMANDS:
-        day = _relative_day(heard, now.date()) or day
-    return {"command": data["command"], "date": day, "english_query": query}
+        relative = _relative_day(heard, now.date())
+        if relative is not None:
+            day = relative
+        else:
+            day, problem = _words_date(day, heard, query, now.date())
+    return {"command": data["command"], "date": day, "english_query": query, "date_problem": problem}
+
+
+# A Korean date: 9월 31일, 구월 삼십일일 (digits or Sino-Korean number words; 시월 and 유월 as spoken).
+_KO_DATE_RE = re.compile(r"(?P<m>\d{1,2}|[일이삼사오육유칠팔구시십]+)\s*월\s*(?P<d>\d{1,2}|[일이삼사오육칠팔구십]+)\s*일(?!요)")
+# A day of the month alone, "the 25th" (a day next to a month is _QUERY_DAY_RE's), and in Korean,
+# 25일 / 이십오일 (not after a month, not 일요일 or 십일월).
+_ORDINAL_DAY_RE = re.compile(r"\b(?P<n>\d{1,3})(?:st|nd|rd|th)\b", re.I)
+_KO_DAY_RE = re.compile(r"(?<![\d일이삼사오육유칠팔구시십월])(?<!월 )(?P<n>\d{1,2}|[일이삼사오육칠팔구십]+)\s*일(?![요월])")
+
+
+def _ko_number(word: str) -> int:
+    if word.isdigit():
+        return int(word)
+    return {"시": 10, "유": 6}.get(word) or _ko_sino_value(word)
+
+
+def _words_dates(text: str, today: date) -> Tuple[set, set, Optional[str]]:
+    """What dates the words name: (the dates, the days of a month named alone ("the 25th"), why a
+    date in them cannot be read ("31 September: September has 30 days", "9월 31일: September has
+    30 days", "45th: no month has a day 45"), or None)."""
+    from src.dates import MONTH_NAMES, parse_user_date, user_date_problem
+    text = text or ""
+    named = set(_query_days(text, today))
+    for past in (True, False):
+        one = parse_user_date(text, today, prefer_past=past)
+        if one is not None:
+            named.add(one)
+    problem = None
+    for m in _KO_DATE_RE.finditer(text):
+        month, day = _ko_number(m.group("m")), _ko_number(m.group("d"))
+        if not 1 <= month <= 12:
+            problem = problem or f"{m.group(0)}: there is no month {month}"
+            continue
+        days = calendar.monthrange(today.year, month)[1]
+        if not 1 <= day <= days:
+            problem = problem or f"{m.group(0)}: {MONTH_NAMES[month - 1]} has {days} days"
+            continue
+        named.add(date(today.year, month, day))
+    why = user_date_problem(text, today, prefer_past=True) if not _HANGUL_RE.search(text) else None
+    if why and ":" in why and not why.startswith("it names more than one date"):
+        problem = problem or why                # a date written out that does not exist
+    ordinals = set()
+    alone = [(m.group(0), int(m.group("n"))) for m in _ORDINAL_DAY_RE.finditer(_QUERY_DAY_RE.sub(" ", text))]
+    alone += [(m.group(0), _ko_number(m.group("n"))) for m in _KO_DAY_RE.finditer(text)]
+    for words, n in alone:
+        if 1 <= n <= 31:
+            ordinals.add(n)
+        else:
+            problem = problem or f"{words}: no month has a day {n}"
+    return named, ordinals, problem
+
+
+def _words_date(day: Optional[date], heard: str, english: str, today: date) -> Tuple[Optional[date], Optional[str]]:
+    """The brain's date checked against the words: (the day to use, why the words' date cannot be
+    read). A date the words name that does not exist ("31 September", "February 30", "the 45th",
+    9월 31일) is (None, why), never another day the brain made of it. When the words name dates, the
+    brain's must be one of them (or the day of the month named alone); otherwise the words' own one
+    date is used (None when they name several). Words that name no calendar date keep the brain's
+    reading (relative words such as "two days ago")."""
+    named, ordinals, dated = set(), set(), False
+    for text in (heard, english):
+        found, days, problem = _words_dates(text, today)
+        if problem:
+            return None, problem
+        named |= found
+        ordinals |= days
+        dated = dated or bool(found or days or _CALENDAR_RE.search(text or ""))
+    if day is None or not dated:
+        return day, None
+    if day in named or (day.month, day.day) in {(d.month, d.day) for d in named} or (not named and day.day in ordinals):
+        return day, None
+    return (next(iter(named)) if len(named) == 1 else None), None
 
 
 def _portal_day(day: date) -> str:
@@ -576,6 +654,19 @@ async def _dispatch(routed: dict, update, context, heard: str) -> tuple:
     today = _now().date()
 
     awaiting = ud.get("awaiting_date_for")
+    problem = routed.get("date_problem")
+    if awaiting and problem is None and command == "chat":
+        problem = _words_date(None, heard, query, today)[1]     # an answer to the bot's date question
+    if problem and (awaiting or command in _DATED_COMMANDS):
+        # The words name a date that does not exist ("31 September", "the 45th"): the command's own
+        # "I couldn't read that date" reply, as when typed, with nothing read from the portal and no
+        # other day (not the brain's, not today) in its place. A date question the bot asked stays open.
+        from src.bot.replies import date_error_reply
+        kind = awaiting or {"verified": "verified", "inquiries": "inquiries"}.get(command.split("_")[0], "crosscheck")
+        shown = {"verified": "/verified_date", "inquiries": "/inquiries_date",
+                 "crosscheck_range": "/crosscheck_range"}.get(kind, "/crosscheck_date")
+        await update.message.reply_text(date_error_reply(heard, shown, reason=problem), parse_mode="Markdown")
+        return f"{kind}:date_error", None
     if awaiting == "crosscheck_range":
         # The bot asked for a START and an END date: never collapse the answer to one day.
         span = _span(query, today, need_range_word=False)
@@ -843,9 +934,17 @@ _NOTHING_RE = re.compile(
     r"|\bno\s+(?:[\w-]+\s+){0,4}(?:found|were|was|yet|recorded)\b", re.I)
 # Jennie says "0" in words: 없어요 / 없어용 / 없습니다, "no students", "none", "nobody".
 _SAID_NOTHING_RE = re.compile(
-    r"없(?:어|었|습|네|대|음|다)|\b(?:none|nobody|nothing)\b|\bno\s+(?:new\s+|more\s+)?(?:students?|"
+    r"없(?:어|었|습|네|대|음|다)|\b(?:none|nobody|nothing|zero)\b|\bno\s+(?:[\w'’-]+\s+){0,3}(?:students?|"
     r"consultations?|inquir(?:y|ies)|payments?|verifications?|cases?|records?|passports?|documents?|"
-    r"issues?|events?|deadlines?|applications?|leads?|one)\b", re.I)
+    r"issues?|events?|deadlines?|applications?|leads?|one|shipments?|items?|reminders?|requests?)\b"
+    r"|\b(?:are|is|was|were|do|does|did)(?:n[’']t|\s+not)\s+(?:have\s+)?any\b", re.I)
+# The written answer of a portal read that failed (replies.portal_error_reply, the calendar's
+# "could not be read"): Jennie says exactly that, in words built here, never the brain's.
+_PORTAL_DOWN_RE = re.compile(r"couldn[’']t read the portal|could not be read", re.I)
+_PORTAL_DOWN_LINE = {
+    "en": "Sorry, I couldn't read the portal just now, so I can't say. Please try again in a minute.",
+    "ko": "지금은 포털을 못 읽었어요. 잠시 후 다시 물어봐 주세용!",
+}
 
 
 def _facts_ok(said: str, *sources: str) -> bool:
@@ -1062,7 +1161,10 @@ _KO_TOPICS = (
     (r"records? audited|cross-?checked", "크로스체크한 학생은", "명", False),
     (r"^pending payments?", "결제 대기 중인 학생은", "명", False),
     (r"applications? under review|^under review", "심사 중인 지원서는", "건", False),
+    (r"^deadlines still open", "남은 마감은", "건", False),
+    (r"^deadlines already passed", "지난 마감은", "건", False),
     (r"^deadlines", "마감은", "건", False),
+    (r"^dhl shipments still to send", "아직 보낼 DHL은", "건", False),
     (r"^dhl shipments", "DHL 발송은", "건", False),
     (r"^calendar items", "일정은", "개", False),
     (r"^reminders for today", "오늘 일정은", "개", True),
@@ -1178,6 +1280,9 @@ async def spoken_reply(question: str, language: str, answer: str = "", turns=(),
             return spoken
         return _clean_reply(_english_line(facts, day, today), "en", REPLY_MAX_CHARS["en"]) or _FALLBACK[("en", True)]
 
+    if _PORTAL_DOWN_RE.search(answer):
+        # A failed read has no figure to say, and the brain words it as "no pending payments".
+        return _clean_reply(_PORTAL_DOWN_LINE[language], language, REPLY_MAX_CHARS[language]) or _FALLBACK[(language, True)]
     written = _plain(answer)[:ANSWER_MAX_CHARS]
     prompt = (f"{history}The user just said (spoken): {question}\n\n"
               f"The day: {when or '(none)'}\n\nFacts the bot just read from the portal: (none)\n\n"

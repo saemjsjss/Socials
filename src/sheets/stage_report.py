@@ -2,11 +2,13 @@
 Stage report per program + intake (used by the Telegram /stage menu).
 
 Reads the live portal, read-only: the students (Direct only, the same students as the progress
-sheets), their program, intake, status and progress % come from students.php?export=csv; each
-student's stage comes from the student list itself, the "Stage · Applied" column of every
-students.php page (the stage the portal stores, the same as the row's own stage select). The
-CSV's "Current Stage" is not used: it disagrees with the stored stage for some students (both
-pending-payment applicants show "Payment Verified" there, Sep 2026).
+sheets), their program and intake come from students.php?export=csv; each student's stage comes
+from the student list itself, the "Stage · Applied" column of every students.php page (the stage
+the portal stores, the same as the row's own stage select); each student's status and progress %
+come from their own progress page, progress.php?uid=N (its ring and "Current stage" block), read
+just now. The CSV's "Current Stage", "Current Status" and "Progress %" are not used: they are
+stale for many students (Sep 2026: 64 of 329 statuses and 89 of 329 % disagreed with the
+progress pages, and both pending-payment applicants showed "Payment Verified" as their stage).
 
 CLI (run from the BOT folder):
   python -m src.sheets.stage_report --program KLP                      # list its intakes (JSON)
@@ -18,6 +20,7 @@ line (report), never an empty list or a stage made up.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import re
 import time
@@ -59,10 +62,53 @@ def _digits(text: str) -> str:
     return re.sub(r"\D", "", str(text or ""))[-10:]
 
 
-def attach_stages(rows: List[Dict[str, str]], listed: List[Dict[str, Any]]) -> List[Tuple[Dict[str, str], Optional[str]]]:
-    """Each CSV row with its stage from the student list: matched by Student ID, else (a student
-    without an ID yet) by name, with the mobile number to tell apart two students of one name.
-    A row the list does not have gets None (reported as not found, never guessed)."""
+PROGRESS_READERS = 4          # progress pages read at a time (read-only GETs)
+
+
+def read_progress(uids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Each student's own progress page, progress.php?uid=N (read-only GETs, with a portal session
+    of its own, PROGRESS_READERS at a time) -> {uid: {"pct", "stage", "status"}
+    (parsers.parse_progress_page) or {"error": why it could not be read}}. Once the portal stops
+    answering (a timeout, a refused connection, a failed login), the pages left are not asked for:
+    they get the same reason."""
+    from src.scraper.client import HangeulAdminClient, PortalUnavailable, portal_error_reason
+    from src.scraper.parsers import StudentListLayoutError, parse_progress_page
+
+    async def read():
+        client = HangeulAdminClient()
+        out: Dict[str, Dict[str, Any]] = {}
+        gone: List[str] = []                 # why the portal stopped answering, once it has
+        gate = asyncio.Semaphore(PROGRESS_READERS)
+
+        async def one(uid: str) -> None:
+            async with gate:
+                if gone:
+                    out[uid] = {"error": gone[0]}
+                    return
+                try:
+                    html = await client.fetch_html("progress.php", timeout=30.0, params={"uid": uid})
+                    out[uid] = await asyncio.to_thread(parse_progress_page, html)
+                except StudentListLayoutError as e:
+                    out[uid] = {"error": str(e)}
+                except Exception as e:
+                    out[uid] = {"error": portal_error_reason(e)}
+                    if isinstance(e, PortalUnavailable) and (e.unreachable or "log in" in e.reason):
+                        gone.append(e.reason)
+
+        try:
+            if uids:
+                await one(uids[0])           # the login, once, before the rest go side by side
+                await asyncio.gather(*(one(u) for u in uids[1:]))
+            return out
+        finally:
+            await client.close()
+    return pb._run_async(read())
+
+
+def match_listed(rows: List[Dict[str, str]], listed: List[Dict[str, Any]]) -> List[Optional[Dict[str, Any]]]:
+    """Each CSV row's student on the student list: matched by Student ID, else (a student without
+    an ID yet) by name, with the mobile number to tell apart two students of one name. None for a
+    row the list does not have (reported as not found, never guessed)."""
     by_id = {s["student_id"].upper(): s for s in listed if s.get("student_id")}
     claimed = {pb.clean_value(r.get("Student ID", "")).upper() for r in rows} & set(by_id)
     out = []
@@ -77,9 +123,18 @@ def attach_stages(rows: List[Dict[str, str]], listed: List[Dict[str, Any]]) -> L
                 mobile = _digits(r.get("Mobile", ""))
                 same = [x for x in same if mobile and _digits((x.get("details") or {}).get("Mobile", "")) == mobile]
             s = same[0] if len(same) == 1 else None
-        stage = None if s is None else ((s.get("status") or "").strip() or "(no stage)")
-        out.append((r, stage))
+        out.append(s)
     return out
+
+
+def _stage_of(s: Optional[Dict[str, Any]]) -> Optional[str]:
+    return None if s is None else ((s.get("status") or "").strip() or "(no stage)")
+
+
+def attach_stages(rows: List[Dict[str, str]], listed: List[Dict[str, Any]]) -> List[Tuple[Dict[str, str], Optional[str]]]:
+    """Each CSV row with its stage from the student list (match_listed); None for a row the list
+    does not have."""
+    return [(r, _stage_of(s)) for r, s in zip(rows, match_listed(rows, listed))]
 
 
 def program_students(program_key: str) -> List[Dict[str, str]]:
@@ -106,9 +161,26 @@ def _intake_sort_key(intake: str):
         return (9999, 99)
 
 
-def stage_report(program_key: str, intake: str, listed: Optional[List[Dict[str, Any]]] = None) -> str:
+def _progress_words(page: Optional[Dict[str, Any]], stage: str) -> str:
+    """A student's line's status and % from their progress page: "Verified — 22%"; the page's own
+    stage first when it is not the stage the list stores ("progress page: Documents Under Review ·
+    Submitted — 33%"); "progress page not read" when it could not be read."""
+    if page is None:
+        return ""
+    if "error" in page:
+        return "progress page not read"
+    status = page.get("status") or ""
+    if _norm(page.get("stage")) != _norm(stage):
+        status = "progress page: " + " · ".join(x for x in (page.get("stage"), status) if x)
+    return " — ".join(x for x in (status, f"{page['pct']}%") if x)
+
+
+def stage_report(program_key: str, intake: str, listed: Optional[List[Dict[str, Any]]] = None,
+                 progress: Optional[Dict[str, Dict[str, Any]]] = None) -> str:
     """The stage report of one program + intake. `listed` is the student list (students.php, every
-    page); read live when not given. Raises PortalUnavailable when it cannot be read."""
+    page) and `progress` each listed student's progress page by uid (read_progress); each is read
+    live when not given. Raises PortalUnavailable when the student list cannot be read; a progress
+    page that cannot be read leaves its line without a status (and the report says how many)."""
     cfg = pb.PROGRAMS[program_key]
     want = "" if intake == NO_INTAKE else pb.normalize_intake(intake)
     rows = [s for s in program_students(program_key) if pb.normalize_intake(s.get("Intake", "")) == want]
@@ -119,9 +191,12 @@ def stage_report(program_key: str, intake: str, listed: Optional[List[Dict[str, 
         out.append("\nNo students.")
         return "\n".join(out)
 
-    by_stage: Dict[str, List[Dict[str, str]]] = {}
-    for s, stage in attach_stages(rows, read_listed_students() if listed is None else listed):
-        by_stage.setdefault(stage or NOT_FOUND, []).append(s)
+    matched = match_listed(rows, read_listed_students() if listed is None else listed)
+    uids = list(dict.fromkeys(s["uid"] for s in matched if s is not None and s.get("uid")))
+    pages = read_progress(uids) if progress is None else progress
+    by_stage: Dict[str, List[Tuple[Dict[str, str], Optional[Dict[str, Any]]]]] = {}
+    for r, s in zip(rows, matched):
+        by_stage.setdefault(_stage_of(s) or NOT_FOUND, []).append((r, s))
     order = sorted(by_stage, key=lambda st: STAGE_ORDER.index(st) if st in STAGE_ORDER else
                    (100 if st == NOT_FOUND else 99))
 
@@ -130,12 +205,21 @@ def stage_report(program_key: str, intake: str, listed: Optional[List[Dict[str, 
         out.append(f"• {st}: {len(by_stage[st])}")
     for st in order:
         out.append(f"\n🔹 {st} ({len(by_stage[st])})")
-        for s in sorted(by_stage[st], key=lambda x: x.get("Student ID", "")):
-            status = s.get("Current Status", "").strip()
-            pct = s.get("Progress %", "").strip()
-            extra = " — ".join(x for x in (status, f"{pct}%" if pct else "") if x)
-            out.append(f"   {s.get('Student ID') or '(no ID)'} {s.get('Full Name', '')}"
+        for r, s in sorted(by_stage[st], key=lambda x: x[0].get("Student ID", "")):
+            page = pages.get(s["uid"]) if s is not None and s.get("uid") else None
+            if page is None and s is not None and s.get("uid"):
+                page = {"error": "not read"}
+            extra = _progress_words(page, st)
+            out.append(f"   {r.get('Student ID') or '(no ID)'} {r.get('Full Name', '')}"
                        + (f" — {extra}" if extra else ""))
+    unread = [pages.get(u) or {"error": "not read"} for u in uids]
+    unread = [p["error"] for p in unread if "error" in p]
+    if unread:
+        why = Counter(unread).most_common(1)[0][0]
+        out.append(f"\n⚠️ {len(unread)} of the {len(uids)} progress pages could not be read ({why}): "
+                   "those lines show no status or %.")
+    if len(unread) < len(uids):
+        out.append("\nStatus and % from each student's own progress page (progress.php), read just now.")
     return "\n".join(out)
 
 

@@ -632,7 +632,7 @@ def test_no_amount_or_method_is_ever_made_up(portal):
         row(1, 1, "NO AMOUNT ROW", by="LINA PARVIN", when="27 Sep, 09:00", applied="1 Sep 2026"),
         verified(2, 2, "PAID ROW", "27 Sep, 10:00", amount="8,000.00 BDT", method="bKash", applied="1 Sep 2026"))
     text = report_of(run(telegram_bot.verified_date_command, "/verified_date 27 Sep 2026", ["27", "Sep", "2026"])[0])
-    assert "৳ 8,000.00 BDT` (the 1 with an amount on the portal; 1 without)" in text
+    assert "৳ 8,000.00 BDT` (the sum of the verified income; the 1 with an amount on the portal, 1 without)" in text
     assert "20,000" not in text and "*Payment:* `—`" in text
     only = page(row(1, 1, "NO AMOUNT ROW", by="LINA PARVIN", when="27 Sep, 09:00", applied="1 Sep 2026"))
     portal.pages["students.php"] = only

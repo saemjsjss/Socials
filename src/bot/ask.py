@@ -872,7 +872,8 @@ class CalItem(NamedTuple):
     start: Optional[date]
     end: Optional[date]         # the last day: when it closes, or when the DHL must go
     done: bool
-    note: str
+    note: str                   # the event's own note: its program ("MASTER'S PROGRAM") or free text
+    id: str = ""                # the portal's own event id ("" when the page shows none)
 
 
 class CalendarQuery(NamedTuple):
@@ -978,7 +979,9 @@ def _status_days(status: str, today: date) -> Tuple[Optional[date], Optional[dat
 
 def _ev_items(html: str) -> Optional[List[CalItem]]:
     """The month's event list the calendar page carries as data (var EV = [...]): each with its
-    full start and end dates. None when the page has none."""
+    own id, full start and end dates and its notes (the program: two events with one title, such
+    as a university's Master's and Bachelor's application periods, are two items). None when the
+    page has none."""
     m = re.search(r"\bvar\s+EV\s*=\s*", html or "")
     if not m:
         return None
@@ -999,7 +1002,8 @@ def _ev_items(html: str) -> Optional[List[CalItem]]:
             continue
         kind = str(e.get("type") or "")
         items.append(CalItem(str(e["title"]).strip(), _EV_KINDS.get(kind.lower(), kind.title() or "Event"),
-                             str(e.get("uni") or "").strip(), start, end, bool(e.get("done")), ""))
+                             str(e.get("uni") or "").strip(), start, end, bool(e.get("done")),
+                             re.sub(r"\s+", " ", str(e.get("notes") or "")).strip(), str(e.get("id") or "").strip()))
     return items
 
 
@@ -1008,31 +1012,43 @@ def _key(title: str) -> str:
 
 
 def calendar_items(html: str, today: Optional[date] = None) -> Tuple[List[CalItem], bool]:
-    """Every calendar item calendar.php shows, once: the month's event list (full dates), today's
-    reminders ("26 Sep–05 Oct") and the 45-day timeline (its date, range and status, "Closes in 4
-    days"), matched by title and start. -> (items, whether the page's layout was recognised)."""
+    """Every calendar item calendar.php shows, once: the month's event list (full dates, notes),
+    today's reminders ("26 Sep–05 Oct") and the 45-day timeline (its date, range and status,
+    "Closes in 4 days"). An entry is matched by the portal's own event id (its edit link) when it
+    has one, else by title, start and note; two different ids are never one item, so a
+    university's Master's and Bachelor's periods with one title and the same dates stay two.
+    -> (items, whether the page's layout was recognised)."""
     from src.scraper.parsers import parse_calendar_events
     today = today or local_today()
     cal = parse_calendar_events(html)
     ev = _ev_items(html)
-    items: Dict[Tuple[str, Optional[date]], CalItem] = {}
+    items: List[CalItem] = []
+    ids = set()
     for item in ev or []:
-        items.setdefault((_key(item.title), item.start), item)
+        if item.id and item.id in ids:
+            continue                                # the same event twice in the list
+        ids.add(item.id)
+        items.append(item)
 
-    def add(title, kind, where, start, end, note):
-        """An item from the page's lists: the one already known (same title, and the same start
-        when both have one) gets what it lacks; another is added."""
-        k = _key(title)
-        for (t, s), v in list(items.items()):
-            if t == k and (start is None or s is None or s == start):
-                items[(t, s)] = v._replace(start=v.start or start, end=v.end or end, note=v.note or note,
-                                           where=v.where or where)
+    def same(v: CalItem, cid: str, title: str, start: Optional[date], note: str) -> bool:
+        if cid and v.id:
+            return cid == v.id
+        return (_key(v.title) == _key(title) and (start is None or v.start is None or v.start == start)
+                and (not note or not v.note or _key(v.note) == _key(note)))
+
+    def add(cid, title, kind, where, start, end, note):
+        """An item from the page's lists: the one already known (the same id; without one, the same
+        title, and the same start and note when both have one) gets what it lacks; another is added."""
+        for n, v in enumerate(items):
+            if same(v, cid, title, start, note):
+                items[n] = v._replace(start=v.start or start, end=v.end or end, note=v.note or note,
+                                      where=v.where or where, id=v.id or cid)
                 return
-        items[(k, start)] = CalItem(title, kind or "Event", where, start, end, False, note)
+        items.append(CalItem(title, kind or "Event", where, start, end, False, note, cid))
 
     for r in cal.get("today_reminders") or []:
         start, end = _cal_range(r.get("date_range") or "", today)
-        add(r["title"], r.get("type"), r.get("where") or "", start, end, r.get("program") or "")
+        add(r.get("id") or "", r["title"], r.get("type"), r.get("where") or "", start, end, r.get("program") or "")
     for u in cal.get("upcoming_events") or []:
         near = today
         start, end = _cal_range(u.get("date_range") or u.get("date") or "", near)
@@ -1043,11 +1059,11 @@ def calendar_items(html: str, today: Optional[date] = None) -> Tuple[List[CalIte
         done = bool(re.search(r"\b(?:done|completed)\b", u.get("status") or "", re.I))
         if done:
             continue
-        add(u["title"], u.get("type"), u.get("university") or "", start, end, u.get("program") or "")
+        add(u.get("id") or "", u["title"], u.get("type"), u.get("university") or "", start, end, u.get("program") or "")
     ok = ev is not None or bool(cal.get("layout_ok")) or bool(cal.get("upcoming_ok"))
     unique, seen = [], set()
-    for item in items.values():
-        sig = (_key(item.title), item.kind, item.start, item.end)
+    for item in items:
+        sig = item.id or (_key(item.title), item.kind, item.start, item.end, _key(item.note))
         if sig not in seen:
             seen.add(sig)
             unique.append(item)
@@ -1085,7 +1101,9 @@ def calendar_answer(items: List[CalItem], q: CalendarQuery, today: date) -> str:
         else:
             pool = [i for i in pool if (i.start or i.end) is not None and (i.start or i.end) <= last
                     and (i.end or i.start) >= w.first]
-    pool.sort(key=lambda i: (i.end or i.start or date.max, i.title))
+    elif q.deadlines:
+        pool = [i for i in pool if i.end is not None]       # a deadline is an item's last day
+    pool.sort(key=lambda i: (i.end or i.start or date.max, i.title, i.note))
 
     what = "DHL shipments" if q.dhl else "Deadlines" if q.deadlines else "Calendar items"
     head = what
@@ -1093,13 +1111,25 @@ def calendar_answer(items: List[CalItem], q: CalendarQuery, today: date) -> str:
         head += " matching “" + esc(" ".join(q.words)) + "”"
     if w is not None:
         head += f" — {esc(w.title())}"
-    lines = [f"📅 *{head}*", f"• {what}: `{len(pool)}`"]
+    # The count's own words say where the items stand (Jennie speaks from this line): none of the
+    # items counted is marked done on the portal.
+    if q.dhl:
+        counted = "DHL shipments still to send"
+    elif q.deadlines and pool and all(i.end >= today for i in pool):
+        counted = "Deadlines still open"
+    elif q.deadlines and pool and all(i.end < today for i in pool):
+        counted = "Deadlines already passed"
+    else:
+        counted = what
+    from src.scraper.parsers import _CAL_PROGRAM_RE
+    lines = [f"📅 *{head}*", f"• {counted}: `{len(pool)}`"]
     for n, i in enumerate(pool[:MAX_CALENDAR_LISTED], 1):
         bits = [esc(i.kind)] + ([esc(i.where)] if i.where and i.where.lower() not in i.title.lower() else [])
         span = ""
         if i.start and i.end and i.start != i.end:
             span = f" · {i.start:%d %b}–{i.end:%d %b}"
-        lines.append(f"{n}. *{esc(i.title)}* — {' · '.join(bits)}{span} — {_when_due(i, today)}")
+        program = f" ({esc(i.note)})" if i.note and _CAL_PROGRAM_RE.search(i.note) and len(i.note) <= 40 else ""
+        lines.append(f"{n}. *{esc(i.title)}*{program} — {' · '.join(bits)}{span} — {_when_due(i, today)}")
     if len(pool) > MAX_CALENDAR_LISTED:
         lines.append(f"_...and {len(pool) - MAX_CALENDAR_LISTED} more._")
     if not pool:

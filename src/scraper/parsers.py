@@ -326,8 +326,11 @@ def parse_students_page(html: str) -> Dict[str, Any]:
       student_id    the HNG id ("HNG-2026-931"), "" before one is given; "id" is the same (older name)
       student_name  the Student column's name; sl, the row's SL number
       target_university, program, target_intake, docs_status, payment_status: the columns as
-                    shown ("" where the portal shows "—"); status = the stage ("Payment Verified"),
-                    applied_date = the day under it ("28 Sep 2026")
+                    shown ("" where the portal shows "—"; the university is the cell's own .stu-uni
+                    line); status = the stage ("Payment Verified"), applied_date = the day under it
+                    ("28 Sep 2026")
+      applications  the University cell's application lines, each as shown ("Applied: Kyungsung
+                    University · Bachelor's Degree"); [] when it has none
       details       {label: value} of the details row's fields (first of each label), files (the
                     view_doc.php files: passport_..., receipt_...), details_text (its text)
       verified_by, verified_stamp ("27 Sep, 17:19" as printed, no year), paid, method,
@@ -418,9 +421,16 @@ def _student_row(cells, col: Dict[str, int], sl: str) -> Dict[str, Any]:
     hng = _HNG_RE.search(student.get_text(" ", strip=True)) if student is not None else None
     program, intake = _main_and_sub(cell("program"))
     stage, applied = _main_and_sub(cell("stage"))
+    # The University cell: the university itself (.stu-uni), then one .upr line per university
+    # application ("Applied: Kyungsung University · Bachelor's Degree"), which are other data.
+    uni_cell = cell("university")
+    uni_el = uni_cell.select_one(".stu-uni") if uni_cell is not None else None
+    university = _blank(uni_el.get_text(" ", strip=True)) if uni_el is not None else text("university")
+    applications = [t for t in (_blank(u.get_text(" ", strip=True)) for u in uni_cell.select(".upr")) if t] \
+        if uni_el is not None else []
     return {
         "uid": "", "sl": sl, "student_id": hng.group(0) if hng else "", "id": hng.group(0) if hng else "",
-        "student_name": name, "target_university": text("university"),
+        "student_name": name, "target_university": university, "applications": applications,
         "program": program, "target_intake": intake,
         "docs_status": text("docs"), "payment_status": text("payment"),
         "status": stage, "applied_date": applied,
@@ -442,15 +452,30 @@ def is_admitted(student: Dict[str, Any], stage: str = ADMITTED_STAGE) -> bool:
 
 
 def student_matches(student: Dict[str, Any], query: str) -> bool:
-    """Whether a student's name, HNG id, university, program or intake contains `query` (case and
-    spacing do not matter): the local search /admitted uses, since the portal's own search does
-    not cover universities or programs."""
+    """Whether a student's name, HNG id, university, program, intake or one of their university
+    application lines contains `query` (case and spacing do not matter): the local search
+    /admitted uses, since the portal's own search does not cover universities or programs."""
     q = re.sub(r"\s+", " ", (query or "")).strip().lower()
     if not q:
         return True
-    fields = (student.get(k, "") for k in ("student_name", "student_id", "target_university", "program",
-                                            "target_intake"))
+    fields = [student.get(k, "") for k in ("student_name", "student_id", "target_university", "program",
+                                            "target_intake")] + list(student.get("applications") or [])
     return any(q in re.sub(r"\s+", " ", str(f)).lower() for f in fields)
+
+
+def parse_progress_page(html: str) -> Dict[str, Any]:
+    """progress.php?uid=N (one student's own progress page) -> {"pct": the ring's overall progress
+    (22), "stage": its "Current stage" ("Payment Verified"), "status": the status under it
+    ("Verified", "Pending verification")}. Raises StudentListLayoutError when the page has no
+    progress ring with a % and a current stage (its layout is not recognised)."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    ring = soup.select_one(".pg-ring")
+    pct = re.search(r"(\d{1,3})\s*%", ring.get_text(" ", strip=True)) if ring is not None else None
+    stage_el, status_el = soup.select_one(".pg-now .pg-stage"), soup.select_one(".pg-now .pg-status")
+    if pct is None or stage_el is None:
+        raise StudentListLayoutError("progress.php shows no progress ring with a % and a current stage")
+    return {"pct": int(pct.group(1)), "stage": _blank(stage_el.get_text(" ", strip=True)),
+            "status": _blank(status_el.get_text(" ", strip=True)) if status_el is not None else ""}
 
 
 def normalize_target_date(target_date) -> Optional[str]:
@@ -701,8 +726,10 @@ def target_day(target_date):
 
 def verification(student: Dict[str, Any], day) -> Optional[Dict[str, Any]]:
     """The payment verification of one parse_students_page student when it is on `day` (a date),
-    as {"student_id", "uid", "name", "program", "amount", "method", "verified_by",
-    "verified_time"}, else None.
+    as {"student_id", "uid", "name", "program", "amount", "paid", "verified_income", "method",
+    "verified_by", "verified_time"}, else None. "amount" is the verified income, else the amount
+    paid (what a day's total adds up); "paid" and "verified_income" are the row's own two figures
+    ("" when absent), shown apart when they differ (payment_text).
 
     The stamp is the row's own "Payment verified by NAME · 27 Sep, 17:19", matched on whole day
     and month tokens with the year rules of src.dates.stamp_on_day (a stamp with a year must have
@@ -722,10 +749,27 @@ def verification(student: Dict[str, Any], day) -> Optional[Dict[str, Any]]:
         "name": student.get("student_name", "") or student.get("details", {}).get("Full Name", ""),
         "program": student.get("program", "") or student.get("details", {}).get("Program", ""),
         "amount": student.get("verified_income") or student.get("paid") or "",
+        "paid": student.get("paid", ""),
+        "verified_income": student.get("verified_income", ""),
         "method": student.get("method", ""),
         "verified_by": student.get("verified_by", ""),
         "verified_time": stamp.text,
     }
+
+
+def _money(text: str) -> str:
+    return re.sub(r"\s+", "", text or "").upper()
+
+
+def payment_text(v: Dict[str, Any]) -> str:
+    """One verification's payment as the portal row shows it: "8,000.00 BDT bKash"; when the row's
+    "Paid" and "Verified income" differ, both, each with its own label: "Paid 8,160.00 BDT bKash
+    (verified income 8,000.00 BDT)" (the method goes with what was paid). "" when the row shows
+    no payment."""
+    paid, income, method = v.get("paid") or "", v.get("verified_income") or "", v.get("method") or ""
+    if paid and income and _money(paid) != _money(income):
+        return f"Paid {' '.join(x for x in (paid, method) if x)} (verified income {income})"
+    return " ".join(x for x in (v.get("amount") or income or paid, method) if x)
 
 
 def verified_on_day(students: List[Dict[str, Any]], day) -> List[Dict[str, Any]]:
@@ -821,6 +865,7 @@ def count_under_review(rows: List[Dict[str, str]]) -> int:
 
 _CAL_RANGE_RE = re.compile(r"\d{1,2}\s+[A-Za-z]{3}(?:\s+\d{4})?(?:\s*[–—-]\s*\d{1,2}\s+[A-Za-z]{3}(?:\s+\d{4})?)?")
 _CAL_TIME_RE = re.compile(r"\d{1,2}:\d{2}")
+_CAL_TIME_END_RE = re.compile(r"(\d{1,2}:\d{2})\s*[–—-]\s*(\d{1,2}\s+[A-Za-z]{3}(?:\s+\d{4})?)")
 _CAL_PROGRESS_RE = re.compile(r"\d+\s*%|\bdays?\s+left\b", re.I)
 _CAL_EMPTY_RE = re.compile(r"\bno\s+(?:reminders?|items?|events?|tasks?)\b|\bnothing\s+(?:due|for\s+today|today)\b"
                            r"|\ball\s+(?:done|clear)\b", re.I)
@@ -840,21 +885,43 @@ def _cal_card(soup, heading: str):
 
 
 def _cal_sub(line) -> Dict[str, Any]:
-    """"Application period · 21 Sep–05 Oct · 10:00 · SEJONG UNIVERSITY · today" -> its parts."""
+    """"Application period · 21 Sep–05 Oct · 10:00 · SEJONG UNIVERSITY · today" -> its parts. The
+    timeline writes an event with a start time as "08 Oct · 14:00 – 23 Oct 2026": the time, then
+    the end date, which joins the start into the range "08 Oct – 23 Oct 2026"."""
     type_el = line.find("span") if line is not None else None
     out = {"type": _cal_text(type_el), "date_range": "", "time": "", "where": "", "today": False}
     for part in (p.strip() for p in _cal_text(line).split("·")):
         if not part or part == out["type"]:
             continue
+        time_end = _CAL_TIME_END_RE.fullmatch(part)
         if part.lower() == "today":
             out["today"] = True
         elif not out["date_range"] and _CAL_RANGE_RE.fullmatch(part):
             out["date_range"] = part
         elif not out["time"] and _CAL_TIME_RE.fullmatch(part):
             out["time"] = part
+        elif not out["time"] and time_end:
+            out["time"] = time_end.group(1)
+            if out["date_range"] and not re.search(r"[–—-]", out["date_range"]):
+                out["date_range"] = f"{out['date_range']} – {time_end.group(2)}"
+            elif not out["date_range"]:
+                out["date_range"] = f"– {time_end.group(2)}"
         else:
             out["where"] = part
     return out
+
+
+def _cal_id(tag) -> str:
+    """The portal's own id of a calendar entry: its edit link's "edit=N" (the Mark done form's
+    hidden id otherwise); "" when it shows none."""
+    if tag is None:
+        return ""
+    for a in tag.find_all("a", href=True):
+        m = re.search(r"[?&]edit=(\d+)", a["href"])
+        if m:
+            return m.group(1)
+    hidden = tag.find("input", attrs={"name": "id"})
+    return str(hidden.get("value") or "").strip() if hidden is not None else ""
 
 
 def _cal_reminder(item) -> Dict[str, Any]:
@@ -877,7 +944,7 @@ def _cal_reminder(item) -> Dict[str, Any]:
     parts = _cal_sub(sub)
     left = re.search(r"(\d+)\s+days?\s+left", progress, re.I)
     note = " ".join(notes)
-    return {"title": _cal_text(title_el), **parts, "progress": progress,
+    return {"id": _cal_id(item), "title": _cal_text(title_el), **parts, "progress": progress,
             "days_left": int(left.group(1)) if left else None,
             "program": note if _CAL_PROGRAM_RE.search(note) else "", "note": note}
 
@@ -890,7 +957,8 @@ def _cal_upcoming(row) -> Dict[str, Any]:
     parts = _cal_sub(sub_el)
     notes = [_cal_text(d) for d in main.find_all("div", recursive=False) if d is not sub_el and _cal_text(d)]
     note = " ".join(notes)
-    return {"date": " ".join(_cal_text(x) for x in date_el.find_all("div")) if date_el else "",
+    return {"id": _cal_id(row),
+            "date": " ".join(_cal_text(x) for x in date_el.find_all("div")) if date_el else "",
             "type": parts["type"], "title": _cal_text(main.select_one(".ev-title") or main.find("a")),
             "university": parts["where"], "date_range": parts["date_range"],
             "program": note if _CAL_PROGRAM_RE.search(note) else "", "note": note,

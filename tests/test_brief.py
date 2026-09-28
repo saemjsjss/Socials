@@ -683,7 +683,7 @@ def test_calendar_reminders_are_read_from_the_current_layout():
     assert titles == ["Alpha University DHL", "Gamma University - Application open", "SEJONG *UNIVERSITY*"]
     assert "Copy" not in titles                                         # the pop-up's copies are not counted
     dhl, gamma, sejong = cal["today_reminders"]
-    assert dhl == {"title": "Alpha University DHL", "type": "DHL to send", "date_range": "26 Sep–28 Sep",
+    assert dhl == {"id": "1", "title": "Alpha University DHL", "type": "DHL to send", "date_range": "26 Sep–28 Sep",
                    "time": "14:00", "where": "Alpha University", "today": False, "progress": "",
                    "days_left": None, "program": "", "note": ""}
     assert gamma["progress"] == "64% of window elapsed · 4 days left" and gamma["days_left"] == 4
@@ -691,7 +691,7 @@ def test_calendar_reminders_are_read_from_the_current_layout():
     assert sejong["today"] and sejong["days_left"] == 14 and sejong["program"] == ""
     assert sejong["note"] == "Send the documents by DHL."
     assert cal["upcoming_events"] == [{
-        "date": "1 Sep", "type": "Application period", "title": "Beta University- APPLICATION OPEN",
+        "id": "7", "date": "1 Sep", "type": "Application period", "title": "Beta University- APPLICATION OPEN",
         "university": "Beta University", "date_range": "01 Sep – 09 Oct 2026", "program": "EAP PROGRAM",
         "note": "EAP PROGRAM", "status": "Closes in 11 days"}]
 
@@ -714,7 +714,8 @@ def test_the_calendar_command_lists_real_titles():
 def test_verified_students_never_get_a_made_up_amount_or_name():
     row = student(7, 9, "", KLP, by="LINA PARVIN", when="28 Sep, 09:00")          # no name, nothing paid
     got = parsers.parse_verified_students(students_page(row), "28 Sep 2026")
-    assert got == [{"student_id": "", "uid": "7", "name": "", "program": KLP, "amount": "", "method": "",
+    assert got == [{"student_id": "", "uid": "7", "name": "", "program": KLP, "amount": "", "paid": "",
+                    "verified_income": "", "method": "",
                     "verified_by": "LINA PARVIN", "verified_time": "28 Sep, 09:00"}]
     text = "\n".join(brief.section_verified(got, "28 Sep 2026", True)[0])
     assert "Total: not available (no amount on the rows)" in text and "20,000" not in text

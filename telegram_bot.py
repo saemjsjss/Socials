@@ -395,13 +395,22 @@ def format_admitted_report(result: dict) -> str:
     groups = (("Universities", "target_university", 4), ("Programs", "program", 3), ("Intakes", "target_intake", 6))
     lines.append("📊 *Breakdown:*")
     for label, key, most in groups:
-        counts = Counter(s.get(key) or "—" for s in students)
-        lines.append(f"• *{label}:* " + ", ".join(f"{esc(k)} ({n})" for k, n in counts.most_common(most)))
+        # One university (the cell's own line, never its application lines) is one entry, however
+        # its case is written ("KYUNGSUNG UNIVERSITY", "Kyungsung University").
+        values = [re.sub(r"\s+", " ", s.get(key) or "").strip() or "—" for s in students]
+        counts = Counter(v.casefold() for v in values)
+        shown = {}
+        for v in values:
+            shown.setdefault(v.casefold(), Counter())[v] += 1
+        lines.append(f"• *{label}:* " + ", ".join(f"{esc(shown[k].most_common(1)[0][0])} ({n})"
+                                                   for k, n in counts.most_common(most)))
     lines += ["", "📋 *Student Roster:*"]
     for i, s in enumerate(students[:ADMITTED_ROSTER_MAX], 1):
         sid = s.get("student_id") or s.get("id") or ""
         lines.append(f"*{i}. {esc(s.get('student_name') or '—')}*" + (f" ({code(sid)})" if sid else " (no student ID yet)"))
         lines.append(f"   🏛 *Univ:* {esc(s.get('target_university') or '—')} | *Prog:* {esc(s.get('program') or '—')}")
+        if s.get("applications"):
+            lines.append(f"   📝 *Applications:* {esc('; '.join(s['applications']))}")
         lines.append(f"   💳 *Pay:* {code(s.get('payment_status') or '—')} | *Intake:* {esc(s.get('target_intake') or '—')}")
     if len(students) > ADMITTED_ROSTER_MAX:
         lines += ["", f"_...and {len(students) - ADMITTED_ROSTER_MAX} more._",
@@ -548,6 +557,22 @@ async def _send_inquiries_report(update: Update, raw_input: str, waiting: str, s
     await reply_long(update.message, report, edit=status_msg)
 
 
+# Set by handle_natural_language_message while a typed message answers a command's "which date?"
+# question: its value is the question's kind ("verified", "inquiries", "crosscheck", ...).
+DATE_PROMPT_KEY = "date_prompt_answer"
+
+
+def _ask_date_again(context, kind: str, raw: str) -> None:
+    """After a date the command could not read: when the words were typed in answer to its own
+    "which date?" question, ask it again (the date error invites another date, and the next message
+    is read as that date). Only for words that look like a date try (a digit, a month or weekday
+    name...), so other words do not keep the question open."""
+    from src.dates import has_date_hint
+    ud = getattr(context, "user_data", None)
+    if ud is not None and ud.get(DATE_PROMPT_KEY) == kind and has_date_hint(raw):
+        ud["awaiting_date_for"] = kind
+
+
 async def inquiries_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Menu 1: Total consultancy inquiries and how many were done today."""
     if not is_authorized(update):
@@ -583,6 +608,7 @@ async def inquiries_date_command(update: Update, context: ContextTypes.DEFAULT_T
     if normalize_date_input(raw_input, strict=True) is None:
         from src.bot.replies import date_error_reply
         logger.info(f"/inquiries_date: unreadable date {raw_input!r}")
+        _ask_date_again(context, "inquiries", raw_input)
         await update.message.reply_text(date_error_reply(raw_input, "/inquiries_date"), parse_mode="Markdown")
         return
     # Inside the _italic_ waiting line an "_" of the user's own would end it early.
@@ -683,6 +709,7 @@ def format_verified_students_report(verified_list: list, display_date: str) -> s
     a total over rows without an amount says so, and nothing is filled in. Only called after
     every page of the student list was read (a failed read is portal_error_reply, never this)."""
     from src.bot.brief import esc
+    from src.scraper.parsers import payment_text
     if not verified_list:
         return f"ℹ️ *No student payments were verified on {display_date}.*"
 
@@ -695,10 +722,22 @@ def format_verified_students_report(verified_list: list, display_date: str) -> s
     if not amounts:
         revenue = "not available (no amount on the portal rows)"
     else:
-        revenue = f"`৳ {sum(amounts):,.2f} BDT`"
-        if len(amounts) < total_count:
-            revenue += (f" (the {len(amounts)} with an amount on the portal; "
-                        f"{total_count - len(amounts)} without)")
+        # What the total adds up: each row's verified income, or what was paid where the row
+        # shows no verified income (older rows), said as such.
+        income = sum(1 for v in verified_list if v.get("verified_income"))
+        with_amount = len(amounts)
+        if income and income >= with_amount:
+            source = "the sum of the verified income"
+        elif income:
+            source = (f"the verified income, and the amount paid for the {with_amount - income} "
+                      "row(s) that show no verified income")
+        else:
+            source = "the sum of the amounts paid"
+        revenue = f"`৳ {sum(amounts):,.2f} BDT` ({source}"
+        if with_amount < total_count:
+            revenue += (f"; the {with_amount} with an amount on the portal, "
+                        f"{total_count - with_amount} without")
+        revenue += ")"
 
     lines = [
         f"✅ *Student Payment Verifications — {display_date}*",
@@ -711,7 +750,7 @@ def format_verified_students_report(verified_list: list, display_date: str) -> s
         # Only what the portal row shows: a missing field is "—", never a made-up value.
         name = esc(s.get("name") or "—")
         prog = esc(s.get("program") or "—")
-        payment = (" ".join(x for x in (s.get("amount"), s.get("method")) if x) or "—").replace("`", "")
+        payment = (payment_text(s) or "—").replace("`", "")
         counselor = esc(s.get("verified_by") or "—")
         time_str = esc(s.get("verified_time") or "")
 
@@ -752,6 +791,7 @@ async def verified_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parsed = normalize_date_input(raw_input, strict=strict)
     if parsed is None:
         logger.info(f"/verified: unreadable date {raw_input!r} from chat_id {chat_id}")
+        _ask_date_again(context, "verified", raw_input)
         await update.message.reply_text(date_error_reply(raw_input, "/verified_date"), parse_mode="Markdown")
         return
     portal_date, display_date = parsed
@@ -816,8 +856,15 @@ def format_passports_report(students: list, today_cards: Optional[list], display
             lines.append(f"   └ 🔍 {esc(c['verdict'])}")
         else:
             lines.append("   └ 🔍 not checked here (see `/crosscheck_today`)")
-    ocr = "; each verdict comes from an OCR check of the scan made just now" if any(
-        c.get("verdict") for c in today_cards) else ""
+    # Only a verdict of an OCR check counts as one (_ocr_checked), never "couldn't read the portal".
+    done = _ocr_checked(today_cards)
+    if done and done == len(today_cards):
+        ocr = "; each verdict comes from an OCR check of the scan made just now"
+    elif done:
+        ocr = (f"; {done} of the {len(today_cards)} verdicts come from an OCR check of the scan made just now, "
+               "the others were not checked (see each line)")
+    else:
+        ocr = ""
     lines += ["", f"_Read live from all {len(students)} students on students.php{ocr}._"]
     return "\n".join(lines)
 
@@ -858,6 +905,9 @@ async def passports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = portal_error_reply("Passport scans", e)
     await _send_blocks(update.message, text, status_msg)
     logger.info(f"Dispatched live passport status to chat_id {chat_id}")
+
+CALENDAR_UPCOMING_MAX = 20     # timeline rows today's /calendar view lists
+
 
 def format_calendar_report(cal_data: dict, filter_query: Optional[str] = None) -> str:
     """Format calendar events and application deadlines into a clean summary."""
@@ -923,11 +973,19 @@ def format_calendar_report(cal_data: dict, filter_query: Optional[str] = None) -
         lines.append(f"_({skipped} {'entry' if skipped == 1 else 'entries'} without a title "
                      f"{'was' if skipped == 1 else 'were'} skipped)_")
 
-    lines.append("\n📌 *Upcoming:*")
-    for idx, u in enumerate(upcoming_events[:6], 1):
+    # The timeline as the portal lists it (45 days), every row up to CALENDAR_UPCOMING_MAX, and how
+    # many more there are: never a silent cut that drops what opens next.
+    lines.append(f"\n📌 *Upcoming ({len(upcoming_events)} on the 45-day timeline):*")
+    for idx, u in enumerate(upcoming_events[:CALENDAR_UPCOMING_MAX], 1):
         prog = f" ({u['program']})" if u.get("program") else ""
         status = f" — {u['status']}" if u.get("status") else ""
         lines.append(f"• *{u['date']}:* {u['title']}{prog} (`{u.get('date_range') or '—'}`){status}")
+    if len(upcoming_events) > CALENDAR_UPCOMING_MAX:
+        lines.append(f"_…and {len(upcoming_events) - CALENDAR_UPCOMING_MAX} more "
+                     "(search one: `/calendar Hanyang`, or a week: `/calendar next week`)._")
+    if not upcoming_events:
+        lines.append("ℹ️ Nothing on the timeline." if cal_data.get("upcoming_ok", True) else
+                     "ℹ️ The timeline is not available (its layout was not recognised).")
 
     lines.append("\n💡 _Tip: Search any university or date, e.g. `/calendar Hanyang` or `/calendar 11 Sep`_")
     return "\n".join(lines).strip()
@@ -937,10 +995,11 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     Bare, it is today's view (format_calendar_report). With words, they are read by
     src.bot.ask.calendar_query: real dates ("this week" is today to Sunday, "next 7 days", "in
-    October", "on 2 Oct"), "deadline" / "due" for what closes within them, "DHL" for the DHL
-    items, and any other words (a university) searched for; the answer comes from calendar.php
-    read live (ask.answer_calendar), each item with its dates. A date that cannot be read gets a
-    clear error, never today's view instead; a calendar that cannot be read says so."""
+    October", "on 2 Oct"), "deadline" / "due" for what closes within them (/deadlines with words
+    asks for that too: "/deadlines next week"), "DHL" for the DHL items, and any other words (a
+    university) searched for; the answer comes from calendar.php read live
+    (ask.answer_calendar), each item with its dates. A date that cannot be read gets a clear
+    error, never today's view instead; a calendar that cannot be read says so."""
     chat_id = update.effective_chat.id
     if not is_authorized(update):
         await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{chat_id}`", parse_mode="Markdown")
@@ -951,6 +1010,11 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw_input = context.user_data.pop("override_text")
     elif context and context.args:
         raw_input = " ".join(context.args)
+        # context.args leaves the command out: "/deadlines next week" asks for deadlines only.
+        typed = (update.message.text or "").strip() if update.message else ""
+        if re.match(r"/deadlines?(?:@\w+)?\b", typed, re.I) and not re.search(
+                r"\b(?:deadlines?|due|closing|closes?)\b", raw_input, re.I):
+            raw_input = f"deadlines {raw_input}"
     elif update.message and update.message.text:
         raw_input = update.message.text
 
@@ -1476,6 +1540,30 @@ async def _audit_cards(cards: list, status_msg=None, what: str = "") -> None:
         c.update(fields=res.get("fields") or {}, status=res.get("status", ""), verdict=res.get("verdict", ""))
 
 
+# Card statuses whose scan was not read by OCR: no scan uploaded, the portal could not be read, the
+# OCR engine could not start, or the check failed ("" is a card that was not audited at all).
+_NOT_OCR_CHECKED = ("", "MISSING_DOCUMENT", "PORTAL_UNREADABLE", "OCR_UNAVAILABLE", "ERROR")
+
+
+def _ocr_checked(cards: list) -> int:
+    """How many of the cards' scans were read by OCR just now (their status is an OCR verdict)."""
+    return sum(1 for c in cards if (c.get("status") or "") not in _NOT_OCR_CHECKED)
+
+
+def _ocr_note(cards: list) -> str:
+    """"; each scan was checked by OCR just now" only when every card's was; otherwise how many
+    were and how many were not (their cards say why), and no OCR claim at all when none was."""
+    done, total = _ocr_checked(cards), len(cards)
+    if not total:
+        return ""
+    if done == total:
+        return "; each scan was checked by OCR just now"
+    if done:
+        return (f"; {done} of the {total} scans were checked by OCR just now, "
+                f"{total - done} could not be checked (see their cards)")
+    return f"; no scan could be checked by OCR (see {'the card' if total == 1 else 'the cards'})"
+
+
 def _format_crosscheck_results(results: list, header_title: str, checked: Optional[int] = None,
                                note: str = "") -> str:
     """The cross-check report (Telegram Markdown): a header, then one card per student, the blocks
@@ -1484,7 +1572,7 @@ def _format_crosscheck_results(results: list, header_title: str, checked: Option
     head = [f"📋 *Verified Student Information Cross-Check — {esc(header_title)}*",
             f"• *Total Records Audited:* `{len(results)}`"]
     if checked is not None:
-        head.append(f"• _Read live from all {checked} students on students.php; each scan was checked by OCR just now._")
+        head.append(f"• _Read live from all {checked} students on students.php{_ocr_note(results)}._")
     if note:
         head.append(note)
     blocks = ["\n".join(head)]
@@ -1680,6 +1768,7 @@ async def crosscheck_range_command(update: Update, context: ContextTypes.DEFAULT
 
     start_date, end_date, display = _parse_date_range(raw_input)
     if not start_date:
+        _ask_date_again(context, "crosscheck_range", raw_input)
         why = user_date_problem(raw_input, prefer_past=True)
         why = f" ({esc(why)})" if why and not why.startswith("it names more than one date") else ""
         await update.message.reply_text(
@@ -1743,6 +1832,8 @@ async def crosscheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = _crosscheck_query(raw_input, date_only=date_only)
     if query["kind"] == "error":
         logger.info(f"/crosscheck: could not read {raw_input!r} from chat_id {chat_id}")
+        if date_only:
+            _ask_date_again(context, "crosscheck", raw_input)
         await update.message.reply_text(query["reply"], parse_mode="Markdown")
         return
     if query["kind"] == "date":
@@ -1791,23 +1882,22 @@ async def handle_natural_language_message(update: Update, context: ContextTypes.
         await _handle_email_flow(update, context, query)
         return
 
-    # 1. Check if we are waiting for an interactive specific date response from the user
+    # 1. Check if we are waiting for an interactive specific date response from the user. The
+    # command is told the words answer its question (DATE_PROMPT_KEY), so a date it cannot read
+    # asks again (_ask_date_again) instead of dropping the question.
     awaiting = context.user_data.pop("awaiting_date_for", None)
     if awaiting:
-        context.user_data["override_text"] = query
-        if awaiting == "inquiries":
-            await inquiries_date_command(update, context)
+        answering = {"inquiries": inquiries_date_command, "verified": verified_date_command,
+                     "crosscheck": crosscheck_date_command,
+                     "crosscheck_range": crosscheck_range_command}.get(awaiting)
+        if answering is not None:
+            context.user_data["override_text"] = query
+            context.user_data[DATE_PROMPT_KEY] = awaiting
+            try:
+                await answering(update, context)
+            finally:
+                context.user_data.pop(DATE_PROMPT_KEY, None)
             return
-        elif awaiting == "verified":
-            await verified_date_command(update, context)
-            return
-        elif awaiting == "crosscheck":
-            await crosscheck_date_command(update, context)
-            return
-        elif awaiting == "crosscheck_range":
-            await crosscheck_range_command(update, context)
-            return
-        context.user_data.pop("override_text", None)
 
     from src.bot import ask
     from src.dates import local_today

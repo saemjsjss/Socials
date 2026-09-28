@@ -146,6 +146,37 @@ def _same_student(old: Dict[str, str], new: Dict[str, str]) -> int:
     return 0
 
 
+# Name words many students share: one of these alone does not make two names alike.
+_COMMON_NAME_WORDS = {"md", "mst", "most", "mohammad", "mohammed", "muhammad", "mohammod", "mohamed", "sk",
+                      "sheikh", "shaikh", "syed", "sayed", "kazi", "mir", "mia", "miah"}
+
+
+def _mobile(rec: Dict[str, str]) -> str:
+    digits = re.sub(r"\D", "", pb.clean_value(rec.get("Mobile", "")))
+    return digits[-10:] if len(digits) >= 10 else ""
+
+
+def _likely_same(old: Dict[str, str], new: Dict[str, str]) -> float:
+    """How alike two rows are when they share no exact identity (_same_student), for a student
+    whose Student ID arrived in the same sync as a corrected name or mobile: the same mobile and a
+    name at least 0.6 alike or sharing a telling word ("HASAN MD" -> "HASAN MD RAIYAN"), or the same
+    name and date of birth (the mobile corrected). 0 when neither."""
+    from difflib import SequenceMatcher
+    a, b = pb.clean_value(old.get("Full Name", "")).upper(), pb.clean_value(new.get("Full Name", "")).upper()
+    if not a or not b:
+        return 0.0
+    ratio = SequenceMatcher(None, a, b).ratio()
+    shared = {w for w in re.findall(r"[a-z]+", a.lower()) if len(w) >= 3 and w not in _COMMON_NAME_WORDS} \
+        & set(re.findall(r"[a-z]+", b.lower()))
+    mobile = _mobile(old)
+    if mobile and mobile == _mobile(new) and (ratio >= 0.6 or shared):
+        return 1.0 + ratio
+    dob = pb.clean_value(old.get("DOB", ""))
+    if dob and dob == pb.clean_value(new.get("DOB", "")) and pb._norm_key(a) == pb._norm_key(b):
+        return 1.0
+    return 0.0
+
+
 def _changed_columns(old: Dict[str, str], new: Dict[str, str]) -> str:
     cols = [c for c in new if new.get(c, "") != old.get(c, "")]
     return f"{', '.join(cols[:4])}{'…' if len(cols) > 4 else ''}"
@@ -155,20 +186,24 @@ def sheet_changes(prev: Dict[str, Dict], cur: Dict[str, Dict]) -> Tuple[List[str
     """(new, removed, edited) between two snapshots {row key: {"name", "hash", "rec"}}. A row whose
     key changed is the same student, not one leaving and one joining, when it shares the Student
     ID, a real passport number, or name and mobile with a row that went (surest match first, each
-    row paired once): it is reported as edited, with the columns that changed, or not at all when
-    nothing in it changed."""
+    row paired once); failing those, when it shares the mobile and a like name, or the name and
+    date of birth (_likely_same: a Student ID given in the same sync as a name or mobile corrected).
+    It is reported as edited, with the columns that changed, or not at all when nothing in it
+    changed."""
     added = [k for k in cur if k not in prev]
     removed = [k for k in prev if k not in cur]
-    candidates = [(_same_student(prev[o].get("rec") or {}, cur[n]["rec"]), j, i, o, n)
-                  for j, n in enumerate(added) for i, o in enumerate(removed)]
     paired_old, paired_new, edited = set(), set(), []
-    for rank, _, _, o, n in sorted((c for c in candidates if c[0] > 0), key=lambda c: (-c[0], c[1], c[2])):
-        if o in paired_old or n in paired_new:
-            continue
-        paired_old.add(o)
-        paired_new.add(n)
-        if prev[o].get("hash") != cur[n]["hash"]:
-            edited.append((n, prev[o].get("rec") or {}))
+    for score in (_same_student, _likely_same):
+        candidates = [(score(prev[o].get("rec") or {}, cur[n]["rec"]), j, i, o, n)
+                      for j, n in enumerate(added) if n not in paired_new
+                      for i, o in enumerate(removed) if o not in paired_old]
+        for rank, _, _, o, n in sorted((c for c in candidates if c[0] > 0), key=lambda c: (-c[0], c[1], c[2])):
+            if o in paired_old or n in paired_new:
+                continue
+            paired_old.add(o)
+            paired_new.add(n)
+            if prev[o].get("hash") != cur[n]["hash"]:
+                edited.append((n, prev[o].get("rec") or {}))
     for k in cur:
         if k in prev and prev[k]["hash"] != cur[k]["hash"]:
             edited.append((k, prev[k].get("rec") or {}))

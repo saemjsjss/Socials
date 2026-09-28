@@ -239,6 +239,8 @@ def write_excel(rows) -> "pb.Path":
 
 
 def send(lines: List[str], xlsx) -> None:
+    """The report's lines (plain text, split under Telegram's limit) and, when `xlsx` is given, its
+    Excel file, to every brief recipient."""
     import httpx
     from src.config import settings
     token, ids = settings.TELEGRAM_BOT_TOKEN, settings.brief_recipient_ids()
@@ -256,6 +258,8 @@ def send(lines: List[str], xlsx) -> None:
                     if resp.status_code >= 400:
                         logger.warning("Telegram refused the report for %s: HTTP %s %s", chat,
                                        resp.status_code, resp.text[:200])
+                if xlsx is None:
+                    continue
                 with open(xlsx, "rb") as f:
                     resp = http.post(f"https://api.telegram.org/bot{token}/sendDocument",
                                      data={"chat_id": chat, "caption": "Every incomplete student with the fields they are missing"},
@@ -286,8 +290,8 @@ def main() -> None:
                   f"Missing information — {pb.PROGRAMS[key]['name']}: not available right now. "
                   "Please try again in a minute.")
         return
-    data = read_sheets()
     if args.student:
+        data = read_sheets()
         want = args.student.strip().upper()
         index = portal_index()
         for sk, recs in data.items():
@@ -302,8 +306,21 @@ def main() -> None:
                     return
         print(f"{want} not found in the progress sheets.")
         return
-    lines, rows = build_report(data)
-    xlsx = write_excel(rows)
+    # The daily report (09:05): progress sheets or a portal that cannot be read are said to the
+    # admin in one plain message, never left to a silent "exit 1" in the log.
+    try:
+        data = read_sheets()
+        lines, rows = build_report(data)
+        xlsx = write_excel(rows)
+    except Exception as e:
+        from src.scraper.client import portal_error_reason
+        logger.error("missing-information report failed: %s", e)
+        notice = (f"❌ Couldn't build today's missing-information report: {portal_error_reason(e)}. "
+                  "It will run again tomorrow at 09:05 (or send /missing).")
+        print(notice)
+        if not args.no_notify:
+            send([notice], None)
+        raise SystemExit(1)
     print("\n".join(lines))
     print(f"\nExcel: {xlsx}")
     if not args.no_notify:

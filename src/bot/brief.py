@@ -229,9 +229,10 @@ def section_verified(verified: Optional[List[Dict[str, Any]]], portal_day: str, 
         head += f"  |  Total: {NA} (no amount on the rows)"
         facts.append(f"Total amount verified {said}: {NA}")
     lines.append(head)
+    from src.scraper.parsers import payment_text
     for i, v in enumerate(verified, 1):
         parts = [esc(v[k]) for k in ("name", "program") if v.get(k)]
-        paid = " ".join(x for x in (v.get("amount"), v.get("method")) if x)
+        paid = payment_text(v)          # paid and verified income apart when they differ
         if paid:
             parts.append(esc(paid))
         clock = _clock(v.get("verified_time", ""))
