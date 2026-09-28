@@ -68,18 +68,14 @@ def _parse_rows(html: str) -> List[Dict[str, str]]:
 
 
 async def fetch_verified_students(client) -> List[Dict[str, str]]:
+    """Every document-verified Direct student (LIST_PATH, every page, read by the client's one
+    session path: read_student_pages). Raises PortalUnavailable when the list cannot be read whole
+    (a refused login included), never an empty or partial list."""
+    params = dict(p.split("=", 1) for p in LIST_PATH.partition("?")[2].split("&") if "=" in p)
     students: Dict[str, Dict[str, str]] = {}
-    page, pages = 1, 1
-    while page <= pages:
-        resp = await client.client.get(f"{client.base_url}/{LIST_PATH}&pg={page}", timeout=60.0)
-        if "login.php" in str(resp.url):
-            await client.login()
-            continue
-        m = re.search(r"Page \d+ of (\d+)", resp.text)
-        pages = int(m.group(1)) if m else page
-        for s in _parse_rows(resp.text):
+    for html in await client.read_student_pages(params):
+        for s in _parse_rows(html):
             students.setdefault(s["uid"], s)
-        page += 1
     return list(students.values())
 
 
@@ -333,7 +329,9 @@ def shrink_large_files(folder: Path, root: Path) -> List[str]:
 async def run_local(root: Path, limit: int = 0, skip_drive_done: bool = True) -> Dict[str, list]:
     """Same as run(), but saves into a folder on this PC:
     <root>/<PROGRAM>/<FULL NAME> (<PASSPORT NO>)/<files>.  Files over 2 MB are shrunk.
-    Returns {"saved": [(program, name, n_files, shrink_report)], "failed": [(name, error)]}."""
+    Returns {"saved": [(program, name, n_files, shrink_report)] for first downloads,
+    "redownloaded": [the same] for students fetched again because their portal files changed
+    (n_files = the files that were new), "failed": [(name, error)]}."""
     from src.scraper.client import admin_client as client
     try:
         await client.login()
@@ -346,7 +344,7 @@ async def run_local(root: Path, limit: int = 0, skip_drive_done: bool = True) ->
             print(f"{len(in_drive)} already complete in Google Drive - not downloaded again.")
         print(f"Saving to: {root}")
 
-        result: Dict[str, list] = {"saved": [], "failed": []}
+        result: Dict[str, list] = {"saved": [], "redownloaded": [], "failed": []}
         done = skipped = drive_skipped = failed = 0
         for n, s in enumerate(students, 1):
             name = folder_name(s)
@@ -359,7 +357,8 @@ async def run_local(root: Path, limit: int = 0, skip_drive_done: bool = True) ->
             # the upload time — so a student who replaces a rejected document is fetched
             # again instead of being trusted forever.
             marker = folder / LOCAL_DONE_MARKER
-            if marker.exists():
+            again = marker.exists()          # downloaded before: this is a re-download
+            if again:
                 try:
                     was = marker.read_text(encoding="utf-8").strip()
                 except Exception:
@@ -393,8 +392,8 @@ async def run_local(root: Path, limit: int = 0, skip_drive_done: bool = True) ->
                 (folder / LOCAL_DONE_MARKER).write_text(s.get("docs", "ok") or "ok",
                                                         encoding="utf-8")
                 done += 1
-                result["saved"].append((program_folder(s), name, added, shrunk))
-                print(f"[{n}/{len(students)}] {name}: {added} file(s) saved")
+                result["redownloaded" if again else "saved"].append((program_folder(s), name, added, shrunk))
+                print(f"[{n}/{len(students)}] {name}: {added} {'new ' if again else ''}file(s) saved")
                 for line in shrunk:
                     print(f"      compressed {line}")
             except Exception as e:

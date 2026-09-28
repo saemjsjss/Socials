@@ -316,13 +316,17 @@ _ISSUE_CACHE: Optional[Dict[str, str]] = None
 
 
 def issue_date_for(student: Dict[str, Any]) -> str:
-    """Passport issue date: the portal has it on the student edit page only, so it comes
-    from the cache filled by src/sheets/passport_issue.py."""
+    """Passport issue date: the student's own "Passport Issue Date" from the CSV export when the
+    export has that column (live, and blank where the portal has none); otherwise the cache
+    src/sheets/passport_issue.py fills from the edit pages once a day, by passport number."""
+    if "Passport Issue Date" in student:
+        return student.get("Passport Issue Date") or ""
     global _ISSUE_CACHE
     if _ISSUE_CACHE is None:
         from src.sheets import passport_issue
         _ISSUE_CACHE = passport_issue.load()
-    return _ISSUE_CACHE.get((student.get("Passport No") or "").strip().upper(), "")
+    from src.sheets.passport_issue import passport_key
+    return _ISSUE_CACHE.get(passport_key(student.get("Passport No") or ""), "")
 
 
 def build_row(student: Dict[str, Any], columns: Optional[List[tuple]] = None) -> List[str]:

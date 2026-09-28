@@ -2,9 +2,17 @@
 Passport issue dates.
 
 The portal keeps "Passport Issue Date" on the student edit page (field
-passport_issue_date) but does NOT include it in the students CSV export, so it has to be
-read per student.  That is 300+ read-only page fetches, far too slow for the 15-minute
-sync, so the dates are cached here and refreshed once a day (or on demand).
+passport_issue_date). The students CSV export used to leave it out (since Sep 2026 it has a
+"Passport Issue Date" column, which the progress sheets use first), so it is read per
+student.  That is 300+ read-only page fetches, far too slow for the 15-minute sync, so the
+dates are cached here and refreshed once a day (or on demand).
+
+The cache is keyed by passport number, taken from each student's own "Passport No" field on
+students.php. A placeholder such as "PENDING" (students with no passport yet share it) is no
+passport number and is left out, so no student is given another student's date; a number two
+students share (one person registered twice) is kept only when the dates on their edit pages
+do not disagree (a blank one aside). A refresh that cannot read the portal leaves the last
+cache as it was (never an empty one).
 
   python -m src.sheets.passport_issue --refresh      # re-read every student
   python -m src.sheets.passport_issue                # show what is cached
@@ -16,7 +24,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Dict
+from typing import Dict, List
 
 from src.sheets import progress_builder as pb
 
@@ -35,38 +43,56 @@ def load() -> Dict[str, str]:
     return {}
 
 
+def passport_key(value: str) -> str:
+    """A "Passport No" value as the cache key, or "" when it is no passport number: blank, "—",
+    or a placeholder without a digit ("PENDING")."""
+    v = re.sub(r"\s+", "", value or "").upper()
+    return v if len(v) >= 6 and re.search(r"\d", v) else ""
+
+
+_ISSUE_RE = re.compile(r'name="passport_issue_date"[^>]*value="([^"]*)"')
+MAX_UNREAD = 10      # edit pages that may time out before the refresh gives up (cache kept)
+
+
 async def _fetch_async(limit: int = 0) -> Dict[str, str]:
-    from bs4 import BeautifulSoup
-    from src.scraper.client import admin_client as c
+    from src.scraper.client import PortalUnavailable, admin_client as c
     out: Dict[str, str] = {}
     try:
-        await c.login()
-        # the list pages give the internal id for each student
-        uids, page, pages = {}, 1, 1
-        while page <= pages:
-            r = await c.client.get(f"{c.base_url}/students.php?pg={page}", timeout=60)
-            m = re.search(r"Page \d+ of (\d+)", r.text)
-            pages = int(m.group(1)) if m else page
-            soup = BeautifulSoup(r.text, "html.parser")
-            for a in soup.find_all("a", href=re.compile(r"student_edit\.php\?id=\d+")):
-                uid = re.search(r"id=(\d+)", a["href"]).group(1)
-                tr = a.find_parent("tr")
-                if not tr:
-                    continue
-                parts = tr.get_text(" | ", strip=True).split(" | ")
-                if "Passport No" in parts:
-                    i = parts.index("Passport No") + 1
-                    if i < len(parts) and parts[i].strip():
-                        uids.setdefault(parts[i].strip().upper(), uid)
-            page += 1
-        items = list(uids.items())[:limit] if limit else list(uids.items())
-        for n, (pas, uid) in enumerate(items, 1):
-            resp = await c.client.get(f"{c.base_url}/student_edit.php?id={uid}", timeout=60)
-            m = re.search(r'name="passport_issue_date"[^>]*value="([^"]*)"', resp.text)
-            if m and m.group(1).strip():
-                out[pas] = m.group(1).strip()
+        # every page of the student list, read by column name: each student's uid and their own
+        # "Passport No" field (raises PortalUnavailable when the list cannot be read whole)
+        by_passport: Dict[str, List[str]] = {}
+        for s in await c.read_students():
+            pas = passport_key((s.get("details") or {}).get("Passport No", ""))
+            if pas and s.get("uid"):
+                by_passport.setdefault(pas, []).append(s["uid"])
+        items = list(by_passport.items())[:limit] if limit else list(by_passport.items())
+        previous, unread = load(), []
+        for n, (pas, uids) in enumerate(items, 1):
+            dates = set()
+            for uid in uids:
+                try:
+                    html = await c.fetch_html("student_edit.php", params={"id": uid}, timeout=60)
+                except PortalUnavailable as e:
+                    if not e.unreachable or len(unread) >= MAX_UNREAD:
+                        raise                      # a refused login, or the portal is down
+                    unread.append(uid)
+                    dates = None
+                    break
+                m = _ISSUE_RE.search(html)
+                if m and m.group(1).strip():
+                    dates.add(m.group(1).strip())
+            if dates is None:                      # not read this time: keep the last date read
+                if previous.get(pas):
+                    out[pas] = previous[pas]
+            elif len(dates) == 1:
+                out[pas] = dates.pop()
+            elif len(dates) > 1:
+                logger.warning("passport number shared by %d students with different issue dates: "
+                               "left out", len(uids))
             if n % 50 == 0:
                 print(f"   read {n}/{len(items)} students", flush=True)
+        if unread:
+            print(f"   {len(unread)} edit page(s) did not answer; their last issue dates were kept", flush=True)
         return out
     finally:
         await c.close()

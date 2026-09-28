@@ -30,8 +30,9 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from src.config import settings
 from src.sheets import progress_builder as pb
@@ -93,11 +94,25 @@ def _fresh_portal_client() -> None:
 
 
 # --- 1) progress sheets ----------------------------------------------------------------
+def _passport_no(rec: Dict[str, str]) -> str:
+    """The row's passport number when it is one: a placeholder such as "PENDING" (no digit in it),
+    which many students without a passport share, is no identity."""
+    v = re.sub(r"\s+", "", pb.clean_value(rec.get("Passport No", ""))).upper()
+    return v if len(v) >= 6 and re.search(r"\d", v) else ""
+
+
+def _name_mobile(rec: Dict[str, str]) -> str:
+    name, mobile = pb._norm_key(rec.get("Full Name", "")), pb._norm_key(rec.get("Mobile", ""))
+    return name + mobile if name and mobile else ""
+
+
 def _row_key(rec: Dict[str, str]) -> str:
-    for col in ("Student ID", "Passport No"):
-        v = pb.clean_value(rec.get(col, "")).upper()
-        if v:
-            return f"{col}:{v}"
+    v = pb.clean_value(rec.get("Student ID", "")).upper()
+    if v:
+        return f"Student ID:{v}"
+    v = _passport_no(rec)
+    if v:
+        return f"Passport No:{v}"
     return "NAME:" + pb._norm_key(rec.get("Full Name", "")) + pb._norm_key(rec.get("Mobile", ""))
 
 
@@ -107,12 +122,61 @@ def _snapshot(cfg: Dict) -> Dict[str, Dict[str, str]]:
     out = {}
     for s in pb.fetch_roster(cfg):
         rec = dict(zip(headers, pb.build_row(s, cols)))
-        out[_row_key(rec)] = rec
+        key, n = _row_key(rec), 1
+        while key in out:                  # two rows with one key must not overwrite each other
+            n += 1
+            key = f"{_row_key(rec)}#{n}"
+        out[key] = rec
     return out
 
 
 def _digest(rec: Dict[str, str]) -> str:
     return hashlib.sha1(json.dumps(rec, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _same_student(old: Dict[str, str], new: Dict[str, str]) -> int:
+    """How surely two rows are one student whose row key changed (a Student ID given at payment
+    verification, a passport number filled in or corrected): 3 = the same Student ID, 2 = the same
+    passport number, 1 = the same name and mobile, 0 = not the same student."""
+    for rank, ident in ((3, lambda r: pb.clean_value(r.get("Student ID", "")).upper()),
+                        (2, _passport_no), (1, _name_mobile)):
+        a, b = ident(old), ident(new)
+        if a and a == b:
+            return rank
+    return 0
+
+
+def _changed_columns(old: Dict[str, str], new: Dict[str, str]) -> str:
+    cols = [c for c in new if new.get(c, "") != old.get(c, "")]
+    return f"{', '.join(cols[:4])}{'…' if len(cols) > 4 else ''}"
+
+
+def sheet_changes(prev: Dict[str, Dict], cur: Dict[str, Dict]) -> Tuple[List[str], List[str], List[str]]:
+    """(new, removed, edited) between two snapshots {row key: {"name", "hash", "rec"}}. A row whose
+    key changed is the same student, not one leaving and one joining, when it shares the Student
+    ID, a real passport number, or name and mobile with a row that went (surest match first, each
+    row paired once): it is reported as edited, with the columns that changed, or not at all when
+    nothing in it changed."""
+    added = [k for k in cur if k not in prev]
+    removed = [k for k in prev if k not in cur]
+    candidates = [(_same_student(prev[o].get("rec") or {}, cur[n]["rec"]), j, i, o, n)
+                  for j, n in enumerate(added) for i, o in enumerate(removed)]
+    paired_old, paired_new, edited = set(), set(), []
+    for rank, _, _, o, n in sorted((c for c in candidates if c[0] > 0), key=lambda c: (-c[0], c[1], c[2])):
+        if o in paired_old or n in paired_new:
+            continue
+        paired_old.add(o)
+        paired_new.add(n)
+        if prev[o].get("hash") != cur[n]["hash"]:
+            edited.append((n, prev[o].get("rec") or {}))
+    for k in cur:
+        if k in prev and prev[k]["hash"] != cur[k]["hash"]:
+            edited.append((k, prev[k].get("rec") or {}))
+    order = {k: i for i, k in enumerate(cur)}
+    edited.sort(key=lambda e: order[e[0]])
+    return ([cur[k]["name"] for k in added if k not in paired_new],
+            [prev[k]["name"] for k in removed if k not in paired_old],
+            [f"{cur[k]['name']} ({_changed_columns(old, cur[k]['rec'])})" for k, old in edited])
 
 
 def sync_sheets(state: Dict) -> List[str]:
@@ -132,8 +196,8 @@ def sync_sheets(state: Dict) -> List[str]:
         cur = {k: {"name": r.get("Full Name", ""), "hash": _digest(r), "rec": r} for k, r in snap.items()}
         prev = prev_all.get(sk)
         new_all[sk] = cur
-        if prev is not None and len(prev) == len(cur) and \
-                all(k in prev and prev[k]["hash"] == v["hash"] for k, v in cur.items()):
+        added, removed, changed = sheet_changes(prev, cur) if prev is not None else ([], [], [])
+        if prev is not None and not (added or removed or changed):
             # portal unchanged — but the main tab may have been edited by hand
             # (cells cleared/typed over). It must mirror the portal, so restore it.
             drift = pb.sheet_drift(cfg)
@@ -149,14 +213,6 @@ def sync_sheets(state: Dict) -> List[str]:
         if prev is None:
             lines.append(f"📄 {title}: sheet ready ({len(cur)} students) — change tracking started")
             continue
-        added = [v["name"] for k, v in cur.items() if k not in prev]
-        removed = [v["name"] for k, v in prev.items() if k not in cur]
-        changed = []
-        for k, v in cur.items():
-            if k in prev and prev[k]["hash"] != v["hash"]:
-                old_rec = prev[k].get("rec", {})
-                cols = [c for c in v["rec"] if v["rec"].get(c, "") != old_rec.get(c, "")]
-                changed.append(f"{v['name']} ({', '.join(cols[:4])}{'…' if len(cols) > 4 else ''})")
         lines.append(f"📄 {title}: sheet updated — now {len(cur)} students")
         for label, items in (("new", added), ("removed", removed), ("edited", changed)):
             if items:
@@ -173,13 +229,30 @@ def sync_docs() -> List[str]:
         result = loop.run_until_complete(vd.run_local(DOCS_ROOT))
     finally:
         loop.close()
+    return doc_lines(result)
+
+
+def doc_lines(result: Dict[str, list]) -> List[str]:
+    """The summary lines for verified_docs.run_local's result: first downloads ("newly verified")
+    apart from students whose portal files changed and were fetched again, of whom only those who
+    got new files are listed (a re-download that saved nothing is no news)."""
     lines: List[str] = []
-    if result["saved"]:
+
+    def entry(prog, name, n_files, shrunk, new_word=""):
+        files = f"{n_files} {new_word}file(s)" if n_files else "no new files (already on this PC)"
+        return (f"   • {name} — {prog}, {files}"
+                + (f", {len(shrunk)} compressed to under 2 MB" if shrunk else ""))
+
+    if result.get("saved"):
         lines.append(f"📁 {len(result['saved'])} newly verified student(s) — documents saved:")
         for prog, name, n_files, shrunk in result["saved"][:MAX_NAMES * 2]:
-            lines.append(f"   • {name} — {prog}, {n_files} file(s)"
-                         + (f", {len(shrunk)} compressed to under 2 MB" if shrunk else ""))
-    for name, err in result["failed"]:
+            lines.append(entry(prog, name, n_files, shrunk))
+    changed = [r for r in result.get("redownloaded") or [] if r[2]]
+    if changed:
+        lines.append(f"📁 {len(changed)} student(s) changed their documents on the portal — new files saved:")
+        for prog, name, n_files, shrunk in changed[:MAX_NAMES * 2]:
+            lines.append(entry(prog, name, n_files, shrunk, "new "))
+    for name, err in result.get("failed") or []:
         lines.append(f"⚠️ Could not download documents for {name}: {err[:120]} (will retry next run)")
     return lines
 
@@ -195,20 +268,25 @@ def verify_docs() -> List[str]:
 
 # --- 4) Telegram review ----------------------------------------------------------------
 def notify(lines: List[str], title: str = "🔄 Portal sync — changes found") -> None:
+    """Send `title` and the lines as plain text to every brief recipient, split between lines
+    under Telegram's limit (src.bot.replies.split_text)."""
     import httpx
+    from src.bot.replies import split_text
     token = settings.TELEGRAM_BOT_TOKEN
     ids = settings.brief_recipient_ids()
     if not token or not ids:
         logger.warning("Telegram not configured — summary not sent")
         return
-    text = "🔄 Portal sync — changes found\n\n" + "\n".join(lines)
-    chunks = [text[i:i + 3900] for i in range(0, len(text), 3900)]
+    chunks = split_text(f"{title}\n\n" + "\n".join(lines))
     with httpx.Client(timeout=30) as http:
         for chat in ids:
             for chunk in chunks:
                 try:
-                    http.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                              data={"chat_id": chat, "text": chunk, "disable_web_page_preview": True})
+                    resp = http.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                                     data={"chat_id": chat, "text": chunk, "disable_web_page_preview": True})
+                    if resp.status_code >= 400:
+                        logger.warning("Telegram refused the summary for %s: HTTP %s %s", chat,
+                                       resp.status_code, resp.text[:200])
                 except Exception as e:
                     logger.warning("Telegram send to %s failed: %s", chat, e)
 
