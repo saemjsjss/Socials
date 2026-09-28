@@ -32,7 +32,10 @@ WATCHER_CACHE_VERSION = 2
 # after this long, and the scans left (the oldest uploads) wait for the next run, 30 minutes on.
 WATCHER_BUDGET_SECONDS = 20 * 60
 _UPLOAD_TIME_RE = re.compile(r"passport_\d+_(\d{9,11})\b")
-_ALERT_FOOTER = "_(Strict Read-Only Alert: Please update in admin portal manually if required)_"
+# Audit results that checked nothing (a scan the portal lists but did not send, a profile or scan
+# it could not serve, an OCR engine that did not run): tried again next run, never remembered.
+UNCHECKED_STATUSES = ("MISSING_DOCUMENT", "PORTAL_UNREADABLE", "OCR_UNAVAILABLE")
+_ALERT_FOOTER ="_(Strict Read-Only Alert: Please update in admin portal manually if required)_"
 
 
 def load_watcher_cache() -> Dict[str, Any]:
@@ -196,11 +199,13 @@ async def check_new_passport_uploads(bot_application):
                 logger.error(f"Passport audit of uid {s['uid']} failed ({type(e).__name__}: {e}); "
                              "it is tried again next run.")
                 continue
-            if result.get("status") == "MISSING_DOCUMENT":
-                # The portal lists this scan, so it was not downloaded: never alert "no scan".
+            if result.get("status") in UNCHECKED_STATUSES:
+                # The portal lists this scan, so it was not downloaded; or the profile or the scan
+                # could not be read (ocr_validator.unchecked_result); or the OCR engine did not
+                # run: nothing was checked, so it is neither alerted nor remembered as audited.
                 failed += 1
-                logger.warning(f"Passport scan {scan} of uid {s['uid']} could not be downloaded; "
-                               "it is tried again next run.")
+                logger.warning(f"Passport scan {scan} of uid {s['uid']} could not be checked "
+                               f"({result.get('verdict') or result.get('status')}); it is tried again next run.")
                 continue
             entry = {"uid": s["uid"], "student_id": s.get("student_id", ""), "status": result.get("status", ""),
                      "checked": time.strftime("%Y-%m-%d %H:%M"), "alert": None, "sent": False}

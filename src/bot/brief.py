@@ -503,15 +503,25 @@ def claims_problem(text: str, facts: Iterable[str], extra_words: Iterable[str] =
     return None
 
 
-def check_summary(summary: Optional[str], facts: str) -> Optional[str]:
+# Words that place a figure on today (or on a day counted from it); a brief for a past day says
+# "on the day" in its facts, so a summary using these would put that day's figures on another day.
+_RELATIVE_DAY_RE = re.compile(r"\b(?:today|tonight|yesterday|tomorrow|this\s+(?:morning|afternoon|evening))\b", re.I)
+
+
+def check_summary(summary: Optional[str], facts: str, *, is_today: bool = True) -> Optional[str]:
     """The LLM's summary, cleaned (plain text, at most two sentences), or None when it may not be
     shown: empty, too long, or any claim that is not one of the facts (claims_problem). `facts` is
-    the list the LLM was given, one "- fact" a line."""
+    the list the LLM was given, one "- fact" a line. For a brief about a past day (is_today False)
+    a summary that says "today" (or another day counted from today) is dropped too."""
     from src.bot.voice import _plain
     text = re.sub(r"\s+", " ", _plain(summary or "")).strip().strip("\"'“”").strip()
     text = re.sub(r"^(?:summary|in short)\s*[:：-]\s*", "", text, flags=re.I)
     text = " ".join(re.split(r"(?<=[.!?])\s+", text)[:2]).strip()
     if not text or len(text) > SUMMARY_MAX_CHARS:
+        return None
+    if not is_today and _RELATIVE_DAY_RE.search(text):
+        logger.info(f"Brief summary dropped: it says {_RELATIVE_DAY_RE.search(text).group(0)!r} "
+                    "in a brief for a past day.")
         return None
     problem = claims_problem(text, (line.strip().lstrip("-").strip() for line in (facts or "").splitlines()))
     if problem:
@@ -520,10 +530,11 @@ def check_summary(summary: Optional[str], facts: str) -> Optional[str]:
     return text
 
 
-async def llm_summary(facts: List[str]) -> Optional[str]:
+async def llm_summary(facts: List[str], *, is_today: bool = True) -> Optional[str]:
     """One short summary from the local LLM (the one option set every call uses), checked by
-    check_summary. None when the brain is down, slow, or got a fact wrong, and when no fact has a
-    figure (the portal could not be read): there is nothing to sum up."""
+    check_summary (is_today False: the brief is for a past day). None when the brain is down,
+    slow, or got a fact wrong, and when no fact has a figure (the portal could not be read):
+    there is nothing to sum up."""
     if not facts or not any(re.search(r"\d", f) for f in facts):
         return None
     facts_text = "\n".join(f"- {f}" for f in facts)
@@ -535,7 +546,7 @@ async def llm_summary(facts: List[str]) -> Optional[str]:
     except Exception as e:
         logger.warning(f"Brief summary skipped: {type(e).__name__}: {e}")
         return None
-    return check_summary(raw, facts_text)
+    return check_summary(raw, facts_text, is_today=is_today)
 
 
 # --------------------------------------------------------------------------- compose & send
@@ -624,7 +635,7 @@ async def compose_brief(day: Optional[date] = None, with_summary: bool = True) -
         lines += section_lines + [""]
         facts += section_facts
 
-    summary = await llm_summary(facts) if with_summary else None
+    summary = await llm_summary(facts, is_today=is_today) if with_summary else None
     if summary:
         lines.append(f"🤖 _Summary by the local AI, its numbers checked against the facts:_ {esc(summary)}")
     text = "\n".join(lines).strip()

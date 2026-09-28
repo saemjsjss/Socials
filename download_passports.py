@@ -1,69 +1,50 @@
+"""Download every student's passport scan that is not saved yet into passports\\, read-only:
+the list comes from every page of students.php (admin_client.read_students, the shared reader),
+each scan through the one session path (admin_client.portal_get, which logs in again when the
+session expired). A web page sent instead of a scan (a login page) is never saved.
+
+Run from the BOT folder:
+    .venv\\Scripts\\python.exe download_passports.py
+"""
 import asyncio
 import os
-import re
-from bs4 import BeautifulSoup
-from src.scraper.client import admin_client
+
+from inspect_passports import passport_students
+from src.scraper.client import admin_client, portal_error_reason
 
 os.makedirs('passports', exist_ok=True)
 
-async def download_all_passports():
-    await admin_client.login()
-    resp = await admin_client.client.get('https://hangeul.com.bd/admin/students.php')
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    
-    rows = soup.find_all('tr')
-    downloaded = 0
-    students = []
-    
-    for r in rows:
-        text = r.get_text(' ', strip=True)
-        passport_link = None
-        for a in r.find_all('a'):
-            href = a.get('href') or ''
-            if 'passport_' in href and 'view_doc.php' in href:
-                passport_link = href
-                break
-        if passport_link:
-            name_m = re.search(r'Full Name\s+([A-Za-z\s\.]+?)(?:DOB|$)', text)
-            dob_m = re.search(r'DOB\s+([\d\-]+)', text)
-            pass_no_m = re.search(r'Passport No\s+([A-Za-z0-9]+)', text)
-            pass_exp_m = re.search(r'Passport Expiry\s+([\d\-]+)', text)
-            surname_m = re.search(r'Surname\s+([A-Za-z\s\.]+?)(?:Given Name|$)', text)
-            given_m = re.search(r'Given Name\s+([A-Za-z\s\.]+?)(?:Full Name|$)', text)
-            student_id_m = re.search(r'student_edit\.php\?id=(\d+)', str(r))
-            
-            s_info = {
-                'id': student_id_m.group(1) if student_id_m else 'unknown',
-                'name': name_m.group(1).strip() if name_m else 'Unknown',
-                'surname': surname_m.group(1).strip() if surname_m else '',
-                'given_name': given_m.group(1).strip() if given_m else '',
-                'dob': dob_m.group(1).strip() if dob_m else '',
-                'passport_no': pass_no_m.group(1).strip() if pass_no_m else '',
-                'expiry': pass_exp_m.group(1).strip() if pass_exp_m else '',
-                'doc_url': passport_link
-            }
-            students.append(s_info)
 
-    print(f"Total students to process: {len(students)}")
-    
+async def download_all_passports():
+    try:
+        students = passport_students(await admin_client.read_students())
+    except Exception as e:
+        print(f"Couldn't read the portal: {portal_error_reason(e)}")
+        return
+    downloaded = 0
+    print(f"Total students to process: {len(students)} (every page of students.php read)")
+
     for s in students:
         fname = s['doc_url'].split('f=')[-1]
         local_path = os.path.join('passports', f"{s['id']}_{fname}")
         if not os.path.exists(local_path):
             try:
-                res = await admin_client.client.get(f"https://hangeul.com.bd/admin/{s['doc_url']}")
-                if res.status_code == 200 and len(res.content) > 100:
+                res = await admin_client.portal_get(s['doc_url'], timeout=60.0)
+                content = res.content or b""
+                if content[:200].lstrip()[:1] == b"<" or b"<html" in content[:1000].lower():
+                    print(f"Failed ID {s['id']}: the portal sent a web page instead of the scan")
+                elif len(content) > 100:
                     with open(local_path, 'wb') as f:
-                        f.write(res.content)
+                        f.write(content)
                     downloaded += 1
-                    print(f"Downloaded ID {s['id']}: {fname} ({len(res.content)} bytes)")
+                    print(f"Downloaded ID {s['id']}: {fname} ({len(content)} bytes)")
                 else:
-                    print(f"Failed ID {s['id']}: status {res.status_code}")
+                    print(f"Failed ID {s['id']}: only {len(content)} bytes")
             except Exception as e:
-                print(f"Error ID {s['id']}: {e}")
+                print(f"Error ID {s['id']}: {portal_error_reason(e)}")
         else:
             print(f"Already cached ID {s['id']}: {local_path}")
-            
+
     print(f"Done. Downloaded {downloaded} new files.")
 
 if __name__ == '__main__':

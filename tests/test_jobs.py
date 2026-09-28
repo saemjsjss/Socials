@@ -255,6 +255,27 @@ def test_a_scan_that_could_not_be_downloaded_is_tried_again_never_alerted(watche
     assert memory["501|passport_501_1790000000.jpg"]["status"] == "MATCH"
 
 
+@pytest.mark.parametrize("unchecked", ["portal", "ocr"])
+def test_a_scan_the_portal_would_not_serve_is_tried_again_never_remembered(watcher, unchecked):
+    """audit_student_passport answers PORTAL_UNREADABLE (ocr_validator.unchecked_result) when the
+    profile or the scan could not be read, and OCR_UNAVAILABLE when the OCR engine did not run:
+    nothing was checked, so the next run checks it."""
+    from src.scraper.ocr_validator import unchecked_result
+    watcher.portal.pages["students.php"] = page(scan_row(501, 1, "KARIM HASAN"))
+    watcher.results["501"] = (
+        unchecked_result("501", "the passport scan could not be downloaded: timed out") if unchecked == "portal"
+        else {"status": "OCR_UNAVAILABLE", "is_valid": False, "discrepancies": [],
+              "verdict": "❌ Couldn't run the OCR engine on this computer, so the scan was not checked"})
+    bot = Bot()
+    memory = run_watcher(bot)
+    assert bot.sent == [] and memory == {}
+    watcher.results.pop("501")
+    watcher.audits.clear()
+    memory = run_watcher(bot)
+    assert [uid for uid, _, _ in watcher.audits] == ["501"]
+    assert memory["501|passport_501_1790000000.jpg"]["status"] == "MATCH" and bot.sent == []
+
+
 def test_a_run_stops_at_its_time_budget_and_the_rest_wait(watcher, monkeypatch):
     watcher.portal.pages["students.php"] = page(*[scan_row(500 + i, i + 1, f"S{i}", upload=1790000000 + i)
                                                    for i in range(5)])

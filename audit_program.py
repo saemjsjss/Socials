@@ -39,9 +39,7 @@ import os
 import re
 import sys
 from datetime import datetime
-from urllib.parse import quote_plus
 
-from bs4 import BeautifulSoup
 from src.scraper.client import admin_client
 
 # The 7 fields treated as "sections" on each student.
@@ -52,6 +50,12 @@ SECTION_LABEL = {
 }
 # A field whose status is one of these has a portal value that DISAGREES with the passport.
 WRONG_STATUSES = {"MISMATCH", "TYPO", "DATE_MISMATCH", "DISCREPANCY", "PARTIAL_MATCH"}
+# A field whose status is one of these could not be told for sure (a possible OCR misread, a
+# check digit that failed): a person checks it by eye. Never counted as a match.
+CHECK_STATUSES = {"OCR_UNCERTAIN", "NOT_READ"}
+# Audit results that checked nothing: the portal did not serve the profile or the scan, the OCR
+# engine did not run, or the audit itself failed. Never counted as an unreadable scan.
+UNCHECKED_STATUSES = {"PORTAL_UNREADABLE", "OCR_UNAVAILABLE", "ERROR"}
 
 
 async def fetch_program_student_ids(program: str):
@@ -60,44 +64,17 @@ async def fetch_program_student_ids(program: str):
     Only the student IDs are essential — every field used in the cross-check is
     re-fetched live per student inside audit_student_passport(). The list name is just
     for display, and the passport filename is auto-discovered later if missing here.
+
+    Every page of students.php?prog=<program> is read through the shared reader
+    (admin_client.read_students: it follows "Page 1 of N", de-duplicates by uid, and raises
+    PortalUnavailable when the list cannot be read whole, so a failed read is never "0 students").
     """
-    if not admin_client.is_authenticated:
-        await admin_client.login()
-
-    # The list shows 50 students per page ("Page 1 of 5"); read every page, not just the
-    # first, or larger programs are silently cut short.
-    by_id = {}
-    page, pages = 1, 1
-    while page <= pages:
-        url = f"{admin_client.base_url}/students.php?prog={quote_plus(program)}&pg={page}"
-        resp = await admin_client.client.get(url)
-        if "login.php" in str(resp.url):  # session expired -> re-auth and retry
-            admin_client.is_authenticated = False
-            await admin_client.login()
-            resp = await admin_client.client.get(url)
-        m = re.search(r"Page \d+ of (\d+)", resp.text)
-        pages = int(m.group(1)) if m else page
-        _collect_rows(BeautifulSoup(resp.text, "html.parser"), by_id)
-        page += 1
-    return list(by_id.values())
-
-
-def _collect_rows(soup, by_id):
-    """Add every student row on one list page to by_id (keyed by student id)."""
-    for tr in soup.find_all("tr"):
-        edit_a = tr.find("a", href=re.compile(r"student_edit\.php\?id=\d+"))
-        if not edit_a:
-            continue
-        stu_id = re.search(r"id=(\d+)", edit_a.get("href")).group(1)
-        text = tr.get_text(" ", strip=True)
-        name_m = re.search(r"Full Name\s+([A-Za-z\s\.]+?)(?:DOB|Passport|$)", text)
-        pass_a = tr.find("a", href=re.compile(r"view_doc\.php\?f=passport_"))
-        doc_filename = re.search(r"f=([^&]+)", pass_a.get("href")).group(1) if pass_a else None
-        by_id[stu_id] = {
-            "id": stu_id,
-            "name": name_m.group(1).strip() if name_m else "",
-            "doc_filename": doc_filename,
-        }
+    from src.bot.scheduler import passport_scan
+    records = await admin_client.read_students({"prog": program})
+    return [{"id": s["uid"],
+             "name": (s.get("details") or {}).get("Full Name") or s.get("student_name") or "",
+             "doc_filename": passport_scan(s)}
+            for s in records if s.get("uid")]
 
 
 def classify(audit: dict):
@@ -105,19 +82,24 @@ def classify(audit: dict):
 
     Returns a dict:
       scan        -> 'ok' | 'none' (no scan on file) | 'unreadable' (scan present, MRZ unreadable)
+                     | 'unchecked' (the portal or the OCR engine failed: nothing was checked)
       wrong       -> ["Passport No: portal='..' vs passport='..'", ...]
       blank       -> ["Father", ...]        (portal field is empty)
       not_on_scan -> ["Father", ...]        (portal has a value, scan doesn't show it)
+      check       -> ["Name", ...]          (could not be told for sure: check by eye)
       best_name   -> a name to display, taken from the audit if the list gave none
     """
     status = str(audit.get("status", "")).upper()
     fields = audit.get("fields", {}) or {}
+    empty = {"wrong": [], "blank": [], "not_on_scan": [], "check": [], "best_name": ""}
     if status == "MISSING_DOCUMENT":
-        return {"scan": "none", "wrong": [], "blank": [], "not_on_scan": [], "best_name": ""}
-    if status == "INVALID_DOCUMENT" or not fields:
-        return {"scan": "unreadable", "wrong": [], "blank": [], "not_on_scan": [], "best_name": ""}
+        return {"scan": "none", **empty}
+    if status in UNCHECKED_STATUSES:
+        return {"scan": "unchecked", **empty}
+    if status in ("MRZ_UNREADABLE", "SCAN_UNREADABLE", "INVALID_DOCUMENT") or not fields:
+        return {"scan": "unreadable", **empty}
 
-    wrong, blank, not_on_scan = [], [], []
+    wrong, blank, not_on_scan, check = [], [], [], []
     for key in SECTIONS:
         f = fields.get(key)
         if not f:
@@ -132,17 +114,25 @@ def classify(audit: dict):
             blank.append(label)                 # portal record itself is empty
         elif st == "NOT_IN_SCAN":
             not_on_scan.append(label)           # value exists on portal, not on this scan
+        elif st in CHECK_STATUSES:
+            check.append(label)                 # possible OCR misread: a person looks
         # else st == MATCH (or similar) -> field is fine
     best_name = str((fields.get("name") or {}).get("portal", "")).strip()
     return {"scan": "ok", "wrong": wrong, "blank": blank,
-            "not_on_scan": not_on_scan, "best_name": best_name}
+            "not_on_scan": not_on_scan, "check": check, "best_name": best_name}
 
 
 async def main():
     program = sys.argv[1] if len(sys.argv) > 1 else "Bachelor's Degree"
     print(f"\nLogging in and fetching students for program: {program!r} ...")
-    students = await fetch_program_student_ids(program)
-    print(f"Found {len(students)} students.")
+    try:
+        students = await fetch_program_student_ids(program)
+    except Exception as e:
+        from src.scraper.client import portal_error_reason
+        print(f"Couldn't read the portal: {portal_error_reason(e)}. Nothing was checked.")
+        await admin_client.close()
+        return 1
+    print(f"Found {len(students)} students (every page of the list read).")
     if not students:
         print("Nothing to check. Confirm the program name matches the portal exactly, "
               "and that MOCK_MODE=false with a valid read-only login in .env.")
@@ -151,8 +141,8 @@ async def main():
 
     print("Cross-checking each passport LIVE (OCR can take a few minutes)...\n")
     rows = []
-    n_clean = n_none = n_unreadable = 0
-    n_with_wrong = n_with_blank = 0
+    n_clean = n_none = n_unreadable = n_unchecked = 0
+    n_with_wrong = n_with_blank = n_with_check = 0
     tot_wrong = tot_blank = tot_not_on_scan = 0
 
     for i, s in enumerate(students, 1):
@@ -164,11 +154,14 @@ async def main():
 
         c = classify(audit)
         name = s["name"] or c["best_name"] or f"(ID {s['id']})"
-        wrong, blank, nos = c["wrong"], c["blank"], c["not_on_scan"]
+        wrong, blank, nos, check = c["wrong"], c["blank"], c["not_on_scan"], c["check"]
 
         if c["scan"] == "none":
             n_none += 1
             flag, scan_txt = "NO-SCAN", "No"
+        elif c["scan"] == "unchecked":
+            n_unchecked += 1
+            flag, scan_txt = "UNCHECKD", "Not checked (portal or OCR failed)"
         elif c["scan"] == "unreadable":
             n_unreadable += 1
             flag, scan_txt = "UNREADBL", "Yes (unreadable)"
@@ -178,9 +171,11 @@ async def main():
                 n_with_wrong += 1
             if blank:
                 n_with_blank += 1
-            if not wrong and not blank:
+            if check:
+                n_with_check += 1
+            if not wrong and not blank and not check:
                 n_clean += 1
-            flag = "OK" if (not wrong and not blank) else "ISSUE"
+            flag = "ISSUE" if (wrong or blank) else ("CHECK" if check else "OK")
 
         tot_wrong += len(wrong)
         tot_blank += len(blank)
@@ -194,11 +189,12 @@ async def main():
             "Wrong Fields (portal vs passport)": " | ".join(wrong),
             "Blank-in-Portal Count": len(blank),
             "Blank-in-Portal Fields": "; ".join(blank),
+            "Check-by-eye Fields": "; ".join(check),
             "Not-on-Scan (info)": "; ".join(nos),
             "Verdict": audit.get("verdict", ""),
         })
         print(f"  {i:>2}/{len(students)}  [{flag:>8}] {name}: "
-              f"wrong={len(wrong)} blank={len(blank)} not-on-scan={len(nos)}")
+              f"wrong={len(wrong)} blank={len(blank)} check-by-eye={len(check)} not-on-scan={len(nos)}")
 
     safe = re.sub(r"[^A-Za-z0-9]+", "_", program).strip("_") or "program"
     out = os.path.abspath(f"program_audit_{safe}_{datetime.now():%Y%m%d_%H%M}.csv")
@@ -213,8 +209,10 @@ async def main():
     print(f"Fully clean (all match):         {n_clean}")
     print(f"Have WRONG info (mismatches):    {n_with_wrong}   (total wrong fields: {tot_wrong})")
     print(f"Have BLANK portal fields:        {n_with_blank}   (total blank fields: {tot_blank})")
+    print(f"Have fields to check by eye:     {n_with_check}   (possible OCR misreads, not errors)")
     print(f"No passport scan on file:        {n_none}")
     print(f"Scan on file but MRZ unreadable: {n_unreadable}")
+    print(f"Not checked (portal/OCR failed): {n_unchecked}")
     print(f"'Not on scan' occurrences (info):{tot_not_on_scan}   "
           f"(usually Father/Mother/Address on single-page scans)")
     print(f"\nPer-student detail written to:\n  {out}")

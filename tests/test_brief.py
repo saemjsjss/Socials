@@ -467,6 +467,19 @@ def test_a_checked_summary_is_added_and_an_invented_one_dropped(portal):
     assert compose(with_summary=False).count("\n") > 10
 
 
+def test_a_summary_of_a_past_day_that_says_today_is_dropped(portal):
+    # The brief for 27 Sep (2 received, 1 done): its facts say "on the day", so a summary that puts
+    # those figures on "today" (the live "report for 07 Sep ... received today") is dropped.
+    portal.pages.update(full_portal())
+    past = date(2026, 9, 27)
+    portal.brain.reply = "2 requests came in today and 1 was done."
+    assert "Summary" not in compose(day=past)
+    portal.brain.reply = "2 requests came in on the day and 1 was done."
+    assert compose(day=past).split("\n")[-1].endswith("2 requests came in on the day and 1 was done.")
+    assert brief.check_summary("Seven requests came in today and 3 were done.", FACTS, is_today=False) is None
+    assert brief.check_summary("Seven requests came in today and 3 were done.", FACTS) is not None
+
+
 # --------------------------------------------------------------------------- Telegram
 
 def unbalanced_markdown(text):

@@ -233,12 +233,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
 
+    from src.bot.replies import reply_long
     dash = await admin_client.get_dashboard()
     msg = format_stats_report(dash)
-    try:
-        await update.message.reply_text(msg, parse_mode="Markdown")
-    except BadRequest:
-        await update.message.reply_text(msg.replace("*", "").replace("`", "").replace("_", ""))
+    await reply_long(update.message, msg)          # split under the limit, plain text if Markdown fails
 
 async def students_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /students: the newest applications on students.php (its first page), each with the
@@ -573,10 +571,11 @@ async def inquiries_date_command(update: Update, context: ContextTypes.DEFAULT_T
 
     if not raw_input:
         context.user_data["awaiting_date_for"] = "inquiries"
+        # Legacy Markdown does not nest entities: code spans inside _italics_ showed their backticks.
         await update.message.reply_text(
             "📅 *Total Consultancy Inquiries*\n\n"
             "Please enter the *specific date* you would like to check:\n"
-            "_(e.g. `12 Sep 2026`, `yesterday`, or `YYYY-MM-DD`)_",
+            "(e.g. `12 Sep 2026`, `yesterday` or `2026-09-12`)",
             parse_mode="Markdown"
         )
         return
@@ -668,21 +667,14 @@ async def inquiries_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await inquiries_date_command(update, context)
 
 async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /alerts command."""
+    """Handle /alerts: the dashboard's own "Needs attention" card, read live (src.bot.ask, the
+    answer free-text "urgent" / "attention" questions get). The live dashboard has no list of
+    "urgent alerts", so the old reply was always "No urgent alerts"; a dashboard that cannot be
+    read now says so."""
     if not is_authorized(update):
         return
-
-    dash = await admin_client.get_dashboard()
-    alerts = dash.get("urgent_alerts", [])
-    if not alerts:
-        await update.message.reply_text("✅ No urgent alerts at this moment.", parse_mode="Markdown")
-        return
-
-    lines = ["⚠️ *Urgent Action Items:*", ""]
-    for a in alerts:
-        lvl = "🔴" if a.get("level") == "warning" else "ℹ️"
-        lines.append(f"{lvl} {a.get('message')}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    from src.bot import ask
+    await ask.reply(update.message, ask.Route("dashboard", topic="attention"), "/alerts")
 
 def format_verified_students_report(verified_list: list, display_date: str) -> str:
     """/verified's report (Telegram Markdown) from admin_client.get_verified_students: how many
@@ -1066,32 +1058,24 @@ async def _find_student_in_export(query: str):
 
 
 async def _find_student_on_list_page(query: str):
-    """Old lookup: first page of students.php only (used if the CSV export fails)."""
+    """The lookup used if the CSV export fails: every page of students.php, through the shared
+    reader (admin_client.read_students, which raises PortalUnavailable when the list cannot be
+    read whole, so a failed read is never "no student found"). Fields come from each row's own
+    details; an email the list hides (Cloudflare's "[email protected]") is taken from the
+    student's edit page instead."""
     import re
-    from bs4 import BeautifulSoup
-    if not admin_client.is_authenticated:
-        await admin_client.login()
-    url = f"{admin_client.base_url}/students.php"
-    resp = await admin_client.client.get(url)
-    if "login.php" in str(resp.url):
-        admin_client.is_authenticated = False
-        await admin_client.login()
-        resp = await admin_client.client.get(url)
-    soup = BeautifulSoup(resp.text, "html.parser")
+    email_re = r"[\w.+-]+@[\w-]+\.[\w.-]+"
     q = (query or "").strip()
     q_low = q.lower()
     qn = re.sub(r"[^0-9a-z]", "", q_low)
-    for tr in soup.find_all("tr"):
-        edit_a = tr.find("a", href=re.compile(r"student_edit\.php\?id=\d+"))
-        if not edit_a:
+    for s in await admin_client.read_students():
+        stu_id = str(s.get("uid") or "")
+        if not stu_id:
             continue
-        stu_id = re.search(r"id=(\d+)", edit_a.get("href")).group(1)
-        text = tr.get_text(" ", strip=True)
-        hng_m = re.search(r"HNG-\d{4}-\d+", text, re.I)
-        hng = hng_m.group(0) if hng_m else ""
+        details = s.get("details") or {}
+        hng = s.get("student_id") or ""
         hng_n = re.sub(r"[^0-9a-z]", "", hng.lower())
-        name_m = re.search(r"Full Name\s+([A-Za-z\s\.]+?)(?:DOB|$)", text)
-        name = name_m.group(1).strip() if name_m else ""
+        name = (details.get("Full Name") or s.get("student_name") or "").strip()
 
         matched = False
         if qn and qn == stu_id:
@@ -1104,20 +1088,12 @@ async def _find_student_on_list_page(query: str):
             matched = True
 
         if matched:
-            mailto = tr.find("a", href=re.compile(r"mailto:", re.I))
-            if mailto:
-                email = re.sub(r"(?i)^mailto:", "", mailto.get("href")).split("?")[0].strip()
-            else:
-                em = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", text)
-                email = em.group(0) if em else ""
-            dob_m = re.search(r"DOB\s+([\d\-]+)", text)
-            pn_m = re.search(r"Passport No\s+([A-Za-z0-9]+)", text)
-            pe_m = re.search(r"Passport Expiry\s+([\d\-]+)", text)
+            em = re.fullmatch(email_re, (details.get("Email") or "").strip())
             result = {
-                "id": stu_id, "hng": hng, "name": name, "email": email,
-                "dob": dob_m.group(1).strip() if dob_m else "",
-                "passport_no": pn_m.group(1).strip() if pn_m else "",
-                "passport_expiry": pe_m.group(1).strip() if pe_m else "",
+                "id": stu_id, "hng": hng, "name": name, "email": em.group(0) if em else "",
+                "dob": details.get("DOB", ""),
+                "passport_no": details.get("Passport No", ""),
+                "passport_expiry": details.get("Passport Expiry", ""),
             }
             # The student LIST row usually lacks the email (and HNG); pull them from
             # the student's edit page, which holds the full profile fields.
@@ -1220,15 +1196,24 @@ async def _handle_email_flow(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     if step == "id":
         wait = await update.message.reply_text("⏳ _Looking up the student…_", parse_mode="Markdown")
+        lookup_error = None
         try:
             stu = await _find_student_for_email(text.strip())
         except Exception as e:
-            stu = None
+            stu, lookup_error = None, e
             logger.error(f"sendmail lookup error: {e}")
         try:
             await wait.delete()
         except Exception:
             pass
+        if lookup_error is not None:
+            # The student list could not be read: that is no "no student found".
+            from src.bot.replies import portal_error_reply
+            await update.message.reply_text(
+                portal_error_reply("The student lookup", lookup_error)
+                + "\nSend the *HNG number, ID, or name* again in a minute, or type *cancel*.",
+                parse_mode="Markdown")
+            return  # stay on step "id"
         if not stu:
             await update.message.reply_text(
                 f"ℹ️ No student found matching `{text.strip()}`. Send the *HNG number, ID, or name* "
