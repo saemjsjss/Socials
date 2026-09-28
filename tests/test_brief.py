@@ -33,7 +33,7 @@ from src.config import settings  # noqa: E402
 from src.bot import brief, scheduler, telegram_bot, voice  # noqa: E402
 from src.llm.ollama_client import ollama_client  # noqa: E402
 from src.scraper import parsers  # noqa: E402
-from src.scraper.client import admin_client  # noqa: E402
+from src.scraper.client import PortalUnavailable, admin_client  # noqa: E402
 from test_consultations import _page as consult_page, _row as consult_row  # noqa: E402
 
 NOW = datetime(2026, 9, 28, 18, 5, tzinfo=ZoneInfo("Asia/Dhaka"))
@@ -151,17 +151,44 @@ REMINDERS = (
     reminder("", "DHL to send", "· 26 Sep–28 Sep · 14:00 · Nowhere"),          # no title: dropped
 )
 
-CONSULTS = consult_page(
-    consult_row("Student A", "Consulted", "28 Sep 2026", by="Lina_Parvin"),
-    consult_row("Student B", "Consulted", "28 Sep 2026", by="Lina_Parvin"),
-    consult_row("Student C", "File Opened", "28 Sep 2026", by="Sadia"),
-    consult_row("Student D", "New", "28 Sep 2026"),
-    consult_row("Student E", "No Answer", "28 Sep 2026"),
-    consult_row("Student F", "Wrong Number", "28 Sep 2026"),
-    consult_row("Student G", "No Answer", "28 Sep 2026"),
-    consult_row("Student H", "Consulted", "27 Sep 2026", by="Sadia"),
-    consult_row("Student I", "New", "27 Sep 2026"),
-)
+CONSULT_DAYS = {
+    "28 Sep 2026": [
+        consult_row("Student A", "Consulted", "28 Sep 2026", by="Lina_Parvin"),
+        consult_row("Student B", "Consulted", "28 Sep 2026", by="Lina_Parvin"),
+        consult_row("Student C", "File Opened", "28 Sep 2026", by="Sadia"),
+        consult_row("Student D", "New", "28 Sep 2026"),
+        consult_row("Student E", "No Answer", "28 Sep 2026"),
+        consult_row("Student F", "Wrong Number", "28 Sep 2026"),
+        consult_row("Student G", "No Answer", "28 Sep 2026")],
+    "27 Sep 2026": [
+        consult_row("Student H", "Consulted", "27 Sep 2026", by="Sadia"),
+        consult_row("Student I", "New", "27 Sep 2026")],
+}
+# The portal's own all-time counts (its status tabs): far more than its unfiltered list shows.
+CONSULT_TOTALS = {"All": 999, "New": 8, "No Answer": 153, "Wrong Number": 40, "Consulted": 792, "File Opened": 6}
+CONSULTS = consult_page(*CONSULT_DAYS["28 Sep 2026"], *CONSULT_DAYS["27 Sep 2026"])    # the unfiltered list
+
+
+def consult_day_key(day_text):
+    iso = datetime.strptime(day_text, "%d %b %Y").date().isoformat()
+    return f"consult_requests.php?status=all&from={iso}&to={iso}"
+
+
+def consult_day_page(day_text, *rows):
+    """consult_requests.php under its date filter for one day: that day's rows and counts."""
+    iso = datetime.strptime(day_text, "%d %b %Y").date().isoformat()
+    return consult_page(*rows, day_from=iso, day_to=iso)
+
+
+def consult_pages(days=None, totals=None):
+    """The consultation views the brief and /inquiries read: each day's date filter, and the
+    File Opened tab, whose status tabs carry the all-time counts."""
+    pages = {"consult_requests.php?status=file_opened": consult_page(
+        consult_row("Old File", "File Opened", "13 Sep 2026", by="Sadia"),
+        counts=totals or CONSULT_TOTALS, status="file_opened")}
+    for day_text, rows in (CONSULT_DAYS if days is None else days).items():
+        pages[consult_day_key(day_text)] = consult_day_page(day_text, *rows)
+    return pages
 
 KLP = "KOREAN LANGUAGE PROGRAM (KLP)"
 VERIFIED_X = student(501, 330, "RAHIM UDDIN", KLP, "20,000.00 BDT", "Cash", "20,000.00 BDT",
@@ -171,6 +198,7 @@ VERIFIED_X = student(501, 330, "RAHIM UDDIN", KLP, "20,000.00 BDT", "Cash", "20,
 def full_portal():
     return {
         "consult_requests.php": CONSULTS,
+        **consult_pages(),
         "students.php": students_page(
             VERIFIED_X,
             student(500, 329, "KARIM MIA", KLP, "20,000.00 BDT", "bKash", "20,000.00 BDT", "MAHIRA JANAN", "27 Sep, 17:19"),
@@ -280,7 +308,8 @@ def test_every_count_is_exact(portal):
         "• Received: 7  |  Done: 3 (2 consulted, 1 file opened)",
         "• New / pending: 1  |  No answer: 2  |  Wrong number: 1",
         "• Done by: Lina\\_Parvin 2, Sadia 1",
-        "• The latest 9 requests on the page, 27 Sep–28 Sep 2026: 4 done, 2 new, 2 no answer, 1 wrong number",
+        "• All time on the portal (its own status counts): 999 requests, 798 done (792 consulted, "
+        "6 file opened), 8 new, 153 no answer, 40 wrong number",
     ]
     assert section(text, 2) == [
         "*2) PAYMENT-VERIFIED STUDENTS TODAY*",
@@ -312,6 +341,11 @@ def test_every_count_is_exact(portal):
     assert "Summary" not in text                     # the brain said nothing: no summary line
     assert all(method == "GET" for method, _ in portal.asked)
     assert ("GET", "students.php?pg=2") in portal.asked     # every page of the student list
+    # The day through the portal's own date filter, the totals from a light tab: never the ~2 MB
+    # unfiltered list, whose rows are only the newest 500.
+    assert ("GET", consult_day_key("28 Sep 2026")) in portal.asked
+    assert ("GET", "consult_requests.php?status=file_opened") in portal.asked
+    assert ("GET", "consult_requests.php") not in portal.asked
 
 
 def test_missing_data_says_not_available_and_invents_nothing(portal):
@@ -329,7 +363,7 @@ def test_missing_data_says_not_available_and_invents_nothing(portal):
 
 def test_nothing_today_says_none_not_zero_rows(portal):
     pages = full_portal()
-    pages["consult_requests.php"] = consult_page(consult_row("Old", "New", "20 Sep 2026"))
+    pages[consult_day_key("28 Sep 2026")] = consult_day_page("28 Sep 2026")   # the portal's own "none" row
     pages["students.php"] = students_page(page=1, pages=1)
     pages["calendar.php"] = calendar_page()
     portal.pages.update(pages)
@@ -426,7 +460,7 @@ def test_a_checked_summary_is_added_and_an_invented_one_dropped(portal):
 
     portal.brain.reply = "Seven requests came in and the conversion rate was 42%."
     assert "Summary" not in compose()
-    portal.brain.reply = "We had 9 requests today."                # 9 is only in the all-time line
+    portal.brain.reply = "We had 999 requests today."              # 999 is only in the all-time line
     assert "Summary" not in compose()
     portal.brain.reply = None                                      # the brain is down
     assert "Summary" not in compose()
@@ -515,7 +549,7 @@ def test_the_daily_job_sends_the_factual_brief_then_the_spoken_one(portal, monke
     said_from = spoken[0][1].split("\n")
     assert said_from[:2] == ["Consultation requests received today: 7", "Consultations done today: 3"]
     assert "Pending payments: 2" in said_from and "Calendar reminders for today: 3" in said_from
-    for absent in ("28 Sep", "18:05", "330", "328", "44", "latest", "*", "DAILY BRIEF"):
+    for absent in ("28 Sep", "18:05", "330", "328", "44", "999", "latest", "All time", "*", "DAILY BRIEF"):
         assert absent not in spoken[0][1], absent
 
     # A brief that cannot be composed sends nothing, and nothing is spoken.
@@ -773,26 +807,45 @@ def test_jennie_says_a_checked_figure(portal):
 
 # --------------------------------------------------------------------------- days the portal cannot answer for
 
-def test_a_day_before_the_consultation_page_is_not_available_not_zero(portal):
-    portal.pages.update(full_portal())                         # the page's oldest request: 27 Sep 2026
-    composed = asyncio.run(brief.compose_brief(day=date(2026, 9, 1), with_summary=False))
+def test_an_older_day_is_read_with_the_portals_own_date_filter(portal):
+    # 20 Aug is long before the newest 500 requests the unfiltered list shows: the date filter
+    # still has every one of its requests.
+    pages = full_portal()
+    pages[consult_day_key("20 Aug 2026")] = consult_day_page(
+        "20 Aug 2026", consult_row("Old A", "Consulted", "20 Aug 2026", by="Sadia"),
+        consult_row("Old B", "No Answer", "20 Aug 2026", by="Sadia"))
+    portal.pages.update(pages)
+    composed = asyncio.run(brief.compose_brief(day=date(2026, 8, 20), with_summary=False))
     part = section(composed.text, 1)
-    assert part[1] == "• not available (the consultation page only lists requests back to 27 Sep 2026)"
-    assert "None received" not in composed.text
-    assert composed.facts[0] == "Consultation requests received on the day: not available"
+    assert part[1:3] == ["• Received: 2  |  Done: 1 (1 consulted, 0 file opened)",
+                         "• New / pending: 0  |  No answer: 1  |  Wrong number: 0"]
+    assert composed.facts[0] == "Consultation requests received on the day: 2"
+    assert ("GET", "consult_requests.php?status=all&from=2026-08-20&to=2026-08-20") in portal.asked
+
+    # The filter's own "No consultation requests yet." for the day: a real 0. A day it could
+    # not read: not available, never 0.
+    portal.pages[consult_day_key("01 Sep 2026")] = consult_day_page("01 Sep 2026")
+    part = section(compose(day=date(2026, 9, 1), with_summary=False), 1)
+    assert part[1] == "• None received on 01 Sep 2026"
+    part = section(compose(day=date(2026, 9, 2), with_summary=False), 1)   # that page answers 404
+    assert part[1] == "• not available (the consultation page could not be read)"
 
 
-def test_a_full_consultation_page_leaves_its_oldest_day_unknown():
-    rows = [{"received_date": "26 Sep 2026", "status": "New"}] + [
-        {"received_date": "28 Sep 2026", "status": "New"}] * (brief.CONSULT_PAGE_LIMIT - 1)
-    lines, facts = brief.section_consultations(rows, "26 Sep 2026", False)
-    assert lines[1].startswith("• not available (the page's list of the latest 500 requests starts partway")
-    assert facts == ["Consultation requests received on the day: not available"]
-    lines, facts = brief.section_consultations(rows, "27 Sep 2026", False)   # inside the page: a real 0
-    assert lines[1] == "• None received on 27 Sep 2026" and facts == ["Consultation requests received on the day: 0"]
-    odd = rows + [{"received_date": "Today", "status": "New"}]              # a date the brief cannot read
-    lines, facts = brief.section_consultations(odd, "28 Sep 2026", True)
-    assert lines[1] == "• not available (1 request on the page has a date the brief cannot read)"
+def test_a_day_the_portal_lists_only_partly_keeps_its_own_counts():
+    rows = [{"received_date": "26 Sep 2026", "status": "Consulted", "handled_by": "Sadia"}] * 400 + [
+        {"received_date": "26 Sep 2026", "status": "New", "handled_by": ""}] * 100
+    counts = {"All": 600, "New": 150, "No Answer": 0, "Wrong Number": 0, "Consulted": 450, "File Opened": 0}
+    lines, facts = brief.section_consultations({"counts": counts, "rows": rows, "complete": False},
+                                               "26 Sep 2026", False, totals=CONSULT_TOTALS)
+    assert lines[1] == "• Received: 600  |  Done: 450 (450 consulted, 0 file opened)"
+    assert lines[3] == "• Done by: Sadia 400 (among the 500 the portal lists)"
+    assert not any("counsellor" in f for f in facts)            # a partial breakdown is no fact to repeat
+    # A done request whose row names nobody is said so, never credited to its consultant.
+    lines, facts = brief.section_consultations(
+        {"counts": {"All": 1, "Consulted": 1}, "rows": [{"status": "Consulted", "handled_by": ""}], "complete": True},
+        "26 Sep 2026", False)
+    assert lines[3] == "• Done by: no name on the portal 1"
+    assert lines[-1] == "• All time on the portal: not available (its status counts could not be read)"
 
 
 def test_a_day_a_year_back_is_not_matched_on_day_and_month(portal):
@@ -956,7 +1009,10 @@ def test_the_consultation_page_is_parsed_and_checked_off_the_event_loop(monkeypa
     monkeypatch.setattr(admin_client, "client", httpx.AsyncClient(transport=httpx.MockTransport(
         lambda request: httpx.Response(200, text="<table><tr><th>Foo</th></tr><tr><td>1</td></tr></table>"))))
     monkeypatch.setattr(admin_client, "is_authenticated", True)
+    monkeypatch.setattr(admin_client, "mock_mode", False)
     assert asyncio.run(admin_client.read_consultations()) is None       # rows in a layout not recognised
+    with pytest.raises(PortalUnavailable, match="layout not recognised"):   # parsed off the loop too
+        asyncio.run(admin_client.read_consultation_view())
     assert parsers.consultation_table(CONSULTS)[0]["name"] == "Student A"
     assert parsers.consultation_table("<p>no table</p>") is None
     assert parsers.consultation_table(consult_page()) == []             # an empty table: a real 0

@@ -1,13 +1,14 @@
 import asyncio
 import logging
 import re
+from collections import Counter
 from typing import Optional, Dict, Any, List
 from urllib.parse import parse_qs, urlsplit
 import httpx
 from bs4 import BeautifulSoup
 
 from src.config import BOT_ROOT, settings
-from src.dates import parse_stamp
+from src.dates import parse_portal_date, parse_stamp
 from src.scraper.parsers import (
     ADMITTED_STAGE,
     StudentListLayoutError,
@@ -19,6 +20,7 @@ from src.scraper.parsers import (
     parse_students_page,
     parse_consultation_requests,
     consultation_table,
+    consultation_view,
     parse_pending_payments,
     parse_window_applications,
     count_under_review,
@@ -40,6 +42,11 @@ MAX_STUDENT_PAGES = 40
 # A portal page read may take its time downloading (consult_requests.php is ~2 MB), but a host
 # that does not even take the connection is given up on quickly.
 CONNECT_TIMEOUT = 10.0
+# consult_requests.php lists at most this many requests under its status tabs (newest first); the
+# tabs themselves count every request. The lightest view whose tabs still count every request:
+# a status tab opened without a date filter (a handful of rows instead of the ~2 MB full list).
+CONSULT_LIST_LIMIT = 500
+CONSULT_TOTALS_VIEW = {"status": "file_opened"}
 
 
 def _error_text(e: Exception) -> str:
@@ -328,6 +335,80 @@ class HangeulAdminClient:
         All the parsing (the page is ~2 MB) runs in a worker thread."""
         html = await self.fetch_html("consult_requests.php")
         return await asyncio.to_thread(consultation_table, html)
+
+    async def read_consultation_view(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """One read-only GET of consult_requests.php with `params` (the query its own status-tab
+        links and GET search form use: status, from, to), parsed in a worker thread
+        (parsers.consultation_view: rows, tabs, status, from, to, listed). Raises PortalUnavailable
+        when the page cannot be read or its layout is not recognised: no status tabs with counts,
+        or a table whose rows cannot be read."""
+        if self.mock_mode:
+            raise PortalUnavailable("the bot is in mock mode, so there is no live portal to read")
+        html = await self.fetch_html("consult_requests.php", params=params)
+        view = await asyncio.to_thread(consultation_view, html)
+        if view["tabs"] is None:
+            raise PortalUnavailable("consult_requests.php: its status tabs (All, New, ...) and their counts were "
+                                    "not found (layout not recognised)")
+        if view["rows"] is None:
+            raise PortalUnavailable("consult_requests.php: the requests table's layout is not recognised")
+        return view
+
+    async def read_consultation_totals(self) -> Dict[str, int]:
+        """The portal's own all-time request counts, from consult_requests.php's status tabs, e.g.
+        {"All": 999, "New": 8, "No Answer": 153, "Wrong Number": 40, "Consulted": 792,
+        "File Opened": 6}. The tabs count every request whichever tab is open (only a date filter
+        narrows them), while the list under them shows only the newest CONSULT_LIST_LIMIT: so the
+        lightest tab (CONSULT_TOTALS_VIEW, a handful of rows instead of the ~2 MB list) is read.
+        Raises PortalUnavailable, also when the page did not open that tab or shows a date filter
+        (its counts would then not be all-time)."""
+        view = await self.read_consultation_view(CONSULT_TOTALS_VIEW)
+        if view["status"] != CONSULT_TOTALS_VIEW["status"] or view["from"] or view["to"]:
+            raise PortalUnavailable("consult_requests.php did not open the tab asked for, so its counts "
+                                    "may not be all-time (layout not recognised)")
+        return view["tabs"]
+
+    async def read_consultation_day(self, day) -> Dict[str, Any]:
+        """The consultation requests received on `day` (a date, or text such as "27 Sep 2026"),
+        from the portal's own date filter, consult_requests.php?status=all&from=DAY&to=DAY (a GET,
+        as the page's tab links and search form use it). Any day is read this way, not only the
+        days among the newest CONSULT_LIST_LIMIT requests the unfiltered list shows.
+
+        -> {"day": the date,
+            "counts": that day's status-tab counts ("All" is how many were received),
+            "rows": the day's listed requests (consultation_rows' records), newest first,
+            "complete": whether every one of them is listed (the portal lists at most a few hundred)}
+        Raises ValueError for a day that is not a date, and PortalUnavailable when the page cannot
+        be read or does not add up: its search form does not show the day as its filter (the
+        filter was not applied), a listed request is from another day or has a date the bot cannot
+        read, or the list holds another number of requests, or statuses, than its own tabs and
+        caption count."""
+        day = target_day(day)
+        iso = day.isoformat()
+        view = await self.read_consultation_view({"status": "all", "from": iso, "to": iso})
+        shown = f"{day:%d %b %Y}"
+        if view["from"] != iso or view["to"] != iso or view["status"] != "all":
+            raise PortalUnavailable(f"consult_requests.php did not apply the date filter for {shown} "
+                                    "(layout not recognised)")
+        rows, counts, listed = view["rows"], view["tabs"], view["listed"]
+        other = [r for r in rows if parse_portal_date(r.get("received_date") or "") != day]
+        if other:
+            raise PortalUnavailable(f"consult_requests.php's filter for {shown} listed {len(other)} request(s) "
+                                    "from another day or with a date the bot cannot read")
+        if listed is not None and listed != len(rows):
+            raise PortalUnavailable(f"consult_requests.php says it lists {listed} requests for {shown} but "
+                                    f"{len(rows)} could be read (layout not recognised)")
+        if len(rows) > counts["All"] or (len(rows) < counts["All"] and listed is None
+                                         and len(rows) < CONSULT_LIST_LIMIT):
+            raise PortalUnavailable(f"consult_requests.php counts {counts['All']} requests on {shown} but "
+                                    f"{len(rows)} could be read (layout not recognised)")
+        complete = len(rows) == counts["All"]
+        if complete:
+            got = Counter(r.get("status", "") for r in rows)
+            want = Counter({k: v for k, v in counts.items() if k != "All" and v})
+            if got != want:
+                raise PortalUnavailable(f"consult_requests.php: the statuses of the {len(rows)} requests on {shown} "
+                                        "do not match its own status counts (layout not recognised)")
+        return {"day": day, "counts": counts, "rows": rows, "complete": complete}
 
     async def read_student_pages(self, params: Optional[Dict[str, Any]] = None, *,
                                  all_pages: bool = True) -> List[str]:
