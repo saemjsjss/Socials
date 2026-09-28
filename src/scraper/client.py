@@ -2,23 +2,32 @@ import asyncio
 import logging
 import re
 from typing import Optional, Dict, Any, List
+from urllib.parse import parse_qs, urlsplit
 import httpx
 from bs4 import BeautifulSoup
 
 from src.config import BOT_ROOT, settings
+from src.dates import parse_stamp
 from src.scraper.parsers import (
+    ADMITTED_STAGE,
+    StudentListLayoutError,
     extract_csrf_token,
+    is_admitted,
     parse_dashboard_metrics,
     parse_tables,
     parse_hangeul_live_dashboard,
-    parse_hangeul_live_students,
+    parse_students_page,
     parse_consultation_requests,
     consultation_table,
-    scan_verified_students,
     parse_pending_payments,
     parse_window_applications,
     count_under_review,
-    parse_calendar_events
+    parse_calendar_events,
+    student_matches,
+    student_pager,
+    student_uids,
+    verified_on_day,
+    target_day,
 )
 from src.scraper.ocr_validator import validate_passport_data, AUDIT_REGISTRY
 from src.scraper.mock_data import MOCK_DASHBOARD_STATS, MOCK_APPLICATIONS, MOCK_INQUIRIES
@@ -36,6 +45,38 @@ CONNECT_TIMEOUT = 10.0
 def _error_text(e: Exception) -> str:
     """An exception as text that is never empty (str(httpx.ReadTimeout('')) is '')."""
     return str(e) or type(e).__name__
+
+
+class PortalUnavailable(RuntimeError):
+    """The portal could not be read, so nothing may be reported as a figure (never a 0, "none" or
+    an empty list). Raised by HangeulAdminClient.portal_get / fetch_html and every reader built on
+    them: a failed login, a page that still ends on login.php after logging in again (session
+    expired), an HTTP error status, a timeout or refused connection (`unreachable` True: the
+    portal did not answer at all), or a page whose layout is not recognised.
+    str(e) / e.reason is a short plain-English reason for the reply."""
+
+    def __init__(self, reason: str, *, unreachable: bool = False):
+        super().__init__(reason)
+        self.reason = reason
+        self.unreachable = unreachable
+
+
+def portal_error_reason(e: Exception) -> str:
+    """A failed portal read as a short reason for a reply: PortalUnavailable's own reason, "the
+    portal did not answer in time" for a timeout, "could not connect to the portal" for a refused
+    connection; anything else as its type and text."""
+    if isinstance(e, PortalUnavailable):
+        return e.reason
+    if isinstance(e, (asyncio.TimeoutError, httpx.TimeoutException)):
+        return "the portal did not answer in time"
+    if isinstance(e, httpx.TransportError):
+        return f"could not connect to the portal ({type(e).__name__})"
+    return f"{type(e).__name__}: {_error_text(e)}"
+
+
+def _ended_on_login(resp: httpx.Response) -> bool:
+    """Whether a response ended on the login page (a redirect there: the session expired)."""
+    return resp.url.path.rstrip("/").endswith("login.php")
 
 class HangeulAdminClient:
     """HTTP Client for Hangeul Admin with session persistence, CSRF handling & mock support."""
@@ -65,14 +106,15 @@ class HangeulAdminClient:
         await self.client.aclose()
 
     async def get_login_page(self) -> Dict[str, Any]:
-        """Fetch the login page and extract the CSRF token and cookies."""
+        """Fetch the login page and extract the CSRF token and cookies. On failure -> {"error",
+        "unreachable" (the portal did not answer at all)}."""
         if self.mock_mode:
             return {
                 "csrf_token": "mock-csrf-token-12345",
                 "session_active": False,
                 "mock": True
             }
-            
+
         url = f"{self.base_url}/login.php"
         try:
             resp = await self.client.get(url, timeout=30.0)
@@ -85,14 +127,18 @@ class HangeulAdminClient:
                 "mock": False
             }
         except Exception as e:
-            logger.error(f"Failed to fetch login page: {e}")
-            return {"error": str(e), "mock": False}
+            logger.error(f"Failed to fetch login page: {_error_text(e)}")
+            return {"error": portal_error_reason(e), "unreachable": isinstance(e, httpx.TransportError),
+                    "mock": False}
 
     async def login(self, username: Optional[str] = None, password: Optional[str] = None) -> Dict[str, Any]:
-        """Authenticate with the admin portal using CSRF token and credentials."""
+        """Log in to the portal: the login page's CSRF token, then the one POST the bot ever makes
+        (login.php). -> {"success": True, ...}, or {"success": False, "error": why, "unreachable":
+        True when the portal did not answer at all}. A POST whose response still ends on login.php
+        is a refused login, whatever the page says."""
         uname = username or self.username
         pword = password or self.password
-        
+
         if self.mock_mode:
             self.is_authenticated = True
             return {
@@ -101,27 +147,30 @@ class HangeulAdminClient:
                 "role": "admin",
                 "mock": True
             }
-            
+
         login_info = await self.get_login_page()
+        if login_info.get("error"):
+            return {"success": False, "error": f"the login page could not be opened ({login_info['error']})",
+                    "unreachable": bool(login_info.get("unreachable"))}
         csrf_token = login_info.get("csrf_token")
-        
+
         if not csrf_token:
             return {"success": False, "error": "Could not extract CSRF token from login page"}
-            
+
         payload = {
             "_csrf": csrf_token,
             "username": uname,
             "password": pword
         }
-        
+
         post_url = f"{self.base_url}/login.php"
         try:
             resp = await self.client.post(post_url, data=payload)
-            # If still on login page or containing 'error', login failed
-            if "login.php" in str(resp.url) and ("Invalid" in resp.text or "error" in resp.text.lower()):
+            # Still on the login page after the POST: the login was refused.
+            if _ended_on_login(resp):
                 self.is_authenticated = False
-                return {"success": False, "error": "Invalid credentials or login rejected by portal"}
-                
+                return {"success": False, "error": "the portal refused the login (wrong username or password?)"}
+
             self.is_authenticated = True
             return {
                 "success": True,
@@ -130,35 +179,29 @@ class HangeulAdminClient:
                 "message": "Authentication successful"
             }
         except Exception as e:
-            logger.error(f"Login failed: {e}")
-            return {"success": False, "error": str(e)}
+            logger.error(f"Login failed: {_error_text(e)}")
+            return {"success": False, "error": portal_error_reason(e),
+                    "unreachable": isinstance(e, httpx.TransportError)}
 
     async def get_dashboard(self) -> Dict[str, Any]:
-        """Fetch and parse dashboard summary statistics."""
+        """Fetch and parse dashboard summary statistics (index.php, parse_hangeul_live_dashboard).
+        Never raises: a page that cannot be read gives {"error": why}, which every caller shows as
+        "not available"."""
         if self.mock_mode:
             return MOCK_DASHBOARD_STATS
-            
-        if not self.is_authenticated:
-            auth_res = await self.login()
-            if not auth_res.get("success"):
-                return {"error": "Authentication failed", "details": auth_res}
-                
-        url = f"{self.base_url}/index.php"
         try:
-            resp = await self.client.get(url)
-            # If redirected back to login, session expired
-            if "login.php" in str(resp.url):
-                self.is_authenticated = False
-                await self.login()
-                resp = await self.client.get(url)
-                
-            return parse_hangeul_live_dashboard(resp.text)
+            return parse_hangeul_live_dashboard(await self.fetch_html("index.php", timeout=30.0))
         except Exception as e:
-            logger.error(f"Failed to fetch dashboard: {_error_text(e)}")
-            return {"error": _error_text(e)}
+            logger.error(f"Failed to fetch dashboard: {portal_error_reason(e)}")
+            return {"error": portal_error_reason(e)}
 
     async def get_applications(self, status: Optional[str] = None, intake: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Retrieve student applications and visa statuses."""
+        """Students from students.php (parse_students_page records: the real stage, intake,
+        university...), optionally only those whose stage contains `status` / whose intake contains
+        `intake`. Without a filter it is the first page, the 50 newest applications (the "recent"
+        list /students and the LLM context show); with one, every page, since the answer depends on
+        every student. Raises PortalUnavailable when the list cannot be read: never an empty list
+        standing in for "could not read"."""
         if self.mock_mode:
             apps = MOCK_APPLICATIONS
             if status:
@@ -166,54 +209,43 @@ class HangeulAdminClient:
             if intake:
                 apps = [a for a in apps if intake.lower() in a["target_intake"].lower()]
             return apps
-            
-        if not self.is_authenticated:
-            await self.login()
-            
-        url = f"{self.base_url}/students.php"
-        try:
-            resp = await self.client.get(url)
-            # If redirected back to login, session expired
-            if "login.php" in str(resp.url):
-                self.is_authenticated = False
-                await self.login()
-                resp = await self.client.get(url)
 
-            apps = parse_hangeul_live_students(resp.text)
-            if status:
-                apps = [a for a in apps if status.lower() in a["status"].lower()]
-            if intake:
-                apps = [a for a in apps if intake.lower() in a["target_intake"].lower()]
-            return apps
-        except Exception as e:
-            logger.error(f"Error fetching applications: {e}")
-            return []
+        apps = await self.read_students(all_pages=bool(status or intake))
+        if status:
+            apps = [a for a in apps if status.lower() in a["status"].lower()]
+        if intake:
+            apps = [a for a in apps if intake.lower() in a["target_intake"].lower()]
+        return apps
 
-    async def get_admitted_students(self, query: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Retrieve admitted students from students.php?status=admitted."""
-        if not self.is_authenticated:
-            await self.login()
+    async def get_admitted_students(self, query: Optional[str] = None) -> Dict[str, Any]:
+        """The admitted students, read from every page of students.php and picked in code: the
+        portal ignores ?status=admitted (it sends the whole list), so a student counts as admitted
+        when their stage (the "Stage · Applied" column) is the stage the dashboard's own Admitted
+        tile links to (students.php?stage=Admitted / Completed; ADMITTED_STAGE when the dashboard
+        cannot be read). `query` then narrows them in code by name, HNG id, university, program or
+        intake (student_matches), since the portal's own search does not cover universities or
+        programs; nothing of it goes into a URL.
 
-        url = f"{self.base_url}/students.php?status=admitted"
-        if query:
-            url += f"&q={query}"
-        try:
-            resp = await self.client.get(url)
-            if "login.php" in str(resp.url):
-                self.is_authenticated = False
-                await self.login()
-                resp = await self.client.get(url)
-
-            apps = parse_hangeul_live_students(resp.text)
-            if query and not apps:
-                resp_all = await self.client.get(f"{self.base_url}/students.php?status=admitted")
-                all_apps = parse_hangeul_live_students(resp_all.text)
-                q_low = query.lower()
-                apps = [a for a in all_apps if any(q_low in str(v).lower() for v in a.values())]
-            return apps
-        except Exception as e:
-            logger.error(f"Error fetching admitted students: {e}")
-            return []
+        -> {"students": the admitted students matching the query, "admitted": how many are
+            admitted in all, "checked": how many students were read, "stage": the stage used,
+            "tile": the dashboard's Admitted figure (None when not read), "query": query}
+        Raises PortalUnavailable when the list cannot be read whole."""
+        stage, tile = ADMITTED_STAGE, None
+        if self.mock_mode:
+            students = MOCK_APPLICATIONS
+        else:
+            dash = await self.get_dashboard()
+            for t in dash.get("tiles") or []:
+                if re.sub(r"[^a-z]", "", t.get("label", "").lower()) == "admitted" and "students.php" in t.get("href", ""):
+                    tile = t.get("value")
+                    named = parse_qs(urlsplit(t["href"]).query).get("stage")
+                    stage = named[0].strip() if named and named[0].strip() else ADMITTED_STAGE
+                    break
+            students = await self.read_students()
+        admitted = [s for s in students if is_admitted(s, stage)]
+        matching = [s for s in admitted if student_matches(s, query)] if query else admitted
+        return {"students": matching, "admitted": len(admitted), "checked": len(students),
+                "stage": stage, "tile": tile, "query": query}
 
     async def get_consultation_requests(self, target_date: Optional[str] = "today") -> List[Dict[str, Any]]:
         """Retrieve student consultation requests from consult_requests.php, optionally filtered by date."""
@@ -240,22 +272,55 @@ class HangeulAdminClient:
             
         return await self.get_consultation_requests(target_date="today")
 
-    async def fetch_html(self, path: str, timeout: float = 60.0) -> str:
-        """One read-only GET of a portal page, logging in again if the session expired -> its HTML.
-        Raises when the page cannot be fetched, so a caller can say "not available" instead of 0."""
-        if not self.is_authenticated:
-            await self.login()
+    async def _ensure_session(self) -> None:
+        """Log in when there is no session; raise PortalUnavailable when the login fails."""
+        if self.is_authenticated:
+            return
+        result = await self.login()
+        if not result.get("success"):
+            raise PortalUnavailable(f"couldn't log in to the portal: {result.get('error') or 'no reason given'}",
+                                    unreachable=bool(result.get("unreachable")))
+
+    async def _get_once(self, path: str, params, limits) -> httpx.Response:
         url = f"{self.base_url}/{path.lstrip('/')}"
+        try:
+            return await self.client.get(url, params=params, timeout=limits)
+        except httpx.TimeoutException as e:
+            raise PortalUnavailable(f"{path}: the portal did not answer in time ({type(e).__name__})",
+                                    unreachable=True) from e
+        except httpx.TransportError as e:
+            raise PortalUnavailable(f"{path}: could not connect to the portal ({type(e).__name__})",
+                                    unreachable=True) from e
+
+    async def portal_get(self, path: str, params: Optional[Dict[str, Any]] = None,
+                         timeout: float = 60.0) -> httpx.Response:
+        """The one way to read a portal page: one read-only GET of `path` (`params` are URL-encoded
+        by httpx, so "Admission & Tuition" stays one value). It logs in first when there is no
+        session and checks that the login worked; a response that ended on login.php (the session
+        expired) logs in again once and repeats the GET. A host that does not take the connection
+        is given up on after CONNECT_TIMEOUT seconds; a slow page gets `timeout`.
+
+        Raises PortalUnavailable (never returns a login page or an error page as data): the login
+        failed; the page still ended on login.php after logging in again; the portal answered an
+        HTTP error; or it did not answer (a timeout or refused connection: .unreachable is True)."""
+        await self._ensure_session()
         limits = httpx.Timeout(timeout, connect=min(timeout, CONNECT_TIMEOUT))
-        resp = await self.client.get(url, timeout=limits)
-        if "login.php" in str(resp.url):
-            self.is_authenticated = False
-            await self.login()
-            resp = await self.client.get(url, timeout=limits)
-        if "login.php" in str(resp.url):
-            raise RuntimeError(f"{path}: the portal sent the login page")
-        resp.raise_for_status()
-        return resp.text
+        resp = await self._get_once(path, params, limits)
+        if _ended_on_login(resp):
+            self.is_authenticated = False            # the session expired: one fresh login
+            await self._ensure_session()
+            resp = await self._get_once(path, params, limits)
+            if _ended_on_login(resp):
+                self.is_authenticated = False
+                raise PortalUnavailable(f"{path}: the portal kept sending its login page after a fresh login")
+        if resp.status_code >= 400:
+            raise PortalUnavailable(f"{path}: the portal answered HTTP {resp.status_code}")
+        return resp
+
+    async def fetch_html(self, path: str, timeout: float = 60.0, params: Optional[Dict[str, Any]] = None) -> str:
+        """portal_get(path, params, timeout) -> the page's HTML. Raises PortalUnavailable when the
+        page cannot be read, so a caller says "not available" instead of 0."""
+        return (await self.portal_get(path, params=params, timeout=timeout)).text
 
     async def read_consultations(self) -> Optional[List[Dict[str, Any]]]:
         """Every row of consult_requests.php, read by column name. None when the page has no table,
@@ -264,50 +329,104 @@ class HangeulAdminClient:
         html = await self.fetch_html("consult_requests.php")
         return await asyncio.to_thread(consultation_table, html)
 
-    async def read_verified_students(self, target_date: Optional[str] = "today",
-                                     all_pages: bool = True) -> List[Dict[str, Any]]:
-        """Students whose payment was verified on target_date, from students.php: every page
-        ("Page 1 of N", ?pg=N) when all_pages, since a student registered weeks ago and verified
-        today sits on a later page; else the first page only. Parsing runs in a worker thread
-        (a page is ~1 MB). Raises when a page cannot be read, and when the list cannot be read
-        whole or its layout is not recognised, so a caller says "not available" instead of 0:
-        a full first page with no "Page 1 of N" (the later pages could not be found), or student
-        rows with no "Payment verified by" line on any page (the line's wording changed)."""
-        found, seen = [], set()
-        page, pages = 1, 1
-        students = markers = 0
+    async def read_student_pages(self, params: Optional[Dict[str, Any]] = None, *,
+                                 all_pages: bool = True) -> List[str]:
+        """The HTML of every page of students.php for `params` (e.g. {"q": "Kim"} or
+        {"status": "pending"}; kept on every page), in order; only the first page when not
+        all_pages (the 50 newest applications).
+
+        It follows the pager ("Page 1 of 7 · 330 students", ?pg=2..7), checks each page is the one
+        asked for, follows a page count that grows while reading (a student registered meanwhile:
+        rows shift down, and consumers de-duplicate by uid), and checks the pages hold every student
+        the first page counts. Raises PortalUnavailable when the list cannot be read whole: a page
+        with no student table, a full first page with no pager (its later pages cannot be found),
+        a page other than the one asked for, more than MAX_STUDENT_PAGES pages, or fewer students
+        than the pager says (the list shrank while being read, or rows went unrecognised)."""
+        base = {k: v for k, v in (params or {}).items() if v not in (None, "") and k != "pg"}
+        found: List[str] = []
+        uids: Dict[str, None] = {}
+        page, pages, total = 1, 1, None
         while page <= pages:
-            html = await self.fetch_html("students.php" + (f"?pg={page}" if page > 1 else ""))
-            if page == 1 and "<table" not in html:
-                raise RuntimeError("students.php has no student table")
-            scan = await asyncio.to_thread(scan_verified_students, html, target_date)
-            if all_pages:
-                m = re.search(r"Page \d+ of (\d+)", html)
-                if m:
-                    pages = min(int(m.group(1)), MAX_STUDENT_PAGES)
-                elif page == 1 and scan["students"] >= STUDENTS_PER_PAGE:
-                    raise RuntimeError(f"students.php shows {scan['students']} students but no "
-                                       "'Page 1 of N', so its later pages cannot be found")
-            students += scan["students"]
-            markers += scan["markers"]
-            for s in scan["verified"]:
-                key = s.get("uid") or (s.get("name"), s.get("verified_time"), s.get("amount"))
-                if key not in seen:     # a row can shift onto the next page while we read
-                    seen.add(key)
-                    found.append(s)
+            query = {**base, "pg": page} if page > 1 else base
+            html = await self.fetch_html("students.php", params=query or None)
+            if "<table" not in html:
+                raise PortalUnavailable("students.php has no student table (its layout is not recognised)")
+            pager, on_page = student_pager(html), student_uids(html)
+            if page == 1:
+                if pager["pages"] is None:
+                    if len(on_page) >= STUDENTS_PER_PAGE:
+                        raise PortalUnavailable(f"students.php shows {len(on_page)} students but no "
+                                                "'Page 1 of N', so its later pages cannot be found")
+                else:
+                    pages, total = pager["pages"], pager["total"]
+            if pager["page"] is not None and pager["page"] != page:
+                raise PortalUnavailable(f"students.php sent page {pager['page']} when asked for page {page} "
+                                        "(the list changed while it was read)")
+            pages = max(pages, pager["pages"] or 0)
+            if pages > MAX_STUDENT_PAGES:
+                raise PortalUnavailable(f"students.php says it has {pages} pages, more than the "
+                                        f"{MAX_STUDENT_PAGES} the bot reads")
+            found.append(html)
+            uids.update(dict.fromkeys(on_page))
+            if not all_pages:
+                break
             page += 1
-        if students and not markers:
-            raise RuntimeError(f"students.php: {students} student rows but no 'Payment verified by' "
-                               "line on any of them (layout not recognised)")
+        if all_pages and total is not None and len(uids) < total:
+            raise PortalUnavailable(f"the student list says {total} students but its {pages} pages hold "
+                                    f"{len(uids)} (it changed while it was read, or rows were not recognised)")
         return found
 
-    async def get_verified_students(self, target_date: Optional[str] = "today") -> List[Dict[str, Any]]:
-        """Retrieve students whose payment was verified on target_date (first page of students.php)."""
-        try:
-            return await self.read_verified_students(target_date, all_pages=False)
-        except Exception as e:
-            logger.error(f"Error fetching verified students: {e}")
-            return []
+    async def read_students(self, params: Optional[Dict[str, Any]] = None, *,
+                            all_pages: bool = True) -> List[Dict[str, Any]]:
+        """Every student on students.php for `params` (read_student_pages), each read by
+        parse_students_page (by the header's column names, with the details row's fields) and
+        listed once, by uid, in the list's order. Parsing runs in a worker thread (a page is
+        ~1 MB). Raises PortalUnavailable when the list cannot be read whole or a page's layout is
+        not recognised."""
+        found: List[Dict[str, Any]] = []
+        seen = set()
+        for html in await self.read_student_pages(params, all_pages=all_pages):
+            try:
+                parsed = await asyncio.to_thread(parse_students_page, html)
+            except StudentListLayoutError as e:
+                raise PortalUnavailable(f"students.php: {e}") from e
+            for s in parsed["students"]:
+                key = s.get("uid") or ("row", s.get("student_id"), s.get("student_name"), s.get("applied_date"))
+                if key not in seen:         # a row can shift onto the next page while we read
+                    seen.add(key)
+                    found.append(s)
+        return found
+
+    async def read_verified_students(self, target_date="today", all_pages: bool = True) -> List[Dict[str, Any]]:
+        """Students whose payment was verified on target_date (a date, or text such as "today" or
+        "27 Sep 2026"), from students.php: every page when all_pages, since a student registered
+        weeks ago and verified today sits on a later page; else the first page only. Each is
+        parsers.verification's dict (name, program, amount, method, verified_by, verified_time,
+        uid, student_id), matched on the row's own "Payment verified by NAME · 27 Sep, 17:19"
+        stamp (whole day and month; the stamp has no year, so first reject a day a year or more
+        back with src.dates.yearless_day_problem).
+
+        Raises ValueError for a target date that is not a date, and PortalUnavailable when a page
+        cannot be read, the list cannot be read whole, or its layout is not recognised: student
+        rows with no "Payment verified by" stamp on any of them (the line's wording changed), or a
+        verification line whose date cannot be read."""
+        day = target_day(target_date)
+        students = await self.read_students(all_pages=all_pages)
+        lines = [s for s in students if s.get("verified_line")]
+        if students and not lines:
+            raise PortalUnavailable(f"students.php: {len(students)} student rows but no 'Payment verified by' "
+                                    "line on any of them (layout not recognised)")
+        unreadable = [s for s in lines if parse_stamp(s.get("verified_stamp", "")) is None]
+        if unreadable:
+            raise PortalUnavailable(f"students.php: {len(unreadable)} verification line(s) with a date the bot "
+                                    "cannot read (layout not recognised)")
+        return verified_on_day(students, day)
+
+    async def get_verified_students(self, target_date="today") -> List[Dict[str, Any]]:
+        """The /verified commands' read: read_verified_students over every page of students.php.
+        Raises (PortalUnavailable, ValueError) instead of returning [] when it cannot read, so a
+        failed read is never reported as "no payments were verified"."""
+        return await self.read_verified_students(target_date, all_pages=True)
 
     async def read_pending_payments(self) -> Optional[Dict[str, Any]]:
         """Pending payments from students.php?status=pending ({"count", "listed", "badge"}), or None

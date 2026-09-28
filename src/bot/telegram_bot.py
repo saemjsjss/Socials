@@ -74,68 +74,45 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome_msg, parse_mode="Markdown")
 
-def normalize_date_input(text: str) -> tuple[str, str]:
-    """
-    Given any user text (e.g. 'yesterday', '9 Sep', '08/09/2026', 'report for 07 Sep 2026', '/report 08 Sep 2026'),
-    returns (portal_date_str, display_date_str).
-    portal_date_str matches table 'DD Mon YYYY' (e.g. '09 Sep 2026').
-    """
-    import re
-    from datetime import datetime, timedelta
-    
-    text_clean = (text or "").strip()
-    t_low = text_clean.lower()
-    now = datetime.now()
-    
-    if "yesterday" in t_low:
-        d = now - timedelta(days=1)
-        return d.strftime("%d %b %Y"), d.strftime("%d %B %Y")
-    if "today" in t_low or t_low in ["", "report", "/report", "/consultations", "/inquiries", "/verified", "/verified_students", "verified", "/crosscheck", "crosscheck", "/audit", "audit"]:
-        return now.strftime("%d %b %Y"), now.strftime("%d %B %Y")
+# The words a date request may have around its date ("report for 07 Sep 2026", "/verified_date
+# yesterday", "how many students were verified"): what is left once they are gone is the date.
+_DATE_FILLER_RE = re.compile(
+    r"/\w+(?:@\w+)?|[?!.,:;'\"()]|\b(?:reports?|consultations?|consultancy|inquir(?:y|ies)|enquir(?:y|ies)|requests?"
+    r"|verified|verifications?|verify|students?|payments?|paid|crosscheck|cross\s*check|audit|check|only|specific"
+    r"|specif|dates?|days?|for|of|on|in|at|the|a|an|and|to|by|please|pls|show|give|get|got|tell|me|us|how|many"
+    r"|much|were|was|is|are|be|been|did|do|does|done|has|have|had|their|there|total|list|who|what|which|number"
+    r"|count|all|any|brief|summary|daily|came|come|received|new)\b", re.I)
 
-    cleaned = re.sub(r'/(?:report|consultations|inquiries|verified|verified_students|crosscheck|audit)\b', '', text_clean, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\b(?:report|consultation|requests?|verified|verification|students?|crosscheck|audit|cross\s*check|only|specific|specif|date|dates|for|of|on|please|show|give|me|how|many|were)\b', '', cleaned, flags=re.IGNORECASE).strip()
-    cleaned_suffix = re.sub(r'(\d+)(st|nd|rd|th)\b', r'\1', cleaned, flags=re.IGNORECASE).strip()
 
-    formats = [
-        '%d %b %Y', '%d %B %Y', '%d %b', '%d %B',
-        '%b %d %Y', '%B %d %Y', '%b %d', '%B %d',
-        '%Y-%m-%d', '%Y/%m/%d', '%d-%m-%Y', '%d/%m/%Y',
-        '%d-%m', '%d/%m'
-    ]
+def normalize_date_input(text: str, strict: bool = False) -> Optional[tuple]:
+    """The date a user's text names, as (portal 'DD Mon YYYY', display 'DD Month YYYY'), e.g. from
+    'yesterday', '9 Sep', '08/09/2026', 'report for 07 Sep 2026', '/report 08 Sep 2026'.
 
-    for fmt in formats:
-        try:
-            dt = datetime.strptime(cleaned_suffix, fmt)
-            if dt.year == 1900:
-                dt = dt.replace(year=now.year)
-            return dt.strftime("%d %b %Y"), dt.strftime("%d %B %Y")
-        except ValueError:
-            pass
-
-    m = re.search(r'\b(\d{1,2})\s*([A-Za-z]{3,9})(?:\s*(\d{2,4}))?\b', cleaned_suffix)
-    if m:
-        day = int(m.group(1))
-        month_str = m.group(2)[:3].capitalize()
-        year = int(m.group(3)) if m.group(3) else now.year
-        if year < 100:
-            year += 2000
-        try:
-            dt = datetime.strptime(f'{day:02d} {month_str} {year}', '%d %b %Y')
-            return dt.strftime("%d %b %Y"), dt.strftime("%d %B %Y")
-        except ValueError:
-            pass
-
-    return now.strftime("%d %b %Y"), now.strftime("%d %B %Y")
+    Read by the one strict parser, src.dates.parse_user_date (month names only as whole words; a
+    date typed without a year is the latest one not after today). A text with no date in it at
+    all (a bare '/report', 'how many students were verified') is today. None when the text has
+    something date-like that is not a readable date ('31 Sep 2026', 'Sep', '12th', 'last week'),
+    or, with strict, anything besides the command and filler words ('/verified_date foo'): the
+    caller then replies with src.bot.replies.date_error_reply. Never a silent stand-in day."""
+    from src.dates import has_date_hint, local_today, parse_user_date
+    today = local_today()
+    day = parse_user_date(text or "", today, prefer_past=True)
+    if day is None:
+        rest = re.sub(r"\s+", " ", _DATE_FILLER_RE.sub(" ", text or "")).strip()
+        if rest and (strict or has_date_hint(rest)):
+            return None
+        day = today
+    return day.strftime("%d %b %Y"), day.strftime("%d %B %Y")
 
 def parse_user_report_intent(text: str) -> tuple[bool, str, str]:
-    """Detect if user is asking for an operational report or specifying a date."""
+    """Detect if user is asking for an operational report or specifying a date. The dates are ""
+    when the text's date cannot be read (report_command then says so)."""
     import re
     t_clean = (text or "").strip()
     t_low = t_clean.lower()
 
     if t_clean.startswith(('/report', '/consultations', '/inquiries')):
-        p_date, d_date = normalize_date_input(t_clean)
+        p_date, d_date = normalize_date_input(t_clean) or ("", "")
         return True, p_date, d_date
 
     triggers = ['report', 'summary', 'brief', 'consultation', 'inquiry', 'inquiries', 'came', 'done', 'how many', 'yesterday', 'today']
@@ -145,7 +122,7 @@ def parse_user_report_intent(text: str) -> tuple[bool, str, str]:
     has_date_pattern = bool(re.search(r'\b\d{1,4}[-/.]\d{1,2}(?:[-/.]\d{1,4})?\b', t_clean))
 
     if has_trigger or has_month or has_date_pattern:
-        p_date, d_date = normalize_date_input(t_clean)
+        p_date, d_date = normalize_date_input(t_clean) or ("", "")
         return True, p_date, d_date
 
     return False, '', ''
@@ -166,7 +143,12 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif update.message and update.message.text:
         raw_input = update.message.text
 
-    portal_date, display_date = normalize_date_input(raw_input)
+    parsed = normalize_date_input(raw_input)
+    if parsed is None:
+        from src.bot.replies import date_error_reply
+        await update.message.reply_text(date_error_reply(raw_input, "/report"), parse_mode="Markdown")
+        return
+    portal_date, display_date = parsed
     logger.info(f"Generating report for portal_date={portal_date}, display_date={display_date} (raw='{raw_input}') from chat_id {chat_id}")
 
     status_msg = await update.message.reply_text(f"⏳ _Gathering live portal records for {display_date}..._", parse_mode="Markdown")
@@ -269,19 +251,32 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg.replace("*", "").replace("`", "").replace("_", ""))
 
 async def students_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /students command."""
+    """Handle /students: the newest applications on students.php (its first page), each with the
+    columns as the portal shows them ("—" where it shows nothing), or why the list could not be read."""
     if not is_authorized(update):
         return
 
-    apps = await admin_client.get_applications()
+    from src.bot.brief import esc
+    from src.bot.replies import portal_error_reply, reply_long
+    try:
+        apps = await admin_client.get_applications()
+    except Exception as e:
+        logger.error(f"Error in students_command: {e}")
+        await update.message.reply_text(portal_error_reply("The student list", e), parse_mode="Markdown")
+        return
+    if not apps:
+        await update.message.reply_text("ℹ️ The student list on the portal is empty.")
+        return
     lines = ["🎓 *Recent Student Applications:*", ""]
     for a in apps[:8]:
-        status_emoji = "✅" if "Approved" in a["status"] else ("⏳" if "Review" in a["status"] else "📝")
-        lines.append(f"• {status_emoji} *{a['student_name']}* ({a['target_intake']})")
-        lines.append(f"  └ *Program:* {a['program']}")
-        lines.append(f"  └ *Univ:* {a['target_university']} | *Status:* `{a['status']}`")
+        stage = a.get("status") or ""
+        status_emoji = "✅" if ("Approved" in stage or "Admitted" in stage) else ("⏳" if "Review" in stage else "📝")
+        lines.append(f"• {status_emoji} *{esc(a.get('student_name') or '—')}* ({esc(a.get('target_intake') or '—')})")
+        lines.append(f"  └ *Program:* {esc(a.get('program') or '—')}")
+        lines.append(f"  └ *Univ:* {esc(a.get('target_university') or '—')} | *Status:* "
+                     f"`{(stage or '—').replace('`', '')}`")
         lines.append("")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await reply_long(update.message, "\n".join(lines).strip())
 
 def get_commands_cheatsheet_text() -> str:
     """Return the pinned cheatsheet markdown containing the 6 official menu commands and usage."""
@@ -347,7 +342,9 @@ async def pin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def admitted_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /admitted [query] command."""
+    """Handle /admitted [query]: the students at the dashboard's Admitted stage, picked in code
+    from every page of students.php (admin_client.get_admitted_students), optionally narrowed by
+    name, HNG id, university, program or intake; or why the list could not be read."""
     if not is_authorized(update):
         return
 
@@ -357,65 +354,80 @@ async def admitted_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif context and context.user_data.get("override_query"):
         query = context.user_data.pop("override_query", None)
 
+    from src.bot.replies import portal_error_reply, reply_long
     status_msg = await update.message.reply_text("🔍 _Retrieving admitted students live from portal..._", parse_mode="Markdown")
     try:
-        apps = await admin_client.get_admitted_students(query=query)
-        if not apps:
-            filter_note = f" matching '{query}'" if query else ""
-            await status_msg.edit_text(f"ℹ️ *No admitted students found{filter_note} on the portal.*", parse_mode="Markdown")
-            return
-
-        total_count = len(apps)
-        univ_counts = {}
-        prog_counts = {}
-        for a in apps:
-            u = a.get("target_university") or "Pending Allocation"
-            p = a.get("program") or "General"
-            univ_counts[u] = univ_counts.get(u, 0) + 1
-            prog_counts[p] = prog_counts.get(p, 0) + 1
-
-        top_univs = sorted(univ_counts.items(), key=lambda x: x[1], reverse=True)[:4]
-        top_progs = sorted(prog_counts.items(), key=lambda x: x[1], reverse=True)[:3]
-
-        lines = [
-            "🎓 *Hangeul Portal — Admitted Students*",
-            f"• *Total Showing:* `{total_count}` records live from portal" + (f" (filtered by `{query}`)" if query else ""),
-            ""
-        ]
-
-        if not query:
-            lines.append("📊 *Intake Distribution:*")
-            lines.append("• *Top Universities:* " + ", ".join([f"{u} ({c})" for u, c in top_univs]))
-            lines.append("• *Programs:* " + ", ".join([f"{p} ({c})" for p, c in top_progs]))
-            lines.append("")
-
-        lines.append("📋 *Student Roster:*")
-        for i, a in enumerate(apps[:12], 1):
-            s_name = a.get("student_name", "Student")
-            s_id = a.get("id", "N/A")
-            univ = a.get("target_university") or "Pending Allocation"
-            prog = a.get("program") or "N/A"
-            intake = a.get("target_intake") or "N/A"
-            pay = a.get("payment_status") or a.get("status") or "Verified"
-
-            lines.append(f"*{i}. {s_name}* (`{s_id}`)")
-            lines.append(f"   🏛 *Univ:* {univ} | *Prog:* {prog}")
-            lines.append(f"   💳 *Pay:* `{pay}` | *Intake:* {intake}")
-
-        if total_count > 12:
-            lines.append("")
-            lines.append(f"_...and {total_count - 12} more admitted students on file._")
-            lines.append("💡 _Tip: Search a specific student or university using `/admitted <query>`_")
-
-        await status_msg.edit_text("\n".join(lines), parse_mode="Markdown")
+        result = await admin_client.get_admitted_students(query=query)
+        text = format_admitted_report(result)
     except Exception as e:
         logger.error(f"Error in admitted_command: {e}")
-        await status_msg.edit_text(f"❌ Error fetching admitted students: `{e}`", parse_mode="Markdown")
+        text = portal_error_reply("Admitted students", e)
+    await reply_long(update.message, text, edit=status_msg)
+
+
+ADMITTED_ROSTER_MAX = 12
+
+
+def format_admitted_report(result: dict) -> str:
+    """/admitted's reply from admin_client.get_admitted_students: how many of the students read
+    are at the admitted stage, those matching the query, and a roster, every figure counted from
+    the rows (the dashboard's Admitted tile is shown only as a cross-check, never instead)."""
+    from collections import Counter
+    from src.bot.brief import esc
+
+    def code(value) -> str:
+        return f"`{str(value).replace('`', '')}`"
+
+    students, query = result.get("students") or [], result.get("query")
+    admitted, checked = result.get("admitted", 0), result.get("checked", 0)
+    stage, tile = esc(result.get("stage") or ""), result.get("tile")
+    where = (f"{admitted} of the {checked} students on the portal "
+             f"{'is' if admitted == 1 else 'are'} at the stage “{stage}” (every page of the student list read live)")
+    check = ""
+    if tile is not None and tile != admitted:
+        check = (f"⚠️ The dashboard's Admitted tile says {tile}, but the student list shows {admitted} "
+                 "at that stage.")
+    elif tile is not None:
+        check = f"The dashboard's Admitted tile says {tile} too."
+    if not students:
+        if query:
+            head = (f"ℹ️ *No admitted students match “{esc(query)}”.*" if admitted else
+                    f"ℹ️ *No admitted students match “{esc(query)}”:* no student on the portal is admitted right now.")
+        else:
+            head = "ℹ️ *No admitted students on the portal right now.*"
+        return "\n".join(x for x in (head, where[0].upper() + where[1:] + ".", check) if x)
+
+    lines = ["🎓 *Hangeul Portal — Admitted Students*",
+             f"• *Admitted:* `{admitted}` — {where}"]
+    if query:
+        lines.append(f"• *Matching* “{esc(query)}”: `{len(students)}`")
+    if check:
+        lines.append(check)
+    lines.append("")
+    groups = (("Universities", "target_university", 4), ("Programs", "program", 3), ("Intakes", "target_intake", 6))
+    lines.append("📊 *Breakdown:*")
+    for label, key, most in groups:
+        counts = Counter(s.get(key) or "—" for s in students)
+        lines.append(f"• *{label}:* " + ", ".join(f"{esc(k)} ({n})" for k, n in counts.most_common(most)))
+    lines += ["", "📋 *Student Roster:*"]
+    for i, s in enumerate(students[:ADMITTED_ROSTER_MAX], 1):
+        sid = s.get("student_id") or s.get("id") or ""
+        lines.append(f"*{i}. {esc(s.get('student_name') or '—')}*" + (f" ({code(sid)})" if sid else " (no student ID yet)"))
+        lines.append(f"   🏛 *Univ:* {esc(s.get('target_university') or '—')} | *Prog:* {esc(s.get('program') or '—')}")
+        lines.append(f"   💳 *Pay:* {code(s.get('payment_status') or '—')} | *Intake:* {esc(s.get('target_intake') or '—')}")
+    if len(students) > ADMITTED_ROSTER_MAX:
+        lines += ["", f"_...and {len(students) - ADMITTED_ROSTER_MAX} more._",
+                  "💡 Tip: search by name, ID, university or program: `/admitted <query>`"]
+    return "\n".join(lines)
 
 async def build_inquiries_report(target_date_input: str = "today") -> str:
     """Build detailed inquiries and completion report for target date from consult_requests.php."""
-    portal_date, display_date = normalize_date_input(target_date_input)
-    
+    parsed = normalize_date_input(target_date_input)
+    if parsed is None:
+        from src.bot.replies import date_error_reply
+        return date_error_reply(target_date_input, "/inquiries_date")
+    portal_date, display_date = parsed
+
     if not admin_client.is_authenticated:
         await admin_client.login()
     resp = await admin_client.client.get(f"{admin_client.base_url}/consult_requests.php")
@@ -569,10 +581,11 @@ async def verified_date_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     if not raw_input:
         context.user_data["awaiting_date_for"] = "verified"
+        # Legacy Markdown does not nest entities: code spans inside _italics_ showed their backticks.
         await update.message.reply_text(
             "📅 *Total Verified Students*\n\n"
             "Please enter the *specific date* to view verified students:\n"
-            "_(e.g. `12 Sep 2026`, `yesterday`, or `YYYY-MM-DD`)_",
+            "(e.g. `12 Sep 2026`, `yesterday` or `2026-09-12`)",
             parse_mode="Markdown"
         )
         return
@@ -637,55 +650,71 @@ async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 def format_verified_students_report(verified_list: list, display_date: str) -> str:
-    """Format verified students into a clear, executive telegram summary."""
+    """/verified's report (Telegram Markdown) from admin_client.get_verified_students: how many
+    students were verified, the total of the amounts the rows show, and each student's name,
+    program, payment, verifier and time. Only what the portal rows show: a missing field is "—",
+    a total over rows without an amount says so, and nothing is filled in. Only called after
+    every page of the student list was read (a failed read is portal_error_reply, never this)."""
+    from src.bot.brief import esc
     if not verified_list:
         return f"ℹ️ *No student payments were verified on {display_date}.*"
-    
+
     total_count = len(verified_list)
-    total_amount = 0.0
+    amounts = []
     for v in verified_list:
-        import re
-        amt_match = re.search(r'([\d,]+(?:\.\d+)?)', v.get("amount", ""))
+        amt_match = re.search(r'\d[\d,]*(?:\.\d+)?', v.get("amount") or "")
         if amt_match:
-            try:
-                total_amount += float(amt_match.group(1).replace(",", ""))
-            except ValueError:
-                pass
-    
+            amounts.append(float(amt_match.group(0).replace(",", "")))
+    if not amounts:
+        revenue = "not available (no amount on the portal rows)"
+    else:
+        revenue = f"`৳ {sum(amounts):,.2f} BDT`"
+        if len(amounts) < total_count:
+            revenue += (f" (the {len(amounts)} with an amount on the portal; "
+                        f"{total_count - len(amounts)} without)")
+
     lines = [
         f"✅ *Student Payment Verifications — {display_date}*",
         f"• *Total Students Verified:* `{total_count}`",
-        f"• *Total Verified Revenue:* `৳ {total_amount:,.2f} BDT`\n",
+        f"• *Total Verified Revenue:* {revenue}\n",
         "📋 *Verified Student Records:*"
     ]
-    
+
     for idx, s in enumerate(verified_list, 1):
         # Only what the portal row shows: a missing field is "—", never a made-up value.
-        name = s.get("name") or "—"
-        prog = s.get("program") or "—"
-        payment = " ".join(x for x in (s.get("amount"), s.get("method")) if x) or "—"
-        counselor = s.get("verified_by") or "—"
-        time_str = s.get("verified_time", "")
+        name = esc(s.get("name") or "—")
+        prog = esc(s.get("program") or "—")
+        payment = (" ".join(x for x in (s.get("amount"), s.get("method")) if x) or "—").replace("`", "")
+        counselor = esc(s.get("verified_by") or "—")
+        time_str = esc(s.get("verified_time") or "")
 
         lines.append(f"*{idx}. {name}*")
         lines.append(f"   ├ 🎓 *Program:* {prog}")
         lines.append(f"   ├ 💰 *Payment:* `{payment}`")
         lines.append(f"   └ 👤 *Verified by:* {counselor}" + (f" ({time_str})" if time_str else ""))
         lines.append("")
-        
+
     return "\n".join(lines).strip()
 
 async def verified_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /verified [date] command to report verified students."""
+    """Handle /verified [date] (and /verified_students, /verified_today, /verified_date and their
+    free-text routes): the students whose payment was verified on that day, read live from every
+    page of students.php. A date that cannot be read, a day the portal's yearless stamps cannot
+    answer for, and a failed portal read each get their own clear reply, never "none verified"."""
+    from datetime import datetime
+    from src.bot.replies import date_error_reply, portal_error_reply, reply_long
+    from src.dates import local_today, yearless_day_problem
     chat_id = update.effective_chat.id
     if not is_authorized(update):
         logger.warning(f"Unauthorized /verified attempt from chat_id: {chat_id}")
         await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{chat_id}`", parse_mode="Markdown")
         return
 
-    raw_input = ""
+    # Where the date comes from decides how strictly it is read: words routed from a free-text
+    # question may have no date in them (then it is today); a date given to a command must be one.
+    raw_input, strict = "", True
     if hasattr(context, "user_data") and context.user_data.get("override_text"):
-        raw_input = context.user_data.pop("override_text")
+        raw_input, strict = context.user_data.pop("override_text"), False
     elif hasattr(context, "user_data") and context.user_data.get("override_date"):
         raw_input = context.user_data.pop("override_date")
     elif context and context.args:
@@ -693,29 +722,31 @@ async def verified_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif update.message and update.message.text:
         raw_input = update.message.text
 
-    portal_date, display_date = normalize_date_input(raw_input)
+    parsed = normalize_date_input(raw_input, strict=strict)
+    if parsed is None:
+        logger.info(f"/verified: unreadable date {raw_input!r} from chat_id {chat_id}")
+        await update.message.reply_text(date_error_reply(raw_input, "/verified_date"), parse_mode="Markdown")
+        return
+    portal_date, display_date = parsed
+    day = datetime.strptime(portal_date, "%d %b %Y").date()
     logger.info(f"Checking verified students for portal_date={portal_date}, display_date={display_date} (raw='{raw_input}') from chat_id {chat_id}")
+
+    problem = yearless_day_problem(day, local_today())
+    if problem:
+        from src.bot.brief import esc
+        await update.message.reply_text(
+            f"ℹ️ *Verified students on {display_date}:* not available ({esc(problem)}).", parse_mode="Markdown")
+        return
 
     status_msg = await update.message.reply_text(f"⏳ _Gathering verified student records for {display_date}..._", parse_mode="Markdown")
     try:
-        verified_list = await admin_client.get_verified_students(target_date=portal_date)
+        verified_list = await admin_client.get_verified_students(target_date=day)
         report_text = format_verified_students_report(verified_list, display_date)
-
-        try:
-            await update.message.reply_text(report_text, parse_mode="Markdown")
-        except Exception as parse_err:
-            logger.warning(f"Markdown send failed ({parse_err}), falling back to plain text")
-            await update.message.reply_text(report_text)
-
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-
-        logger.info(f"Successfully dispatched verified students for {display_date} to chat_id {chat_id}")
     except Exception as e:
         logger.error(f"Error fetching verified students: {e}")
-        await update.message.reply_text(f"❌ Failed to fetch verified students: `{e}`")
+        report_text = portal_error_reply(f"Verified students for {display_date}", e)
+    await reply_long(update.message, report_text, edit=status_msg)
+    logger.info(f"Dispatched verified students for {display_date} to chat_id {chat_id}")
 
 async def passports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /passports command reporting passport verification and match audit statistics."""
@@ -1208,18 +1239,10 @@ async def sendmail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _chunk_message(text: str, limit: int = 3900) -> list:
-    """Split a long report into Telegram-safe chunks (<= 4096 chars) on line breaks."""
-    if len(text) <= limit:
-        return [text]
-    chunks, cur = [], ""
-    for line in text.split("\n"):
-        if len(cur) + len(line) + 1 > limit and cur:
-            chunks.append(cur.rstrip("\n"))
-            cur = ""
-        cur += line + "\n"
-    if cur.strip():
-        chunks.append(cur.rstrip("\n"))
-    return chunks
+    """Split a long report into Telegram-safe chunks (<= 4096 chars) on line breaks: the one
+    splitter, src.bot.replies.split_text (a short text is one chunk as it is)."""
+    from src.bot.replies import split_text, telegram_len
+    return split_text(text, limit) if telegram_len(text) > limit else [text]
 
 
 async def _audit_crosscheck_row(tr, stu_id, stu_name_row, text):
@@ -1331,8 +1354,10 @@ def _parse_date_range(raw: str):
                 parts = [mons[0], mons[1]]
     if len(parts) < 2 or not parts[0].strip() or not parts[1].strip():
         return None, None, None
-    p1, _ = normalize_date_input(parts[0])
-    p2, _ = normalize_date_input(parts[1])
+    first, last = normalize_date_input(parts[0], strict=True), normalize_date_input(parts[1], strict=True)
+    if first is None or last is None:
+        return None, None, None             # a date that cannot be read: never today instead
+    p1, p2 = first[0], last[0]
     try:
         d1 = datetime.strptime(p1, "%d %b %Y").date()
         d2 = datetime.strptime(p2, "%d %b %Y").date()
@@ -1489,7 +1514,12 @@ async def crosscheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     display_date = None
     date_pattern = ""
     if not stu_id_target and not stu_name_target:
-        portal_date, display_date = normalize_date_input(text_q)
+        parsed = normalize_date_input(text_q)
+        if parsed is None:
+            from src.bot.replies import date_error_reply
+            await update.message.reply_text(date_error_reply(text_q, "/crosscheck_date"), parse_mode="Markdown")
+            return
+        portal_date, display_date = parsed
         date_pattern = portal_date[:6] if len(portal_date) >= 6 else "10 Sep"
 
     status_msg = await update.message.reply_text("⏳ _Cross-checking student information, Father, Mother, DOB & Address against documents..._", parse_mode="Markdown")
@@ -1709,25 +1739,34 @@ async def handle_natural_language_message(update: Update, context: ContextTypes.
         await crosscheck_command(update, context)
         return
 
-    # 5. Route menu item 3 & 4: Total verified students queries
+    # 5. Route menu item 3 & 4: Total verified students queries. The date is read by the one strict
+    # parser (whole-word months: "separately" is no September), and a date-like word it cannot read
+    # goes to /verified_date, which says so, instead of silently becoming today.
     if "verif" in query_lower:
-        if "today" in query_lower:
+        from src.dates import has_date_hint, local_today, parse_user_date
+        named = parse_user_date(query, prefer_past=True)
+        if named is not None and named == local_today():
             await verified_today_command(update, context)
             return
-        elif any(m in query_lower for m in ["yesterday", "sep", "oct", "nov", "dec", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "2026", "2025"]):
+        elif named is not None or has_date_hint(_DATE_FILLER_RE.sub(" ", query)):
             context.user_data["override_text"] = query
             await verified_date_command(update, context)
             return
-        elif "date" in query_lower or "specific" in query_lower:
+        elif re.search(r"\b(?:date|specific)\b", query_lower):
             await verified_date_command(update, context)
             return
         context.user_data["override_text"] = query
         await verified_command(update, context)
         return
 
-    # Route "admitted" queries directly to admitted_command
+    # Route "admitted" queries directly to admitted_command; what is left of the words once the
+    # question words are gone ("who is admitted to Hanyang?" -> "hanyang") is the search.
     if "admit" in query_lower:
-        clean_q = re.sub(r'\b(?:show|list|get|who|is|are|all|the|students?|admitted|admission)\b', '', query_lower).strip()
+        clean_q = re.sub(r"[?!.,;:]", " ", query_lower)
+        clean_q = re.sub(r"\b(?:show|list|get|give|tell|me|us|who|whom|which|what|is|are|was|were|has|have|been|all"
+                         r"|the|any|students?|admitted|admit|admission|admissions|how|many|number|of|to|in|at|for"
+                         r"|from|please|pls|currently|now|so|far|there|our|do|does|we|got)\b", " ", clean_q)
+        clean_q = re.sub(r"\s+", " ", clean_q).strip()
         if clean_q:
             context.user_data["override_query"] = clean_q
         await admitted_command(update, context)
@@ -1849,15 +1888,9 @@ async def _run_report_module(module: str, *args: str) -> Optional[str]:
 
 
 async def _reply_long(message, text: str):
-    """Send plain text, split under Telegram's message limit."""
-    chunk = ""
-    for line in text.split("\n"):
-        if len(chunk) + len(line) + 1 > 3900:
-            await message.reply_text(chunk)
-            chunk = ""
-        chunk += line + "\n"
-    if chunk.strip():
-        await message.reply_text(chunk)
+    """Send plain text, split under Telegram's message limit (src.bot.replies.reply_long)."""
+    from src.bot.replies import reply_long
+    await reply_long(message, text, parse_mode=None)
 
 
 async def stage_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

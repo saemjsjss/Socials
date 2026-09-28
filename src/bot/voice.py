@@ -449,8 +449,8 @@ def _mon(word: str) -> int:
 
 
 # Every date the English query names, in order: 2026-09-01, 1 Sep (2026), September 1(st) (2026), 9월 1일,
-# 25일, today, yesterday, the day before yesterday. (normalize_date_input reads only one date and takes
-# anything it cannot read for today, so the voice path finds its dates here.)
+# 25일, today, yesterday, the day before yesterday. (normalize_date_input reads only one date, in
+# English, so the voice path finds its dates here.)
 _QUERY_DAY_RE = re.compile(
     r"(?<!\d)(?P<iy>\d{4})-(?P<im>\d{1,2})-(?P<id>\d{1,2})(?!\d)"
     rf"|(?<![\d:])(?P<dd>\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?(?P<dm>{_MONTH_WORD})(?:,?\s+(?P<dy>\d{{4}}))?"

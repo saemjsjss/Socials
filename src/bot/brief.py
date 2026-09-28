@@ -45,12 +45,13 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, NamedTuple, O
 from zoneinfo import ZoneInfo
 
 import httpx
-from telegram.error import BadRequest
 from telegram.helpers import escape_markdown
 
+from src.bot.replies import CHUNK_CHARS, markdown_to_plain, send_pieces, split_text
 from src.config import settings
+from src.dates import yearless_day_problem
 from src.llm.ollama_client import ollama_client
-from src.scraper.client import admin_client
+from src.scraper.client import PortalUnavailable, admin_client
 
 logger = logging.getLogger("hangeul.brief")
 
@@ -58,7 +59,7 @@ NA = "not available"
 DONE = ("Consulted", "File Opened")
 KNOWN_STATUSES = ("Consulted", "File Opened", "New", "No Answer", "Wrong Number")
 VERDICT_ORDER = ("FAIL", "REVIEW", "INCOMPLETE", "PASS")
-CHUNK_CHARS = 3900              # Telegram allows 4096 characters a message
+# CHUNK_CHARS (3900; Telegram allows 4096 characters a message) comes from src.bot.replies.
 MAX_REMINDERS_LISTED = 8
 SUMMARY_MAX_TOKENS = 120
 SUMMARY_TIMEOUT = 30.0          # seconds for the one summary call (a warm call takes ~1 s)
@@ -86,9 +87,9 @@ def esc(value: Any) -> str:
 
 
 def brief_plain(text: str) -> str:
-    """The Markdown brief as plain text: no bold or italic markers, no escaping backslashes."""
-    text = re.sub(r"(?<!\\)[*_]", "", text or "")
-    return re.sub(r"\\([_*`\[])", r"\1", text)
+    """The Markdown brief as plain text: no bold or italic markers, no escaping backslashes
+    (src.bot.replies.markdown_to_plain, the one plain-text fallback every long reply uses)."""
+    return markdown_to_plain(text)
 
 
 def _fig(value: Any) -> str:
@@ -194,17 +195,9 @@ def section_consultations(rows: Optional[List[Dict[str, Any]]], portal_day: str,
 def verified_day_problem(day: date, today: date) -> Optional[str]:
     """Why students.php cannot tell who was verified on `day`, or None when it can. The portal
     writes verification times without a year ("27 Sep, 17:19"), so a day whose day and month have
-    come round again since cannot be told apart from that later one."""
-    if day > today:
-        return "a date in the future"
-    try:
-        again = day.replace(year=day.year + 1)
-    except ValueError:                       # 29 Feb
-        again = date(day.year + 1, 3, 1)
-    if again <= today:
-        return (f"the portal writes verification times without a year, so {day:%d %b %Y} cannot be "
-                f"told apart from {again:%d %b %Y}")
-    return None
+    come round again since cannot be told apart from that later one. The one rule for this lives
+    in src.dates.yearless_day_problem; the /verified commands use it too."""
+    return yearless_day_problem(day, today)
 
 
 def _clock(verified_time: str) -> str:
@@ -572,12 +565,15 @@ class _PortalReads:
             return None
         try:
             return await asyncio.wait_for(job(), timeout=min(READ_TIMEOUT, left))
-        except (asyncio.TimeoutError, httpx.TransportError) as e:
-            self.down = self.why[what] = PORTAL_DOWN
-            logger.warning(f"Brief: {what} not read, {PORTAL_DOWN} ({type(e).__name__}); "
-                           "the remaining portal reads are skipped.")
-            return None
         except Exception as e:
+            # The portal not answering: a timeout, a refused or dropped connection (raised by
+            # admin_client.fetch_html as a PortalUnavailable marked unreachable).
+            if isinstance(e, (asyncio.TimeoutError, httpx.TransportError)) or (
+                    isinstance(e, PortalUnavailable) and e.unreachable):
+                self.down = self.why[what] = PORTAL_DOWN
+                logger.warning(f"Brief: {what} not read, {PORTAL_DOWN} ({type(e).__name__}: {e}); "
+                               "the remaining portal reads are skipped.")
+                return None
             logger.warning(f"Brief: {what} not read: {type(e).__name__}: {e}")
             return None
 
@@ -646,42 +642,16 @@ async def compose_daily_brief(day: Optional[date] = None, with_summary: bool = T
 
 def split_brief(text: str, limit: int = CHUNK_CHARS) -> List[str]:
     """Pieces of at most `limit` characters, split between lines, so no line is ever cut (a single
-    line longer than `limit`, which the brief never has, is split at a space)."""
-    chunks: List[str] = []
-    current = ""
-    for line in (text or "").split("\n"):
-        while len(line) > limit:
-            cut = line.rfind(" ", 0, limit)
-            cut = cut if cut > 0 else limit
-            if current:
-                chunks.append(current)
-                current = ""
-            chunks.append(line[:cut])
-            line = line[cut:].lstrip()
-        if current and len(current) + 1 + len(line) > limit:
-            chunks.append(current)
-            current = line
-        else:
-            current = f"{current}\n{line}" if current else line
-    if current.strip():
-        chunks.append(current)
-    return chunks
+    line longer than `limit`, which the brief never has, is split at a space). The one splitter
+    every long reply uses: src.bot.replies.split_text."""
+    return split_text(text, limit)
 
 
 async def send_brief_text(send: Callable[[str, Optional[str]], Awaitable[Any]], text: str) -> int:
     """Send the brief through `send(text, parse_mode)`, piece by piece; a piece Telegram cannot
-    parse as Markdown goes again as plain text. -> how many messages were sent."""
-    sent = 0
-    for chunk in split_brief(text):
-        try:
-            await send(chunk, "Markdown")
-        except BadRequest as e:
-            if "parse" not in str(e).lower() and "entit" not in str(e).lower():
-                raise
-            logger.warning(f"Brief piece not accepted as Markdown ({e}); sent as plain text.")
-            await send(brief_plain(chunk), None)
-        sent += 1
-    return sent
+    parse as Markdown goes again as plain text (src.bot.replies.send_pieces). -> how many
+    messages were sent."""
+    return await send_pieces(send, text, "Markdown")
 
 
 async def _send_brief(bot, chat_id, text: str) -> int:

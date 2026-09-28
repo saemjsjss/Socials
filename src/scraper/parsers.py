@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger("hangeul.parsers")
@@ -218,94 +218,255 @@ def parse_hangeul_live_dashboard(html: str) -> Dict[str, Any]:
         "recent_activity": recent_activity[:5]
     }
 
-def parse_hangeul_live_students(html: str) -> List[Dict[str, Any]]:
-    """Parse live student records from students.php."""
-    import re
-    soup = BeautifulSoup(html, "html.parser")
-    students = []
-    
+# --------------------------------------------------------------------------- students.php
+
+# The stage the portal's own dashboard counts as "Admitted": its Admitted tile links to
+# students.php?stage=Admitted+%2F+Completed (index.php, Sep 2026). A student's stage is the first
+# line of the list's "Stage · Applied" column (the same as the row's own stage select).
+ADMITTED_STAGE = "Admitted / Completed"
+
+# The list's columns, found by the header's own names ('', SL, Student, University,
+# Program · Intake, Docs, Payment, Stage · Applied, ''), never by position.
+_STUDENT_COLUMNS = (("sl", ("sl",)), ("student", ("student",)), ("university", ("universit",)),
+                    ("program", ("program",)), ("docs", ("doc",)), ("payment", ("payment",)),
+                    ("stage", ("stage",)))
+_REQUIRED_STUDENT_COLUMNS = ("sl", "student", "program", "stage")
+_PAGER_RE = re.compile(r"Page\s+(\d+)\s+of\s+(\d+)(?:\s*·\s*([\d,]+)\s+students?)?", re.I)
+_UID_RE = re.compile(r"student_edit\.php\?id=(\d+)")
+_EMAIL_HIDDEN_RE = re.compile(r"\[email\s*protected\]", re.I)
+_HNG_RE = re.compile(r"HNG-\d{4}-\d+")
+_STAMP_TEXT = r"\d{1,2}\s+[A-Za-z]{3,9}\.?(?:\s+\d{4})?(?:,\s*\d{1,2}:\d{2})?"
+_VERIFIED_BY_RE = re.compile(rf"Payment verified by\s+([^·\n]{{1,80}}?)\s*·\s*({_STAMP_TEXT})", re.I)
+_PAID_RE = re.compile(r"Paid:\s*([\d,]+\.?\d*\s*BDT)\s*([A-Za-z][A-Za-z\s\-]*?)?\s*(?:Verified|$)")
+_INCOME_RE = re.compile(r"Verified income:\s*([\d,]+\.?\d*\s*BDT)")
+
+
+class StudentListLayoutError(ValueError):
+    """students.php was read but its layout is not the one the parser knows (no table, a header
+    without the Student / Stage columns, rows it cannot read): the caller says "not available"."""
+
+
+def _blank(text: str) -> str:
+    """The portal's "—" (nothing there) as "", any other text as it is."""
+    text = re.sub(r"\s+", " ", text or "").strip()
+    return "" if text in ("—", "-", "–") else text
+
+
+def student_pager(html: str) -> Dict[str, Optional[int]]:
+    """The list's pager, "Page 1 of 7 · 330 students" -> {"page": 1, "pages": 7, "total": 330};
+    each None when the page does not say (a list of one page has no pager)."""
+    m = _PAGER_RE.search(html or "")
+    if not m:
+        return {"page": None, "pages": None, "total": None}
+    return {"page": int(m.group(1)), "pages": int(m.group(2)),
+            "total": int(m.group(3).replace(",", "")) if m.group(3) else None}
+
+
+def student_uids(html: str) -> List[str]:
+    """The portal user ids of the students on one students.php page, in order, each once (from each
+    row's student_edit.php?id=N link). A regex, not a parse: cheap enough for every page read."""
+    return list(dict.fromkeys(_UID_RE.findall(html or "")))
+
+
+def _student_details(tr) -> Dict[str, Any]:
+    """The fields of one student's details row (the .xp-row under the list row)."""
+    text = tr.get_text(" ", strip=True) if tr is not None else ""
+    details: Dict[str, str] = {}
+    files: List[str] = []
+    uid = ""
+    by = stamp = paid = method = income = ""
+    stamp_text = text
+    if tr is not None:
+        for item in tr.select(".det-item"):
+            label, value = item.find("label"), item.find("span")
+            if label is not None and value is not None:
+                details.setdefault(label.get_text(" ", strip=True), _blank(value.get_text(" ", strip=True)))
+        html = str(tr)
+        m = _UID_RE.search(html) or re.search(r"showDel\((\d+)", html) or re.search(r"progress\.php\?uid=(\d+)", html)
+        uid = m.group(1) if m else ""
+        files = list(dict.fromkeys(re.findall(r"view_doc\.php\?f=([^\"'&\s<>]+)", html)))
+
+        def pf(selector: str, label: str = "") -> str:
+            el = tr.select_one(selector)
+            return el.get_text(" ", strip=True).replace(label, "", 1).strip() if el is not None else ""
+
+        paid, method, income = pf(".pf.paid", "Paid:"), pf(".pf.method"), pf(".pf.verified", "Verified income:")
+        pf_by = tr.select_one(".pf-by")
+        if pf_by is not None:                # the stamp's own element, not any text in the row
+            stamp_text = pf_by.get_text(" ", strip=True)
+            strong = pf_by.find(["strong", "b"])
+            by = strong.get_text(" ", strip=True) if strong is not None else ""
+    # "Payment verified by NAME · 27 Sep, 17:19"
+    m = _VERIFIED_BY_RE.search(stamp_text)
+    if m:
+        by, stamp = by or m.group(1).strip(), m.group(2).strip()
+    if not paid:
+        m = _PAID_RE.search(text)
+        if m:
+            paid, method = m.group(1), method or (m.group(2) or "").strip()
+    if not income:
+        m = _INCOME_RE.search(text)
+        income = m.group(1) if m else ""
+    applied = details.get("Applied On") or details.get("Applied on") or ""
+    if not applied:
+        m = re.search(r"Applied On\s+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4}(?:,\s*\d{1,2}:\d{2})?)", text, re.I)
+        applied = m.group(1) if m else ""
+    return {"uid": uid, "details": details, "files": files, "details_text": text,
+            "verified_line": bool(re.search(r"Payment verified by\b", stamp_text, re.I)),
+            "verified_by": by, "verified_stamp": stamp, "paid": paid, "method": method,
+            "verified_income": income, "applied_on": applied}
+
+
+def parse_students_page(html: str) -> Dict[str, Any]:
+    """One students.php page, read by the header's column names -> {"students": [...], "empty":
+    bool (the list's own "No students found" row), "page", "pages", "total" (student_pager)}.
+
+    Each student is one list row (.stu-row) and its details row (.xp-row) under it:
+      uid           the portal user id (student_edit.php?id=N), "" when the row has no link
+      student_id    the HNG id ("HNG-2026-931"), "" before one is given; "id" is the same (older name)
+      student_name  the Student column's name; sl, the row's SL number
+      target_university, program, target_intake, docs_status, payment_status: the columns as
+                    shown ("" where the portal shows "—"); status = the stage ("Payment Verified"),
+                    applied_date = the day under it ("28 Sep 2026")
+      details       {label: value} of the details row's fields (first of each label), files (the
+                    view_doc.php files: passport_..., receipt_...), details_text (its text)
+      verified_by, verified_stamp ("27 Sep, 17:19" as printed, no year), paid, method,
+                    verified_income, applied_on ("27 Sep 2026, 17:16"): "" when absent;
+                    verified_line: whether the row has a "Payment verified by" line at all (so a
+                    line whose stamp cannot be read is told apart from no line)
+    Nothing is filled in: a field the portal does not show is "". Raises StudentListLayoutError
+    when the page has no student table, its header lacks the SL / Student / Program / Stage
+    columns, or it has rows none of which can be read."""
+    soup = BeautifulSoup(html or "", "html.parser")
     table = soup.find("table")
-    if not table:
-        return []
-        
-    for tr in table.find_all("tr"):
-        tds = tr.find_all("td")
-        if len(tds) >= 9:
-            sl = tds[1].get_text(strip=True)
-            stu_id = tds[2].get_text(strip=True)
-            name_raw = tds[3].get_text(strip=True)
-            # Clean email obfuscation
-            name = re.sub(r'\[email\s*protected\]', '', name_raw).strip()
-            uni = tds[4].get_text(strip=True)
-            prog = tds[5].get_text(strip=True)
-            docs = tds[6].get_text(strip=True)
-            payment = tds[7].get_text(strip=True)
-            stage = tds[8].get_text(strip=True)
-            applied = tds[9].get_text(strip=True) if len(tds) > 9 else ""
-            
-            if sl.isdigit():
-                students.append({
-                    "id": stu_id if stu_id != "—" else f"HNG-SL-{sl}",
-                    "student_name": name,
-                    "target_university": uni if uni != "—" else "Pending Allocation",
-                    "program": prog,
-                    "target_intake": "March 2027",
-                    "status": stage,
-                    "payment_status": payment,
-                    "docs_status": docs,
-                    "applied_date": applied
-                })
-    return students
+    if table is None:
+        raise StudentListLayoutError("students.php has no student table")
+    rows = [tr for tr in table.find_all("tr") if tr.find_parent("table") is table]
+    header = next((tr for tr in rows if tr.find("th") is not None), None)
+    if header is None:
+        raise StudentListLayoutError("the student table has no header row")
+    names = [_label_key(c.get_text(" ", strip=True)) for c in header.find_all(["th", "td"], recursive=False)]
+    col: Dict[str, int] = {}
+    for key, words in _STUDENT_COLUMNS:
+        for i, name in enumerate(names):
+            if i not in col.values() and any(name.startswith(w) for w in words):
+                col[key] = i
+                break
+    missing = [k for k in _REQUIRED_STUDENT_COLUMNS if k not in col]
+    if missing:
+        raise StudentListLayoutError(f"the student table's header has no {', '.join(missing)} column "
+                                     f"(it reads {[n for n in names if n]})")
+
+    students: List[Dict[str, Any]] = []
+    empty = unread = 0
+    current = None
+    for tr in rows:
+        if tr is header:
+            continue
+        cls = tr.get("class") or []
+        cells = tr.find_all(["td", "th"], recursive=False)
+        sl_text = cells[col["sl"]].get_text(strip=True) if len(cells) > col["sl"] else ""
+        if len(cells) == len(names) and sl_text.isdigit():
+            current = _student_row(cells, col, sl_text)
+            students.append(current)
+        elif "xp-row" in cls or (current is not None and current.get("_open") and len(cells) == 1):
+            if current is not None and current.get("_open"):
+                current.update(_student_details(tr))
+                current["_open"] = False
+        elif "empty-row" in cls or (len(cells) == 1 and re.search(r"\bno\s+students?\b", tr.get_text(" "), re.I)):
+            empty += 1
+        elif cells and any(c.get_text(strip=True) for c in cells):
+            unread += 1
+    for s in students:
+        if s.pop("_open", False):
+            s.update(_student_details(None))
+    if unread:
+        raise StudentListLayoutError(f"the student table has {unread} row(s) the parser cannot read")
+    return {"students": students, "empty": bool(empty) and not students, **student_pager(html)}
 
 
-def normalize_target_date(target_date: Optional[str]) -> Optional[str]:
-    """Normalize any target date string to match portal 'DD Mon YYYY' format (e.g. '09 Sep 2026')."""
+def _main_and_sub(c) -> Tuple[str, str]:
+    """A cell's own text and the small line under it (.stu-sub): "KLP" / "MARCH 2027", or
+    "Payment Verified" / "28 Sep 2026". Without a .stu-sub, its first two lines."""
+    if c is None:
+        return "", ""
+    sub = c.select_one(".stu-sub")
+    if sub is not None:
+        own = " ".join(t.strip() for t in c.find_all(string=True, recursive=False) if t.strip())
+        return _blank(own), _blank(sub.get_text(" ", strip=True))
+    lines = list(c.stripped_strings)
+    return (_blank(lines[0]) if lines else ""), (_blank(lines[1]) if len(lines) > 1 else "")
+
+
+def _student_row(cells, col: Dict[str, int], sl: str) -> Dict[str, Any]:
+    """The list row's own columns (see parse_students_page)."""
+    def cell(key):
+        i = col.get(key)
+        return cells[i] if i is not None and i < len(cells) else None
+
+    def text(key) -> str:
+        c = cell(key)
+        return _blank(c.get_text(" ", strip=True)) if c is not None else ""
+
+    student = cell("student")
+    name_el = student.select_one(".stu-name") if student is not None else None
+    if name_el is not None:
+        name = _blank(_EMAIL_HIDDEN_RE.sub("", name_el.get_text(" ", strip=True)))
+    else:
+        lines = [_blank(_EMAIL_HIDDEN_RE.sub("", s)) for s in (student.stripped_strings if student is not None else [])]
+        name = next((s for s in lines if s and not _HNG_RE.fullmatch(s)), "")
+    hng = _HNG_RE.search(student.get_text(" ", strip=True)) if student is not None else None
+    program, intake = _main_and_sub(cell("program"))
+    stage, applied = _main_and_sub(cell("stage"))
+    return {
+        "uid": "", "sl": sl, "student_id": hng.group(0) if hng else "", "id": hng.group(0) if hng else "",
+        "student_name": name, "target_university": text("university"),
+        "program": program, "target_intake": intake,
+        "docs_status": text("docs"), "payment_status": text("payment"),
+        "status": stage, "applied_date": applied,
+        "_open": True,
+    }
+
+
+def parse_hangeul_live_students(html: str) -> List[Dict[str, Any]]:
+    """The students on one students.php page (parse_students_page's "students"): read by the
+    header's column names, with the real intake and stage, and "" where the portal shows nothing.
+    Raises StudentListLayoutError when the page's layout is not recognised."""
+    return parse_students_page(html)["students"]
+
+
+def is_admitted(student: Dict[str, Any], stage: str = ADMITTED_STAGE) -> bool:
+    """Whether a parse_students_page student is at the admitted stage (the dashboard's Admitted
+    tile's stage, ADMITTED_STAGE), compared without regard to case or spacing."""
+    return _label_key(student.get("status", "")) == _label_key(stage)
+
+
+def student_matches(student: Dict[str, Any], query: str) -> bool:
+    """Whether a student's name, HNG id, university, program or intake contains `query` (case and
+    spacing do not matter): the local search /admitted uses, since the portal's own search does
+    not cover universities or programs."""
+    q = re.sub(r"\s+", " ", (query or "")).strip().lower()
+    if not q:
+        return True
+    fields = (student.get(k, "") for k in ("student_name", "student_id", "target_university", "program",
+                                            "target_intake"))
+    return any(q in re.sub(r"\s+", " ", str(f)).lower() for f in fields)
+
+
+def normalize_target_date(target_date) -> Optional[str]:
+    """A user's date (text, or a date) as the portal writes it, 'DD Mon YYYY' ("09 Sep 2026"), read
+    by the one strict parser (src.dates.parse_user_date). None only for an empty input; raises
+    ValueError for a text that is not a readable date ("31 Sep"), never a stand-in day."""
+    from datetime import date as _date
+    from src.dates import parse_user_date, user_date_problem
     if not target_date:
         return None
-    import re
-    from datetime import datetime, timedelta
-    t_clean = target_date.strip()
-    t_low = t_clean.lower()
-    now = datetime.now()
-
-    if t_low in ["today", "today's"]:
-        return now.strftime("%d %b %Y")
-    if t_low in ["yesterday", "yesterday's"]:
-        return (now - timedelta(days=1)).strftime("%d %b %Y")
-
-    cleaned = re.sub(r'/(?:report|consultations|inquiries)\b', '', t_clean, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\b(?:report|consultation|requests?|for|of|on|please|show|give|me)\b', '', cleaned, flags=re.IGNORECASE).strip()
-    cleaned_suffix = re.sub(r'(\d+)(st|nd|rd|th)\b', r'\1', cleaned, flags=re.IGNORECASE).strip()
-
-    formats = [
-        '%d %b %Y', '%d %B %Y', '%d %b', '%d %B',
-        '%b %d %Y', '%B %d %Y', '%b %d', '%B %d',
-        '%Y-%m-%d', '%Y/%m/%d', '%d-%m-%Y', '%d/%m/%Y',
-        '%d-%m', '%d/%m'
-    ]
-    for fmt in formats:
-        try:
-            dt = datetime.strptime(cleaned_suffix, fmt)
-            if dt.year == 1900:
-                dt = dt.replace(year=now.year)
-            return dt.strftime("%d %b %Y")
-        except ValueError:
-            pass
-
-    m = re.search(r'\b(\d{1,2})\s*([A-Za-z]{3,9})(?:\s*(\d{2,4}))?\b', cleaned_suffix)
-    if m:
-        day = int(m.group(1))
-        month_str = m.group(2)[:3].capitalize()
-        year = int(m.group(3)) if m.group(3) else now.year
-        if year < 100:
-            year += 2000
-        try:
-            dt = datetime.strptime(f'{day:02d} {month_str} {year}', '%d %b %Y')
-            return dt.strftime("%d %b %Y")
-        except ValueError:
-            pass
-
-    return target_date.strip()
+    if isinstance(target_date, _date):
+        return target_date.strftime("%d %b %Y")
+    day = parse_user_date(str(target_date), prefer_past=True)
+    if day is None:
+        raise ValueError(f"not a date: {target_date!r} ({user_date_problem(str(target_date), prefer_past=True)})")
+    return day.strftime("%d %b %Y")
 
 
 def _consult_columns(header: List[str]) -> Dict[str, int]:
@@ -415,97 +576,79 @@ def parse_consultation_requests(html: str, target_date: Optional[str] = None) ->
             if not target_str or target_str.lower() in r["received"].lower()]
 
 
-def parse_verified_students(html: str, target_date: Optional[str] = "today") -> List[Dict[str, Any]]:
-    """Parse students whose payments were verified on target_date from students.php.
+def parse_verified_students(html: str, target_date="today") -> List[Dict[str, Any]]:
+    """Parse students whose payments were verified on target_date from one students.php page.
 
     A field the row does not show is "" (never a stand-in value): "amount" is the verified
     income (else the amount paid), "method" the payment method alone ("Cash", "bKash"), and
-    "uid" the portal's own student id from the row's edit link."""
+    "uid" the portal's own student id from the row's edit link. Raises StudentListLayoutError
+    for a page whose layout is not recognised, ValueError for a target date that is not a date."""
     return scan_verified_students(html, target_date)["verified"]
 
 
-_VERIFIED_MARK_RE = re.compile(r"Payment verified by\b", re.I)
-_APPLIED_ON_RE = re.compile(r"Applied On\s+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4})")
+def target_day(target_date):
+    """A date, or "today" / "yesterday" / any text src.dates.parse_user_date reads -> a date.
+    Raises ValueError for anything else: an unreadable day is never read as "no matches"."""
+    from datetime import date as _date
+    from src.dates import parse_user_date, user_date_problem
+    if isinstance(target_date, _date):
+        return target_date
+    day = parse_user_date(str(target_date or "today"), prefer_past=True)
+    if day is None:
+        raise ValueError(f"not a date: {target_date!r} ({user_date_problem(str(target_date), prefer_past=True)})")
+    return day
 
 
-def _target_day(target_date: Optional[str]):
-    """"today" / "yesterday" / any date normalize_target_date reads -> a date, or None."""
-    from datetime import datetime, timedelta
-    t_low = (target_date or "today").lower().strip()
-    now = datetime.now()
-    if t_low == "today":
-        return now.date()
-    if t_low == "yesterday":
-        return (now - timedelta(days=1)).date()
-    try:
-        return datetime.strptime(normalize_target_date(target_date) or "", "%d %b %Y").date()
-    except ValueError:
+def verification(student: Dict[str, Any], day) -> Optional[Dict[str, Any]]:
+    """The payment verification of one parse_students_page student when it is on `day` (a date),
+    as {"student_id", "uid", "name", "program", "amount", "method", "verified_by",
+    "verified_time"}, else None.
+
+    The stamp is the row's own "Payment verified by NAME · 27 Sep, 17:19", matched on whole day
+    and month tokens with the year rules of src.dates.stamp_on_day (a stamp with a year must have
+    the day's; a student who applied after `day` cannot have been verified on it). The portal
+    writes no year, so the caller must first reject a day a year or more back
+    (src.dates.yearless_day_problem, as the daily brief does)."""
+    from src.dates import parse_portal_date, parse_stamp, stamp_on_day
+    stamp = parse_stamp(student.get("verified_stamp", ""))
+    if stamp is None:
         return None
+    applied = parse_portal_date(student.get("applied_on", "")) or parse_portal_date(student.get("applied_date", ""))
+    if not stamp_on_day(stamp, day, applied):
+        return None
+    return {
+        "student_id": student.get("student_id", ""),
+        "uid": student.get("uid", ""),
+        "name": student.get("student_name", "") or student.get("details", {}).get("Full Name", ""),
+        "program": student.get("program", "") or student.get("details", {}).get("Program", ""),
+        "amount": student.get("verified_income") or student.get("paid") or "",
+        "method": student.get("method", ""),
+        "verified_by": student.get("verified_by", ""),
+        "verified_time": stamp.text,
+    }
 
 
-def scan_verified_students(html: str, target_date: Optional[str] = "today") -> Dict[str, Any]:
+def verified_on_day(students: List[Dict[str, Any]], day) -> List[Dict[str, Any]]:
+    """The students (parse_students_page records, e.g. every page's) whose payment was verified on
+    `day`, in list order (see verification)."""
+    return [v for v in (verification(s, day) for s in students) if v is not None]
+
+
+def scan_verified_students(html: str, target_date="today") -> Dict[str, Any]:
     """One students.php page -> {"verified": the students verified on target_date (as
-    parse_verified_students), "students": how many student rows (edit links) the page has,
-    "markers": how many rows carry a "Payment verified by" line on any date}.
+    parse_verified_students), "students": how many student rows the page has, "markers": how many
+    rows carry a "Payment verified by" stamp on any date}.
 
     The two counts let the reader tell "nobody was verified that day" from "this page's layout is
-    not recognised" (student rows, but no verification line anywhere), which would otherwise read
-    as a confident 0. The portal writes the verification time without a year ("27 Sep, 17:19"):
-    a time that does carry a year must match the target's, and a row whose "Applied On" date is
-    after the target day cannot have been verified on it. A caller asking for a day more than a
-    year back must still say "not available" itself (src/bot/brief.py verified_day_problem)."""
-    from datetime import datetime
-    out: Dict[str, Any] = {"verified": [], "students": 0, "markers": 0}
-    table = BeautifulSoup(html, "html.parser").find("table")
-    if not table:
-        return out
-    out["students"] = len({a["href"] for a in table.find_all("a", href=re.compile(r"student_edit\.php\?id=\d+"))})
-    day = _target_day(target_date)
-    date_regex = rf"0?{day.day}\s+{day:%b}" if day else None
-
-    verified = out["verified"]
-    for tr in table.find_all("tr"):
-        text = tr.get_text(" ", strip=True)
-        if not _VERIFIED_MARK_RE.search(text):
-            continue
-        out["markers"] += 1
-        if date_regex is None:
-            continue
-        # The verifier: anything up to the "·" (names with hyphens or apostrophes, "Md. Al-Amin").
-        m_ver = re.search(rf"Payment verified by\s+([^·\n]{{1,80}}?)\s*·\s*({date_regex}[a-z]*)(?:\s+(\d{{4}}))?([^<\n]*)",
-                          text, re.IGNORECASE)
-        if m_ver:
-            if m_ver.group(3) and int(m_ver.group(3)) != day.year:
-                continue
-            applied = _APPLIED_ON_RE.search(text)
-            if applied:
-                try:
-                    if datetime.strptime(applied.group(1), "%d %b %Y").date() > day:
-                        continue            # verified before the student applied: another year's date
-                except ValueError:
-                    pass
-            name_m = re.search(r"Full Name\s+([A-Za-z][A-Za-z\s\.\-'’]*?)\s*(?=\bDOB\b|\bGender\b|$)", text)
-            stu_id_m = re.search(r"HNG-\d{4}-\d+", text)
-            prog_m = re.search(r"Program\s+([A-Za-z\s\(\)\']+?)(?:Preferred|$)", text)
-            amt_m = re.search(r"Verified income:\s*([\d,]+\.?\d*\s*BDT)", text)
-            paid_m = re.search(r"Paid:\s*([\d,]+\.?\d*\s*BDT)\s*([A-Za-z][A-Za-z\s\-]*?)?\s*(?:Verified|$)", text)
-            edit_a = tr.find("a", href=re.compile(r"student_edit\.php\?id=\d+"))
-
-            raw_time = (m_ver.group(2) + m_ver.group(4)).strip()
-            clean_time_m = re.search(rf"({date_regex}(?:,\s*\d{{1,2}}:\d{{2}})?)", raw_time, re.IGNORECASE)
-            clean_time = clean_time_m.group(1) if clean_time_m else raw_time[:15]
-
-            verified.append({
-                "student_id": stu_id_m.group(0) if stu_id_m else "",
-                "uid": re.search(r"id=(\d+)", edit_a["href"]).group(1) if edit_a else "",
-                "name": name_m.group(1).strip() if name_m else "",
-                "program": prog_m.group(1).strip() if prog_m else "",
-                "amount": amt_m.group(1) if amt_m else (paid_m.group(1) if paid_m else ""),
-                "method": (paid_m.group(2) or "").strip() if paid_m else "",
-                "verified_by": m_ver.group(1).strip(),
-                "verified_time": clean_time
-            })
-    return out
+    not recognised" (student rows, but no verification stamp anywhere), which would otherwise read
+    as a confident 0. Rows are read by parse_students_page (it raises StudentListLayoutError for a
+    page it does not recognise) and matched by verification: whole-token day and month, a stamp's
+    own year when it has one, never before the student applied. A caller asking for a day a year
+    or more back must still say "not available" itself (src.dates.yearless_day_problem)."""
+    day = target_day(target_date)
+    students = parse_students_page(html)["students"]
+    return {"verified": verified_on_day(students, day), "students": len(students),
+            "markers": sum(1 for s in students if s.get("verified_line"))}
 
 
 def _header_index(tr) -> Dict[str, int]:
