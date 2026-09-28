@@ -29,6 +29,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import cv2
+import httpx
 import numpy as np
 import pytest
 
@@ -45,10 +46,10 @@ from src.scraper.client import admin_client  # noqa: E402
 BASE = "https://portal.test/admin"
 ADMIN_ID = "111111111"
 MAX_GAP_S = 0.5     # the loop must never go quieter than this while an audit runs
-BURN_S = 0.4        # CPU seconds each fake readtext() burns in the timing tests
+BURN_S = 0.6        # CPU seconds each fake readtext() burns in the timing tests (a scan is read once)
 PAGE_H, PAGE_W = 400, 300
 RESULT_KEYS = {"student_id", "status", "is_valid", "fields", "mrz_data", "visual_data",
-               "discrepancies", "verdict"}
+               "discrepancies", "uncertain", "verdict"}
 
 
 # --------------------------------------------------------------------------- fake students
@@ -88,7 +89,7 @@ STUDENTS = {
                    "Mother's Name: NASRIN AKTER", "Permanent Address: KAZIR DEWRI, KOTWALI",
                    "CHATTOGRAM"],
     },
-    "9003": {   # an admission flyer uploaded as the passport -> INVALID_DOCUMENT alert
+    "9003": {   # an admission flyer uploaded as the passport -> MRZ_UNREADABLE alert
         "doc": "passport_9003_1700000003.png", "marker": 33,
         "profile": {"name": "TAMIM AZAD", "dob": "2003-01-01", "passport_no": "A00055555",
                     "passport_expiry": "2033-01-01"},
@@ -154,9 +155,21 @@ def burn(seconds):
     return n
 
 
+def page_read(img):
+    """Which fake scan an image is, and whether it is upright: the marker column is the page's
+    left edge when upright, and another edge when the OCR code turned the page."""
+    edges = {"upright": img[:, 0, 0], "turned": img[0, :, 0], "turned_": img[-1, :, 0], "turned__": img[:, -1, 0]}
+    for how, edge in edges.items():
+        if int(edge.min()) == int(edge.max()) and int(edge[0]) in MARKERS:
+            return MARKERS[int(edge[0])], how == "upright"
+    raise AssertionError("not a fake scan")
+
+
 class BurningReader:
-    """Stands in for easyocr.Reader: burns CPU, then 'reads' the fake scan it was given.
-    Records which threads called readtext() and how many were inside it at once."""
+    """Stands in for easyocr.Reader: burns CPU, then 'reads' the fake scan it was given, the way
+    EasyOCR reads a whole page: (box, text, confidence), the printed page on top, the MRZ at the
+    bottom; a turned page reads as nothing useful. Records which threads called readtext() and how
+    many were inside it at once."""
 
     def __init__(self, burn_s=BURN_S):
         self.burn_s = burn_s
@@ -166,8 +179,8 @@ class BurningReader:
         self.threads = set()
         self._count = threading.Lock()
 
-    def readtext(self, img, detail=0):
-        assert detail == 0
+    def readtext(self, img, detail=1):
+        assert detail == 1
         with self._count:
             self.calls += 1
             self.inside += 1
@@ -175,9 +188,10 @@ class BurningReader:
             self.threads.add(threading.get_ident())
         try:
             burn(self.burn_s)
-            scan = MARKERS[int(img[0, 0, 0])]
-            # The MRZ crop is the bottom 30 % of the page, the visual crop the top 65 %.
-            return list(scan["mrz"] if img.shape[0] < PAGE_H // 2 else scan["visual"])
+            scan, upright = page_read(img)
+            texts = list(scan["visual"]) + list(scan["mrz"]) if upright else ["~ ~ ~"]
+            return [([[10, 20 * i], [290, 20 * i], [290, 20 * i + 12], [10, 20 * i + 12]], t, 0.9)
+                    for i, t in enumerate(texts)]
         finally:
             with self._count:
                 self.inside -= 1
@@ -205,7 +219,7 @@ class FakePortal:
                 content, status = scan_png(DOCS[fn]), 200
         if text:
             content = text.encode()
-        return SimpleNamespace(status_code=status, url=url, text=text, content=content)
+        return SimpleNamespace(status_code=status, url=httpx.URL(url), text=text, content=content)
 
     async def post(self, url, **kwargs):   # the watcher must never write to the portal
         self.requests.append(("POST", url))
@@ -273,10 +287,10 @@ def test_audit_keeps_the_event_loop_running(env):
         admin_client.audit_student_passport("9001", row_form("9001"), STUDENTS["9001"]["doc"])))
 
     assert result["status"] == "MATCH" and result["is_valid"] is True
-    assert env.reader.calls == 2                       # MRZ + visual zone
-    assert took >= 2 * BURN_S                          # it really did the CPU work...
+    assert env.reader.calls == 1                       # the whole page, once: MRZ and printed text
+    assert took >= BURN_S                              # it really did the CPU work...
     assert max(gaps) < MAX_GAP_S, f"loop froze for {max(gaps):.2f} s"
-    assert len(gaps) >= 20                             # ...while the loop kept ticking
+    assert len(gaps) >= 10                             # ...while the loop kept ticking
     assert main not in env.reader.threads              # the OCR ran on a worker thread
 
 
@@ -291,13 +305,13 @@ def test_control_the_same_audit_run_on_the_loop_freezes_it(env):
         return ocr.validate_passport_data(sid, row_form(sid), local, live_audit=True)
 
     _, gaps, _ = asyncio.run(with_ticker(old_way()))
-    assert max(gaps) >= 2 * BURN_S * 0.9
+    assert max(gaps) >= BURN_S * 0.9 > MAX_GAP_S
 
 
 @pytest.mark.parametrize("sid, status", [
     ("9001", "MATCH"),
     ("9002", "DISCREPANCY"),
-    ("9003", "INVALID_DOCUMENT"),
+    ("9003", "MRZ_UNREADABLE"),
     ("9004", "MISSING_DOCUMENT"),
 ])
 def test_audit_result_is_what_the_synchronous_call_returned(env, sid, status):
@@ -337,8 +351,8 @@ def test_concurrent_audits_never_share_the_ocr_reader(env):
             admin_client.audit_student_passport(s, row_form(s), STUDENTS[s]["doc"]) for s in sids))
 
     results, gaps, _ = asyncio.run(with_ticker(together()))
-    assert [r["status"] for r in results] == ["MATCH", "DISCREPANCY", "INVALID_DOCUMENT"]
-    assert env.reader.calls == 5
+    assert [r["status"] for r in results] == ["MATCH", "DISCREPANCY", "MRZ_UNREADABLE"]
+    assert env.reader.calls == 6                    # one page each; the flyer at all four turns
     assert env.reader.max_inside == 1
     assert max(gaps) < MAX_GAP_S
 
@@ -415,13 +429,14 @@ def test_watcher_sends_the_same_alerts_without_freezing_the_loop(env, monkeypatc
     new = run_watcher(env)
 
     assert max(new.gaps) < MAX_GAP_S, f"loop froze for {max(new.gaps):.2f} s"
-    assert new.took >= 5 * BURN_S                  # 9001 and 9002: 2 reads each, 9003: 1
+    assert new.took >= 5 * BURN_S                  # 9001 and 9002: 1 read each, 9003: 4 turns
     assert main not in new.threads
     assert new.alerted == {"9002", "9003"}
     assert [m["chat_id"] for m in new.sent] == [ADMIN_ID, ADMIN_ID]
     assert "`ID 9002`" in new.sent[0]["text"] and "DOB mismatch" in new.sent[0]["text"]
     assert "`DISCREPANCY`" in new.sent[0]["text"]
-    assert "`ID 9003`" in new.sent[1]["text"] and "`INVALID_DOCUMENT`" in new.sent[1]["text"]
+    assert "`ID 9003`" in new.sent[1]["text"] and "`MRZ_UNREADABLE`" in new.sent[1]["text"]
+    assert "couldn't read the MRZ" in new.sent[1]["text"] and "not a valid passport" not in new.sent[1]["text"]
     assert all(m["parse_mode"] == "Markdown" for m in new.sent)
     assert {method for method, _ in new.requests} == {"GET"}      # read-only portal
     assert all(url.startswith(BASE) for _, url in new.requests)

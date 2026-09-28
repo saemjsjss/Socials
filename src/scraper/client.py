@@ -31,7 +31,7 @@ from src.scraper.parsers import (
     verified_on_day,
     target_day,
 )
-from src.scraper.ocr_validator import validate_passport_data, AUDIT_REGISTRY
+from src.scraper.ocr_validator import unchecked_result, validate_passport_data
 from src.scraper.mock_data import MOCK_DASHBOARD_STATS, MOCK_APPLICATIONS, MOCK_INQUIRIES
 
 logger = logging.getLogger("hangeul.client")
@@ -593,77 +593,104 @@ class HangeulAdminClient:
         doc_filename: Optional[str] = None,
         force_live: bool = True
     ) -> Dict[str, Any]:
-        """Validate passport scan live from portal using local OCR and ICAO checksum."""
+        """Check one student's passport scan against the portal, live: the profile (father, mother,
+        address...) read from student_edit.php and merged into form_data (over it when
+        force_live), the scan `doc_filename` (the passport_... file of the student's students.php
+        row; when not given, the profile page's own link, if it has one) downloaded from
+        view_doc.php unless this exact file is already saved, then local OCR and the MRZ check
+        digits (ocr_validator.validate_passport_data, in a worker thread).
+
+        A student with no scan on the portal is MISSING_DOCUMENT; an older scan saved on this PC is
+        never checked in its place. When the profile or the scan cannot be read (session expired
+        and not renewed, timeout, a web page instead of the file), the result is
+        ocr_validator.unchecked_result (PORTAL_UNREADABLE, the reason in its verdict), never a
+        verdict about fields that were not read."""
         import os
-        import glob
+        sid = str(student_id).strip()
 
-        # Fetch full profile (father_name, mother_name, address, etc.) live from student_edit.php
-        full_prof = await self.get_student_full_profile(student_id, force_live=force_live)
-        if full_prof:
-            for k, v in full_prof.items():
-                if force_live or not form_data.get(k):
-                    form_data[k] = v
+        # The full profile (father_name, mother_name, address, etc.), live from student_edit.php.
+        try:
+            html = await self.fetch_html(f"student_edit.php?id={sid}", timeout=30.0)
+        except PortalUnavailable as e:
+            return unchecked_result(sid, f"the student's profile (student_edit.php?id={sid}) could not be read: {e.reason}")
+        full_prof = self._profile_fields(html)
+        if not (full_prof.get("name") or full_prof.get("full_name")):
+            return unchecked_result(sid, f"student_edit.php?id={sid} shows no student profile")
+        if not hasattr(self, "_profile_cache"):
+            self._profile_cache = {}
+        self._profile_cache[sid] = full_prof
+        for k, v in full_prof.items():
+            if force_live or not form_data.get(k):
+                form_data[k] = v
 
-        # If doc_filename is not passed, discover it directly from the live portal
         if not doc_filename:
-            if not self.is_authenticated:
-                await self.login()
-            try:
-                import re
-                resp = await self.client.get(f"{self.base_url}/student_edit.php?id={student_id}")
-                doc_m = re.search(r'view_doc\.php\?f=(passport_[^"\'\s&]+)', resp.text)
-                if doc_m:
-                    doc_filename = doc_m.group(1)
-                else:
-                    # Fallback: discover from students.php
-                    resp_s = await self.client.get(f"{self.base_url}/students.php")
-                    doc_m2 = re.search(rf'view_doc\.php\?f=(passport_{student_id}_[^"\'\s&]+)', resp_s.text)
-                    if doc_m2:
-                        doc_filename = doc_m2.group(1)
-            except Exception as e:
-                logger.error(f"Error discovering doc filename for {student_id}: {e}")
+            doc_m = re.search(r'view_doc\.php\?f=(passport_[^"\'\s&<>]+)', html)
+            doc_filename = doc_m.group(1) if doc_m else None
 
-        # Check / download file from live portal
         local_path = None
-        passports_dir = os.path.join(BOT_ROOT, "passports")
-        os.makedirs(passports_dir, exist_ok=True)
-
         if doc_filename:
-            local_path = os.path.join(passports_dir, f"{student_id}_{doc_filename}")
-            if not os.path.exists(local_path) or os.path.getsize(local_path) < 1000:
-                if not self.is_authenticated:
-                    await self.login()
-                doc_url = f"{self.base_url}/view_doc.php?f={doc_filename}"
+            if not re.fullmatch(r"[A-Za-z0-9._-]+", doc_filename) or ".." in doc_filename:
+                return unchecked_result(sid, f"the scan's file name {doc_filename!r} is not one the bot can save")
+            passports_dir = os.path.join(BOT_ROOT, "passports")
+            os.makedirs(passports_dir, exist_ok=True)
+            # The file name carries the upload time, so a saved copy is this very upload.
+            local_path = os.path.join(passports_dir, f"{sid}_{doc_filename}")
+
+            def saved() -> bool:              # a whole scan, never a login page saved long ago
+                if not os.path.exists(local_path) or os.path.getsize(local_path) < 1000:
+                    return False
+                with open(local_path, "rb") as fh:
+                    return fh.read(200).lstrip()[:1] != b"<"
+
+            if not saved():
                 try:
-                    resp = await self.client.get(doc_url)
-                    # Look again now the GET is back: another audit of this student (the watcher
-                    # and a /crosscheck) may have saved the scan while we waited, and its OCR
-                    # thread may be reading it. The check, the write and the rename never yield
-                    # the loop, so a scan is saved once and never rewritten under a reader, and
-                    # the rename means a reader finds either no scan or the whole one.
-                    if (resp.status_code == 200 and len(resp.content) > 1000
-                            and (not os.path.exists(local_path) or os.path.getsize(local_path) < 1000)):
-                        part_path = os.path.join(passports_dir, f".{student_id}_{doc_filename}.part")
-                        with open(part_path, "wb") as f:
-                            f.write(resp.content)
-                        os.replace(part_path, local_path)
-                except Exception as e:
-                    logger.error(f"Error downloading passport doc for {student_id}: {e}")
-        else:
-            matches = glob.glob(os.path.join(passports_dir, f"{student_id}_*"))
-            img_matches = [m for m in matches if not m.endswith(".pdf")]
-            if img_matches:
-                local_path = img_matches[0]
-            elif matches:
-                local_path = matches[0]
+                    resp = await self.portal_get(f"view_doc.php?f={doc_filename}", timeout=60.0)
+                except PortalUnavailable as e:
+                    return unchecked_result(sid, f"the passport scan could not be downloaded: {e.reason}")
+                content = resp.content or b""
+                if content[:200].lstrip()[:1] == b"<" or b"<html" in content[:1000].lower():
+                    return unchecked_result(sid, "the portal sent a web page instead of the passport scan")
+                if len(content) <= 1000:
+                    return unchecked_result(sid, f"the passport scan the portal sent is only {len(content)} bytes")
+                # Look again now the GET is back: another audit of this student (the watcher
+                # and a /crosscheck) may have saved the scan while we waited, and its OCR
+                # thread may be reading it. The check, the write and the rename never yield
+                # the loop, so a scan is saved once and never rewritten under a reader, and
+                # the rename means a reader finds either no scan or the whole one.
+                if not saved():
+                    part_path = os.path.join(passports_dir, f".{sid}_{doc_filename}.part")
+                    with open(part_path, "wb") as f:
+                        f.write(content)
+                    os.replace(part_path, local_path)
 
         # EasyOCR on the CPU plus the MRZ and image work take seconds per scan. Run them in a
         # worker thread so the bot keeps answering Telegram (Jennie's voice notes included)
         # while the 30-minute passport watcher audits every student. Same function, same
         # arguments, same result; the portal GETs above stay on the event loop.
         return await asyncio.to_thread(
-            validate_passport_data, student_id, form_data, local_path, live_audit=force_live
+            validate_passport_data, sid, form_data, local_path, live_audit=force_live
         )
+
+    @staticmethod
+    def _profile_fields(html: str) -> Dict[str, str]:
+        """student_edit.php's form as {field name: value}: an input's value, a textarea's text, a
+        select's chosen option (never the text of all its options); empty fields left out."""
+        soup = BeautifulSoup(html or "", "html.parser")
+        profile: Dict[str, str] = {}
+        for inp in soup.find_all(["input", "textarea", "select"]):
+            name = (inp.get("name") or inp.get("id") or "").strip()
+            if not name or name == "_csrf" or inp.get("type") in ("password", "submit", "button"):
+                continue
+            if inp.name == "select":
+                opt = inp.find("option", selected=True)
+                val = (opt.get("value") or opt.get_text(strip=True)) if opt is not None else ""
+            elif inp.name == "textarea":
+                val = inp.get_text(strip=True)
+            else:
+                val = inp.get("value") or ""
+            if val.strip():
+                profile.setdefault(name, val.strip())
+        return profile
 
 
 
