@@ -4,8 +4,10 @@ Every number, name and status below comes from a read-only GET of the live porta
 section labelled "not live", the bot's own local document-check results), counted here in code.
 Nothing is estimated: a figure that cannot be read is "not available", and a section with nothing
 in it says so ("None today"). A day the portal cannot answer for is "not available" too, never a
-0: consult_requests.php lists only the latest CONSULT_PAGE_LIMIT requests, and students.php writes
-verification times without a year. There are no passport-match claims, visa counts, conversion
+0: students.php writes verification times without a year. Consultations are read with the portal's
+own date filter (consult_requests.php?status=all&from=DAY&to=DAY), so every day is there, and the
+all-time figures are the portal's own status-tab counts, not a count of the rows its unfiltered
+list shows (only the newest 500). There are no passport-match claims, visa counts, conversion
 rates or intakes: no reader provides them.
 
 The local LLM may add ONE short summary at the end, written from a small list of the same facts,
@@ -27,7 +29,7 @@ are bold. send_brief_text sends it in pieces of at most CHUNK_CHARS, split betwe
 sends a piece again as plain text when Telegram cannot parse it.
 
 Sections, and the pages behind them:
-  1) consultations              consult_requests.php (read by column name)
+  1) consultations              consult_requests.php: the day's date filter, and its status tabs
   2) payment-verified students  students.php, every page
   3) portal figures             students.php?status=pending, window_applications.php, index.php
   4) today's calendar reminders calendar.php
@@ -64,7 +66,6 @@ MAX_REMINDERS_LISTED = 8
 SUMMARY_MAX_TOKENS = 120
 SUMMARY_TIMEOUT = 30.0          # seconds for the one summary call (a warm call takes ~1 s)
 SUMMARY_MAX_CHARS = 350
-CONSULT_PAGE_LIMIT = 500        # consult_requests.php lists the latest 500 requests, no more
 READ_TIMEOUT = 75.0             # seconds one portal read may take (the consultation page is ~2 MB)
 PORTAL_BUDGET = 150.0           # seconds all the brief's portal reads together may take
 PORTAL_DOWN = "the portal did not answer"
@@ -119,58 +120,60 @@ def _na(why: Optional[str], default: str) -> str:
 
 # --------------------------------------------------------------------------- 1) consultations
 
-def consultation_coverage(rows: List[Dict[str, Any]], day: date) -> Optional[str]:
-    """Why the consultation page cannot give `day`'s requests, or None when it can. The page lists
-    only the latest CONSULT_PAGE_LIMIT requests: a day before its oldest row is unknown (not 0), and
-    when the list is full its oldest day is only partly there. A row whose date cannot be read
-    makes every day's count unsure."""
-    if not rows:
-        return None
-    dates = [_day(r.get("received_date")) for r in rows]
-    unread = sum(1 for d in dates if d is None)
-    if unread:
-        return (f"{_plural(unread, 'request')} on the page {'has a date' if unread == 1 else 'have dates'} "
-                "the brief cannot read")
-    oldest = min(dates)
-    if day < oldest:
-        return f"the consultation page only lists requests back to {oldest:%d %b %Y}"
-    if day == oldest and len(rows) >= CONSULT_PAGE_LIMIT:
-        return (f"the page's list of the latest {len(rows)} requests starts partway through "
-                f"{oldest:%d %b %Y}")
-    return None
+def consultation_totals_line(totals: Optional[Dict[str, int]], why: Optional[str] = None) -> str:
+    """The all-time line: the portal's own status-tab counts (client.read_consultation_totals),
+    never a count of the rows its unfiltered list shows (only the newest 500 requests)."""
+    if not totals:
+        return f"• All time on the portal: {_na(why, 'its status counts could not be read')}"
+    t = Counter(totals)
+    line = (f"• All time on the portal (its own status counts): {_plural(t['All'], 'request')}, "
+            f"{sum(t[s] for s in DONE)} done ({t['Consulted']} consulted, {t['File Opened']} file opened), "
+            f"{t['New']} new, {t['No Answer']} no answer, {t['Wrong Number']} wrong number")
+    other = [(s, n) for s, n in totals.items() if s != "All" and s not in KNOWN_STATUSES]
+    if other:
+        line += ", " + ", ".join(f"{esc(s)} {n}" for s, n in other)
+    return line
 
 
-def section_consultations(rows: Optional[List[Dict[str, Any]]], portal_day: str, is_today: bool,
-                          why: Optional[str] = None) -> Section:
+def section_consultations(on_day: Optional[Dict[str, Any]], portal_day: str, is_today: bool,
+                          why: Optional[str] = None, totals: Optional[Dict[str, int]] = None,
+                          totals_why: Optional[str] = None) -> Section:
+    """`on_day` is client.read_consultation_day's read of the day (its status-tab counts and its
+    listed rows) or None when it could not be read (`why`); `totals` the all-time tab counts."""
     when = "today" if is_today else f"on {portal_day}"
     said = "today" if is_today else "on the day"
     lines = [f"*1) CONSULTATIONS {when.upper()}*"]
-    if rows is None:
-        return (lines + [f"• {_na(why, 'the consultation page could not be read')}"],
-                [f"Consultation requests received {said}: {NA}"])
-    day = _day(portal_day)
-    gap = consultation_coverage(rows, day) if day else "the date could not be read"
-    if gap:
-        lines.append(f"• {NA} ({esc(gap)})")
+    if on_day is None:
+        lines.append(f"• {_na(why, 'the consultation page could not be read')}")
         facts = [f"Consultation requests received {said}: {NA}"]
     else:
-        day_rows = [r for r in rows if r.get("received_date") == portal_day]
-        st = Counter(r.get("status", "") for r in day_rows)
+        # The figures are the portal's own counts for the day (its status tabs under the date
+        # filter); the rows only say who did the ones done.
+        rows, complete = on_day.get("rows") or [], on_day.get("complete", True)
+        st = Counter({s: n for s, n in on_day["counts"].items() if s != "All"})
+        received = on_day["counts"]["All"]
         done = sum(st[s] for s in DONE)
-        facts = [f"Consultation requests received {said}: {len(day_rows)}"]
-        if not day_rows:
+        facts = [f"Consultation requests received {said}: {received}"]
+        if not received:
             lines.append(f"• None received {when}")
         else:
-            lines.append(f"• Received: {len(day_rows)}  |  Done: {done} "
+            lines.append(f"• Received: {received}  |  Done: {done} "
                          f"({st['Consulted']} consulted, {st['File Opened']} file opened)")
             lines.append(f"• New / pending: {st['New']}  |  No answer: {st['No Answer']}  |  "
                          f"Wrong number: {st['Wrong Number']}")
-            other = [(s, n) for s, n in st.most_common() if s not in KNOWN_STATUSES]
+            other = [(s, n) for s, n in st.most_common() if s not in KNOWN_STATUSES and n]
             if other:
                 lines.append("• Other status: " + ", ".join(f"{esc(s or 'blank')} {n}" for s, n in other))
-            by = Counter(r.get("handled_by") or "Unassigned" for r in day_rows if r.get("status") in DONE)
+            # The name a done request's row gives (its "Last updated by"); a row without one is
+            # said as such, never credited to anybody.
+            by = Counter(r.get("handled_by") or "" for r in rows if r.get("status") in DONE)
+            named = [(name, n) for name, n in by.most_common() if name]
             if by:
-                lines.append("• Done by: " + ", ".join(f"{esc(name)} {n}" for name, n in by.most_common()))
+                parts = [f"{esc(name)} {n}" for name, n in named]
+                if by[""]:
+                    parts.append(f"no name on the portal {by['']}")
+                lines.append("• Done by: " + ", ".join(parts)
+                             + ("" if complete else f" (among the {len(rows)} the portal lists)"))
             # One figure a fact, each with words of its own, so a summary's number can be checked
             # against the very fact its words describe (claims_problem).
             facts += [f"Consultations done {said}: {done}",
@@ -179,14 +182,9 @@ def section_consultations(rows: Optional[List[Dict[str, Any]]], portal_day: str,
                       f"Requests still new {said}: {st['New']}",
                       f"No answer {said}: {st['No Answer']}",
                       f"Wrong number {said}: {st['Wrong Number']}"]
-            facts += [f"Handled {said} by counsellor {name}: {n}" for name, n in by.most_common()]
-    every = Counter(r.get("status", "") for r in rows)
-    # Not all-time: the page lists only its newest requests, so say which days they cover.
-    days = sorted(d for d in (_day(r.get("received_date") or "") for r in rows) if d)
-    span = f", {days[0]:%d %b}–{days[-1]:%d %b %Y}" if days else ""
-    lines.append(f"• The latest {len(rows)} requests on the page{span}: "
-                 f"{sum(every[s] for s in DONE)} done, {every['New']} new, {every['No Answer']} no answer, "
-                 f"{every['Wrong Number']} wrong number")
+            if complete:
+                facts += [f"Handled {said} by counsellor {name}: {n}" for name, n in named]
+    lines.append(consultation_totals_line(totals, totals_why))
     return lines, facts
 
 
@@ -593,7 +591,7 @@ async def compose_brief(day: Optional[date] = None, with_summary: bool = True) -
         consultations = verified = None
         consult_why = verified_why = "a date in the future"
     else:
-        consultations = await reads.read("consultations", admin_client.read_consultations)
+        consultations = await reads.read("consultations", lambda: admin_client.read_consultation_day(day))
         consult_why = reads.why.get("consultations")
         verified_why = verified_day_problem(day, today)
         verified = None
@@ -601,6 +599,7 @@ async def compose_brief(day: Optional[date] = None, with_summary: bool = True) -
             verified = await reads.read("verified students",
                                         lambda: admin_client.read_verified_students(portal_day, all_pages=True))
             verified_why = reads.why.get("verified students")
+    consult_totals = await reads.read("consultation totals", admin_client.read_consultation_totals)
     pending = await reads.read("pending payments", admin_client.read_pending_payments)
     review = await reads.read("window applications", admin_client.read_window_apps_under_review)
     dashboard = await reads.read("dashboard", admin_client.get_dashboard)
@@ -616,7 +615,8 @@ async def compose_brief(day: Optional[date] = None, with_summary: bool = True) -
     lines += ["_Facts only, read live from the portal (read-only) unless marked otherwise. Nothing is estimated._", ""]
     facts: List[str] = []
     for section_lines, section_facts in (
-            section_consultations(consultations, portal_day, is_today, consult_why),
+            section_consultations(consultations, portal_day, is_today, consult_why,
+                                  consult_totals, reads.why.get("consultation totals")),
             section_verified(verified, portal_day, is_today, verified_why),
             section_portal(pending, review, dashboard, reads.down),
             section_calendar(calendar, is_today, reads.why.get("calendar")),

@@ -507,7 +507,103 @@ def consultation_table(html: str) -> Optional[List[Dict[str, Any]]]:
     rows = _consultation_table_rows(table)
     if rows:
         return rows
-    return None if len(table.find_all("tr")) > 1 else []
+    return None if _consultation_data_rows(table) else []
+
+
+def _consultation_data_rows(table) -> list:
+    """The table's rows below the header, bar the portal's own "No consultation requests yet." row."""
+    return [tr for tr in table.find_all("tr")[1:]
+            if not (tr.select_one(".cr-empty") or "cr-empty-row" in (tr.get("class") or []))]
+
+
+# The request statuses, spelt as the portal's status tabs and row badges spell them.
+CONSULT_STATUSES = ("New", "No Answer", "Wrong Number", "Consulted", "File Opened")
+
+
+def _consultation_tabs(soup) -> Tuple[Optional[Dict[str, int]], Optional[str]]:
+    """The status tabs' own counts (<nav class="cr-tabs">: "All 999", "New 8", ...) by the tab's
+    label, "All" included, and the open tab's status value ("all", "new", "file_opened"...).
+    (None, None) when there are no such tabs, no "All" tab, or a count that is not a number."""
+    nav = soup.select_one("nav.cr-tabs")
+    if nav is None:
+        return None, None
+    counts: Dict[str, int] = {}
+    current = None
+    for a in nav.find_all("a"):
+        n = a.select_one(".n")
+        count = _int_or_none(n.get_text(" ", strip=True)) if n else None
+        if count is None:
+            return None, None
+        label = " ".join(s.strip() for s in a.find_all(string=True, recursive=False) if s.strip())
+        if not label:
+            label = re.sub(r"\s*\d[\d,]*\s*$", "", a.get_text(" ", strip=True)).strip()
+        counts[label] = count
+        value = next((c[3:] for c in (a.get("class") or []) if c.startswith("st-")), None)
+        if "on" in (a.get("class") or []) or a.get("aria-current"):
+            current = value
+    if "All" not in counts:
+        return None, None
+    return counts, current
+
+
+def consultation_view(html: str) -> Dict[str, Any]:
+    """One view of consult_requests.php (the whole list, a status tab, or the date filter that the
+    page's own tab links and GET search form use: ?status=all&from=YYYY-MM-DD&to=YYYY-MM-DD), read
+    in one parse so a caller can run it in a worker thread.
+
+    -> {"rows": the listed rows (consultation_rows' records; [] for the page's own "No
+                consultation requests" row; None when the table is missing or its rows are in a
+                layout not recognised),
+        "tabs": the status tabs' counts by label ({"All": 999, "New": 8, "No Answer": 153,
+                "Wrong Number": 40, "Consulted": 792, "File Opened": 6}; None when not found).
+                They count every request the date filter lets through, whichever tab is open,
+                while the list under them shows at most the newest few hundred,
+        "status": the open tab's value ("all", "file_opened"...), or None,
+        "from", "to": the dates the page's search form says it filtered on ("" for none; None
+                when it has no search form),
+        "listed": the caption's count of listed rows ("<b>500</b> requests · newest first"), or
+                None when it has no such caption}"""
+    soup = BeautifulSoup(html, "html.parser")
+    tabs, current = _consultation_tabs(soup)
+    table = soup.find("table")
+    rows: Optional[List[Dict[str, Any]]] = None
+    if table is not None:
+        rows = _consultation_table_rows(table)
+        if not rows and _consultation_data_rows(table):
+            rows = None                          # rows there, none of them readable
+    form = soup.select_one("form.cr-search")
+    echo = None
+    if form is not None:
+        echo = {i.get("name"): (i.get("value") or "").strip() for i in form.find_all("input") if i.get("name")}
+    caption = re.search(r"<b>\s*(\d[\d,]*)\s*</b>\s*requests?\s*·\s*newest first", html)
+    return {"rows": rows, "tabs": tabs, "status": current,
+            "from": None if echo is None else echo.get("from", ""),
+            "to": None if echo is None else echo.get("to", ""),
+            "listed": _int_or_none(caption.group(1)) if caption else None}
+
+
+def _cf_email(hexstr: str) -> str:
+    """The address behind Cloudflare's email protection (<span class="__cf_email__"
+    data-cfemail="HEX">[email protected]</span>, which a browser decodes), or "" when unreadable."""
+    try:
+        key = int(hexstr[:2], 16)
+        return "".join(chr(int(hexstr[i:i + 2], 16) ^ key) for i in range(2, len(hexstr), 2))
+    except (ValueError, TypeError):
+        return ""
+
+
+def _decode_cf_emails(tag) -> None:
+    """Put back, in place, what a browser shows for each Cloudflare-protected address in `tag`
+    (a request whose name is an email address otherwise reads "[email protected]")."""
+    for span in tag.select(".__cf_email__[data-cfemail]") if tag is not None else []:
+        shown = _cf_email(span.get("data-cfemail", ""))
+        if shown:
+            span.string = shown
+
+
+def _no_dash(value: str) -> str:
+    """"" for the portal's "no value" placeholders ("—", "-", "–"), else the value itself."""
+    return "" if (value or "").strip() in ("—", "-", "–", "--") else (value or "")
 
 
 def _consultation_table_rows(table) -> List[Dict[str, Any]]:
@@ -537,6 +633,7 @@ def _consultation_table_rows(table) -> List[Dict[str, Any]]:
         if len(cols) <= max(col["name"], col["status"]):
             continue
         name_cell, status_cell = cell(cols, "name"), cell(cols, "status")
+        _decode_cf_emails(name_cell.select_one(".cr-name") if name_cell else None)
         name = text(name_cell, ".cr-name") or text(name_cell)
         if not name:
             continue
@@ -556,14 +653,17 @@ def _consultation_table_rows(table) -> List[Dict[str, Any]]:
         rows.append({
             "name": name,
             "contact": text(contact_cell).replace("[email protected]", "").strip(),
-            "city": text(place, ".city") or text(place),
-            "program": text(place, ".prog") or text(cell(cols, "program")),
+            # The portal writes "—" for a city or program nobody gave: that is no value, not a place.
+            "city": _no_dash(text(place, ".city") or text(place)),
+            "program": _no_dash(text(place, ".prog") or text(cell(cols, "program"))),
             "consultant": consultant,
             "details": text(details).replace("View", "").strip(),
             "received": received,
             "received_date": day or received,
             "status": status,
-            "handled_by": by.get_text(" ", strip=True) if by else consultant,
+            # The row's own "Last updated by" name (.cr-by), "" when it has none: a request nobody
+            # has touched yet has no handler, only its assigned consultant.
+            "handled_by": by.get_text(" ", strip=True) if by else "",
             "remarks": remark_box.get_text(" ", strip=True) if remark_box else text(cell(cols, "remarks")),
         })
     return rows

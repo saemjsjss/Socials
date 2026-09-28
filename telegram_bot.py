@@ -420,113 +420,158 @@ def format_admitted_report(result: dict) -> str:
                   "💡 Tip: search by name, ID, university or program: `/admitted <query>`"]
     return "\n".join(lines)
 
-async def build_inquiries_report(target_date_input: str = "today") -> str:
-    """Build detailed inquiries and completion report for target date from consult_requests.php."""
-    parsed = normalize_date_input(target_date_input)
-    if parsed is None:
-        from src.bot.replies import date_error_reply
-        return date_error_reply(target_date_input, "/inquiries_date")
-    portal_date, display_date = parsed
+INQUIRIES_LOG_MAX = 10
+_DONE_STATUSES = ("Consulted", "File Opened")
 
-    if not admin_client.is_authenticated:
-        await admin_client.login()
-    resp = await admin_client.client.get(f"{admin_client.base_url}/consult_requests.php")
-    from bs4 import BeautifulSoup
+
+def _bold_safe(text) -> str:
+    """Portal text for inside a *bold* entity. Legacy Markdown reads an entity literally up to its
+    closing '*' (a backslash there would show), so only a '*' of its own needs changing."""
+    return str(text).replace("*", "∗")
+
+
+def _inquiry_who(r: Dict[str, Any]) -> str:
+    """Who a logged request is with, from its own row: "(by X)" only for a done request (Consulted
+    / File Opened) whose row names who handled it; "(last updated by X)" for another status the row
+    names someone for; "(assigned to X)" when the row names nobody but its consultant."""
+    from src.bot.brief import esc
+    by, consultant = r.get("handled_by") or "", r.get("consultant") or ""
+    if by and r.get("status") in _DONE_STATUSES:
+        return f" (by {esc(by)})"
+    if by:
+        return f" (last updated by {esc(by)})"
+    if consultant and consultant != "Unassigned":
+        return f" (assigned to {esc(consultant)})"
+    return ""
+
+
+def format_inquiries_report(on_day: Dict[str, Any], totals: Optional[Dict[str, int]], display_date: str,
+                            totals_error: Optional[Exception] = None) -> str:
+    """The /inquiries report (Telegram Markdown). `on_day` is client.read_consultation_day's read:
+    the day's figures are the portal's own status-tab counts under its date filter, and the
+    breakdown and log come from the day's listed rows. `totals` is read_consultation_totals' all-time
+    tab counts, or None with `totals_error` when they could not be read (then "not available")."""
     from collections import Counter
-    import re
-
-    soup = BeautifulSoup(resp.text, 'html.parser')
-    table = soup.find('table')
-    if not table:
-        return "❌ Could not access consultation requests table on portal."
-
-    # Read by the header's column names: the portal's own layout change (Sep 2026) made the
-    # old fixed positions match nothing, and every count silently read 0.
-    from src.scraper.parsers import consultation_rows
-    rows = consultation_rows(resp.text)
-    if not rows and len(table.find_all('tr')) > 1:
-        return "❌ The consultation requests table on the portal has an unrecognised layout."
-    total_all = len(rows)
-    all_statuses = Counter(r['status'] for r in rows)
-
-    day_num = portal_date.split()[0].lstrip("0")
-    month_name = portal_date.split()[1] if len(portal_date.split()) > 1 else "Sep"
-    year_str = portal_date.split()[2] if len(portal_date.split()) > 2 else "2026"
-    date_regex = re.compile(rf"0?{day_num}\s+{month_name}(?:\s+{year_str})?", re.I)
-
-    date_records = []
-    for r in rows:
-        if date_regex.search(r['received']):
-            date_records.append({
-                'name': r['name'],
-                'city': r['city'],
-                'prog': r['program'],
-                'consultant': r['consultant'],
-                'status': r['status'],
-                'handled_by': r['handled_by'],
-                'time': r['received']
-            })
-
-    all_done = all_statuses.get('Consulted', 0) + all_statuses.get('File Opened', 0)
-    date_statuses = Counter([r['status'] for r in date_records])
-    done_on_date = date_statuses.get('Consulted', 0) + date_statuses.get('File Opened', 0)
-    counselors_on_date = Counter([r['handled_by'] for r in date_records if r['status'] in ('Consulted', 'File Opened') and r['handled_by'] != 'Unassigned'])
-
+    from src.bot.brief import esc
+    from src.scraper.client import portal_error_reason
+    counts, rows, complete = on_day["counts"], on_day.get("rows") or [], on_day.get("complete", True)
+    c = Counter({k: v for k, v in counts.items() if k != "All"})
+    received, done = counts["All"], c["Consulted"] + c["File Opened"]
+    rest = received - done - c["New"]                   # No Answer, Wrong Number and any other status
     lines = [
         f"📞 *Consultancy Inquiries Report — {display_date}*",
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"🌐 *Overall Portal Metrics:*",
-        f"• *Total Inquiries on Portal:* `{total_all}`",
-        f"• *Total All-Time Done:* `{all_done}` ({all_statuses.get('Consulted', 0)} Consulted, {all_statuses.get('File Opened', 0)} Files Opened)\n",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "🌐 *Overall Portal Metrics (all time, the portal's own status counts):*",
+    ]
+    if totals:
+        t = Counter(totals)
+        lines += [f"• *Total Inquiries on Portal:* `{t['All']}`",
+                  f"• *Total All-Time Done:* `{t['Consulted'] + t['File Opened']}` "
+                  f"({t['Consulted']} Consulted, {t['File Opened']} Files Opened)",
+                  f"• *Still New:* `{t['New']}` | *No Answer:* `{t['No Answer']}` | *Wrong Number:* `{t['Wrong Number']}`"]
+        extra = [(k, v) for k, v in totals.items() if k != "All" and k not in _DONE_STATUSES + ("New", "No Answer", "Wrong Number")]
+        if extra:
+            lines.append("• *Other statuses:* " + ", ".join(f"{esc(k)} {v}" for k, v in extra))
+    else:
+        why = portal_error_reason(totals_error) if totals_error else "not read"
+        lines.append(f"• All-time figures: not available (couldn't read the portal's status counts: {esc(why)})")
+    lines[-1] += "\n"
+    split = [f"{c[s]} {s}" for s in ("No Answer", "Wrong Number") if c[s]]
+    split += [f"{n} {esc(s)}" for s, n in c.items() if n and s not in _DONE_STATUSES + ("New", "No Answer", "Wrong Number")]
+    lines += [
         f"📅 *Performance on {display_date}:*",
-        f"• *Inquiries Received:* `{len(date_records)}`",
-        f"• *Inquiries Done:* `{done_on_date}`",
-        f"   ├ ✅ *Consulted:* `{date_statuses.get('Consulted', 0)}`",
-        f"   └ 📁 *File Opened:* `{date_statuses.get('File Opened', 0)}`",
-        f"• *Pending / New:* `{date_statuses.get('New', 0)}`",
-        f"• *No Answer / Other:* `{date_statuses.get('No Answer', 0) + date_statuses.get('Wrong Number', 0)}`"
+        f"• *Inquiries Received:* `{received}`",
+        f"• *Inquiries Done:* `{done}`",
+        f"   ├ ✅ *Consulted:* `{c['Consulted']}`",
+        f"   └ 📁 *File Opened:* `{c['File Opened']}`",
+        f"• *Pending / New:* `{c['New']}`",
+        f"• *No Answer / Other:* `{rest}`" + (f" ({', '.join(split)})" if split and rest else ""),
     ]
 
-    if counselors_on_date:
-        c_str = ", ".join([f"{c}: {cnt}" for c, cnt in counselors_on_date.most_common()])
-        lines.append(f"• *Consultations Handled by:* {c_str}")
+    handled = Counter(r.get("handled_by") or "" for r in rows if r.get("status") in _DONE_STATUSES)
+    if handled:
+        parts = [f"{esc(name)}: {n}" for name, n in handled.most_common() if name]
+        if handled[""]:
+            parts.append(f"no name on the portal: {handled['']}")
+        lines.append("• *Consultations Handled by:* " + ", ".join(parts)
+                     + ("" if complete else f" (among the {len(rows)} the portal lists)"))
 
-    if date_records:
+    if rows:
         lines.append("\n📋 *Inquiries Log:*")
-        for idx, r in enumerate(date_records[:10], 1):
-            st_emoji = "✅" if r['status'] == 'Consulted' else ("📁" if r['status'] == 'File Opened' else ("⏳" if r['status'] == 'New' else "📵"))
-            h_str = f" (by {r['handled_by']})" if r['handled_by'] and r['handled_by'] != 'Unassigned' else ""
-            lines.append(f"*{idx}. {r['name']}* [{r['prog']}]")
-            lines.append(f"   └ {st_emoji} Status: `{r['status']}`{h_str} | City: {r['city'] or 'N/A'}")
-
-        if len(date_records) > 10:
-            lines.append(f"\n_...and {len(date_records) - 10} more inquiries received on {display_date}._")
+        for idx, r in enumerate(rows[:INQUIRIES_LOG_MAX], 1):
+            status = r.get("status") or "?"
+            st_emoji = {"Consulted": "✅", "File Opened": "📁", "New": "⏳"}.get(status, "📵")
+            prog = r.get("program") or ""
+            lines.append(f"*{idx}. {_bold_safe(r.get('name') or '—')}*" + (f" {esc('[' + prog + ']')}" if prog else ""))
+            lines.append(f"   └ {st_emoji} Status: `{status.replace('`', '')}`{_inquiry_who(r)} | "
+                         f"City: {esc(r.get('city') or 'N/A')}")
+        shown = min(len(rows), INQUIRIES_LOG_MAX)
+        if received > shown:
+            lines.append(f"\n_...and {received - shown} more inquiries received on {display_date}._")
+    elif received:
+        lines.append(f"\nℹ️ The portal counts {received} requests on {display_date} but lists none of them.")
     else:
         lines.append(f"\nℹ️ *No new consultation requests were recorded on {display_date}.*")
-
     return "\n".join(lines)
+
+
+async def build_inquiries_report(target_date_input: str = "today", strict: bool = False) -> str:
+    """The inquiries report for the day `target_date_input` names, read live: that day's requests
+    from the portal's own date filter (so any day, not only those among the newest 500 requests its
+    unfiltered list shows), and the all-time figures from its status tabs. A date that cannot be
+    read (with `strict`, anything but a date) gets date_error_reply, a day to come says so, and a
+    failed read gets portal_error_reply: never a 0 or "none" standing in for "could not read"."""
+    from datetime import datetime
+    from src.bot.replies import date_error_reply, portal_error_reply
+    from src.dates import local_today
+    parsed = normalize_date_input(target_date_input, strict=strict)
+    if parsed is None:
+        return date_error_reply(target_date_input, "/inquiries_date")
+    portal_date, display_date = parsed
+    day = datetime.strptime(portal_date, "%d %b %Y").date()
+    if day > local_today():
+        return f"ℹ️ *Consultancy inquiries on {display_date}:* not available (a date in the future)."
+    try:
+        on_day = await admin_client.read_consultation_day(day)
+    except Exception as e:
+        logger.error(f"Inquiries for {portal_date} not read: {type(e).__name__}: {e}")
+        return portal_error_reply(f"Consultancy inquiries for {display_date}", e)
+    totals, totals_error = None, None
+    try:
+        totals = await admin_client.read_consultation_totals()
+    except Exception as e:
+        logger.error(f"All-time consultation counts not read: {type(e).__name__}: {e}")
+        totals_error = e
+    return format_inquiries_report(on_day, totals, display_date, totals_error)
+
+
+async def _send_inquiries_report(update: Update, raw_input: str, waiting: str, strict: bool) -> None:
+    """Build the report for `raw_input` and reply with it, split under Telegram's limit: the
+    "⏳ `waiting`" message becomes its first piece (src.bot.replies.reply_long)."""
+    from src.bot.brief import esc
+    from src.bot.replies import reply_long
+    from src.scraper.client import portal_error_reason
+    status_msg = await update.message.reply_text(f"⏳ _{waiting}_", parse_mode="Markdown")
+    try:
+        report = await build_inquiries_report(raw_input, strict=strict)
+    except Exception as e:
+        logger.error(f"Error building the inquiries report for {raw_input!r}: {e}")
+        report = f"❌ Error building the inquiries report: {esc(portal_error_reason(e))}"
+    await reply_long(update.message, report, edit=status_msg)
+
 
 async def inquiries_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Menu 1: Total consultancy inquiries and how many were done today."""
     if not is_authorized(update):
         return
-    status_msg = await update.message.reply_text("⏳ _Consulting live portal for today's consultancy inquiries..._", parse_mode="Markdown")
-    try:
-        report = await build_inquiries_report(target_date_input="today")
-        try:
-            await update.message.reply_text(report, parse_mode="Markdown")
-        except Exception:
-            await update.message.reply_text(report)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-    except Exception as e:
-        logger.error(f"Error in inquiries_today_command: {e}")
-        await update.message.reply_text(f"❌ Error fetching inquiries: `{e}`")
+    await _send_inquiries_report(update, "today", "Consulting live portal for today's consultancy inquiries...",
+                                 strict=True)
 
 async def inquiries_date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menu 2: Total consultancy inquiries and how many were done (ask me specific date)."""
+    """Menu 2: Total consultancy inquiries and how many were done (ask me specific date). The date
+    given (the command's words, the typed answer to the question, or a free-text or voice route's
+    words, which route here only when they name a date) must be one: '31 Sep' or 'foo' gets
+    date_error_reply, never today's report."""
     if not is_authorized(update):
         return
 
@@ -546,20 +591,15 @@ async def inquiries_date_command(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
-    status_msg = await update.message.reply_text(f"⏳ _Consulting live portal for inquiries ({raw_input})..._", parse_mode="Markdown")
-    try:
-        report = await build_inquiries_report(target_date_input=raw_input)
-        try:
-            await update.message.reply_text(report, parse_mode="Markdown")
-        except Exception:
-            await update.message.reply_text(report)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-    except Exception as e:
-        logger.error(f"Error in inquiries_date_command: {e}")
-        await update.message.reply_text(f"❌ Error fetching inquiries: `{e}`")
+    if normalize_date_input(raw_input, strict=True) is None:
+        from src.bot.replies import date_error_reply
+        logger.info(f"/inquiries_date: unreadable date {raw_input!r}")
+        await update.message.reply_text(date_error_reply(raw_input, "/inquiries_date"), parse_mode="Markdown")
+        return
+    # Inside the _italic_ waiting line an "_" of the user's own would end it early.
+    shown = re.sub(r"\s+", " ", raw_input.replace("_", " ")).strip()[:60]
+    await _send_inquiries_report(update, raw_input, f"Consulting live portal for inquiries ({shown})...",
+                                 strict=True)
 
 async def verified_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Menu 3: Total verified students today."""
@@ -1700,16 +1740,20 @@ async def handle_natural_language_message(update: Update, context: ContextTypes.
             await crosscheck_range_command(update, context)
             return
 
-    # 2. Route menu item 1 & 2: Consultancy inquiries queries
+    # 2. Route menu item 1 & 2: Consultancy inquiries queries. The date is read by the one strict
+    # parser (whole-word months: "Janan" is no January, "8 Sep" is never inside "18 Sep"), and a
+    # date-like word it cannot read goes to /inquiries_date, which says so, never silently today.
     if "inquir" in query_lower or "consultan" in query_lower or "consultat" in query_lower:
-        if "today" in query_lower or "how many were done today" in query_lower:
+        from src.dates import has_date_hint, local_today, parse_user_date
+        named = parse_user_date(query, prefer_past=True)
+        if named is not None and named == local_today():
             await inquiries_today_command(update, context)
             return
-        elif any(m in query_lower for m in ["yesterday", "sep", "oct", "nov", "dec", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "2026", "2025"]):
+        elif named is not None or has_date_hint(_DATE_FILLER_RE.sub(" ", query)):
             context.user_data["override_text"] = query
             await inquiries_date_command(update, context)
             return
-        elif "how many were done" in query_lower or "date" in query_lower or "specific" in query_lower:
+        elif "how many were done" in query_lower or re.search(r"\b(?:date|specific)\b", query_lower):
             await inquiries_date_command(update, context)
             return
 
