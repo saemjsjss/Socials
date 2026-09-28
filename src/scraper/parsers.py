@@ -255,46 +255,97 @@ def normalize_target_date(target_date: Optional[str]) -> Optional[str]:
     return target_date.strip()
 
 
-def parse_consultation_requests(html: str, target_date: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Parse consultation requests table from consult_requests.php, optionally filtered by date."""
+def _consult_columns(header: List[str]) -> Dict[str, int]:
+    """Column index by meaning, from the header row's names."""
+    idx: Dict[str, int] = {}
+    for i, h in enumerate(h.lower() for h in header):
+        if "update" in h:                       # "Update status" holds forms, never data
+            continue
+        for key, words in (("name", ("student", "name")), ("contact", ("contact", "phone")),
+                           ("city", ("city",)), ("program", ("program",)),
+                           ("consultant", ("consultant",)), ("details", ("detail",)),
+                           ("received", ("received", "date")), ("status", ("status",)),
+                           ("remarks", ("remark",))):
+            if key not in idx and any(w in h for w in words):
+                idx[key] = i
+    return idx
+
+
+def consultation_rows(html: str) -> List[Dict[str, Any]]:
+    """Every row of the consult_requests.php table, read by the header's column names.
+
+    The portal changed this table on its own (Sep 2026: 8+ columns became Student, Consultant,
+    City & program, Received, Status, Remarks, Update status); the old fixed column positions
+    then matched nothing and every count silently read 0.  Reading by header name, and by the
+    cells' own classes (.cr-name, .stbadge, .city, .prog, .d/.t, .cr-by), keeps working when
+    columns move.  The Remarks/Update-status forms are only ever read, never submitted."""
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table")
     if not table:
         return []
+    trs = table.find_all("tr")
+    if not trs:
+        return []
+    col = _consult_columns([c.get_text(" ", strip=True) for c in trs[0].find_all(["th", "td"])])
+    if "name" not in col or "status" not in col:
+        return []
 
-    target_str = normalize_target_date(target_date)
+    def cell(cols, key):
+        i = col.get(key)
+        return cols[i] if i is not None and i < len(cols) else None
 
+    def text(tag, selector=None):
+        """The tag's text, or its first `selector` match's text ("" when absent)."""
+        if tag is None:
+            return ""
+        if selector:
+            part = tag.select_one(selector)
+            return part.get_text(" ", strip=True) if part else ""
+        return tag.get_text(" ", strip=True)
 
-    requests_list = []
-    for tr in table.find_all("tr"):
+    rows = []
+    for tr in trs[1:]:
         cols = tr.find_all(["td", "th"])
-        if len(cols) >= 8:
-            received = cols[6].get_text(" ", strip=True)
-            if target_str and target_str.lower() not in received.lower():
-                continue
-            name = cols[0].get_text(" ", strip=True)
-            if name == "Name":  # Header row
-                continue
-            contact = cols[1].get_text(" ", strip=True).replace("[email protected]", "").strip()
-            city = cols[2].get_text(" ", strip=True)
-            prog = cols[3].get_text(" ", strip=True)
-            consultant = cols[4].get_text(" ", strip=True)
-            details = cols[5].get_text(" ", strip=True).replace("View", "").strip()
-            status = cols[7].get_text(" ", strip=True)
-            remarks = cols[8].get_text(" ", strip=True) if len(cols) > 8 else ""
+        if len(cols) <= max(col["name"], col["status"]):
+            continue
+        name_cell, status_cell = cell(cols, "name"), cell(cols, "status")
+        name = text(name_cell, ".cr-name") or text(name_cell)
+        if not name:
+            continue
+        badge = status_cell.select_one(".stbadge") if status_cell else None
+        status = badge.get_text(" ", strip=True) if badge else text(status_cell)
+        consultant = text(cell(cols, "consultant"), ".cr-cons") or text(cell(cols, "consultant"))
+        consultant = consultant if consultant and consultant != "—" else "Unassigned"
+        by = status_cell.select_one(".cr-by") if status_cell else None
+        place = cell(cols, "city")
+        received_cell = cell(cols, "received")
+        day = text(received_cell, ".d")
+        clock = text(received_cell, ".t")
+        received = f"{day} {clock}".strip() if day else text(received_cell)
+        contact_cell = cell(cols, "contact") or (name_cell.select_one(".cr-contact") if name_cell else None)
+        remark_box = cell(cols, "remarks").select_one("textarea") if cell(cols, "remarks") else None
+        details = (place.select_one(".crd-body") if place else None) or cell(cols, "details")
+        rows.append({
+            "name": name,
+            "contact": text(contact_cell).replace("[email protected]", "").strip(),
+            "city": text(place, ".city") or text(place),
+            "program": text(place, ".prog") or text(cell(cols, "program")),
+            "consultant": consultant,
+            "details": text(details).replace("View", "").strip(),
+            "received": received,
+            "received_date": day or received,
+            "status": status,
+            "handled_by": by.get_text(" ", strip=True) if by else consultant,
+            "remarks": remark_box.get_text(" ", strip=True) if remark_box else text(cell(cols, "remarks")),
+        })
+    return rows
 
-            requests_list.append({
-                "name": name,
-                "contact": contact,
-                "city": city,
-                "program": prog,
-                "consultant": consultant if consultant != "—" else "Unassigned",
-                "details": details,
-                "received": received,
-                "status": status,
-                "remarks": remarks
-            })
-    return requests_list
+
+def parse_consultation_requests(html: str, target_date: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Parse consultation requests table from consult_requests.php, optionally filtered by date."""
+    target_str = normalize_target_date(target_date)
+    return [r for r in consultation_rows(html)
+            if not target_str or target_str.lower() in r["received"].lower()]
 
 
 def parse_verified_students(html: str, target_date: Optional[str] = "today") -> List[Dict[str, Any]]:

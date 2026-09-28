@@ -407,39 +407,32 @@ async def build_inquiries_report(target_date_input: str = "today") -> str:
     if not table:
         return "❌ Could not access consultation requests table on portal."
 
-    trs = table.find_all('tr')[1:]
-    total_all = len(trs)
-    all_statuses = Counter()
-    
+    # Read by the header's column names: the portal's own layout change (Sep 2026) made the
+    # old fixed positions match nothing, and every count silently read 0.
+    from src.scraper.parsers import consultation_rows
+    rows = consultation_rows(resp.text)
+    if not rows and len(table.find_all('tr')) > 1:
+        return "❌ The consultation requests table on the portal has an unrecognised layout."
+    total_all = len(rows)
+    all_statuses = Counter(r['status'] for r in rows)
+
     day_num = portal_date.split()[0].lstrip("0")
     month_name = portal_date.split()[1] if len(portal_date.split()) > 1 else "Sep"
     year_str = portal_date.split()[2] if len(portal_date.split()) > 2 else "2026"
     date_regex = re.compile(rf"0?{day_num}\s+{month_name}(?:\s+{year_str})?", re.I)
 
     date_records = []
-    for tr in trs:
-        cols = tr.find_all(['td', 'th'])
-        if len(cols) >= 8:
-            badge = cols[7].find(class_='stbadge')
-            status = badge.get_text(strip=True) if badge else cols[7].get_text(strip=True)
-            all_statuses[status] += 1
-            date_col = cols[6].get_text(' ', strip=True)
-            if date_regex.search(date_col):
-                name = cols[0].get_text(' ', strip=True)
-                city = cols[2].get_text(' ', strip=True)
-                prog = cols[3].get_text(' ', strip=True)
-                consultant = cols[4].get_text(' ', strip=True)
-                counselor_div = cols[7].find('div')
-                handled_by = counselor_div.get_text(strip=True) if counselor_div else consultant
-                date_records.append({
-                    'name': name,
-                    'city': city,
-                    'prog': prog,
-                    'consultant': consultant,
-                    'status': status,
-                    'handled_by': handled_by,
-                    'time': date_col
-                })
+    for r in rows:
+        if date_regex.search(r['received']):
+            date_records.append({
+                'name': r['name'],
+                'city': r['city'],
+                'prog': r['program'],
+                'consultant': r['consultant'],
+                'status': r['status'],
+                'handled_by': r['handled_by'],
+                'time': r['received']
+            })
 
     all_done = all_statuses.get('Consulted', 0) + all_statuses.get('File Opened', 0)
     date_statuses = Counter([r['status'] for r in date_records])
