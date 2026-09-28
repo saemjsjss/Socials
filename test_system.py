@@ -87,14 +87,12 @@ async def run_tests():
     health = await ollama_client.check_health()
     console.print(f"  ✔ Ollama check: reachable={health['reachable']}")
 
-    report = ollama_client._generate_structured_report_fallback(dash_res, apps, inqs)
-    assert "Executive" in report or "HANGEUL" in report
-    console.print("  ✔ Executive Briefing Generation verified (Sample preview below):")
-    for line in report.split("\n")[:6]:
-        console.print(f"    [dim]{line}[/dim]")
+    facts = [f"{k}: {v}" for k, v in (dash_res.get("summary") or {}).items() if isinstance(v, int)]
+    picked = ollama_client._answer_query_fallback("total applicants", facts)
+    console.print(f"  ✔ Fact pick without the LLM verified: {picked}")
 
-    answer = await ollama_client.answer_agent_query("How many KLP students?", {"dashboard": dash_res})
-    console.print(f"  ✔ Natural Language Q&A verified:\n    [dim]{answer.splitlines()[0]}[/dim]")
+    answer = await ollama_client.answer_agent_query("How many KLP students?", facts)
+    console.print(f"  ✔ Natural Language fact pick verified: {answer}")
 
     # Test 5: FastAPI Application Routing & Endpoints
     console.print("\n[bold yellow]Test 5: FastAPI Application Routing & Live Endpoints[/bold yellow]")

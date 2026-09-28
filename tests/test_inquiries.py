@@ -319,11 +319,25 @@ def test_free_text_that_is_no_inquiry_date_is_not_read_as_one(portal, monkeypatc
     async def recorder(update, context):
         routed.append(context.user_data.get("override_text"))
     monkeypatch.setattr(telegram_bot, "report_command", recorder)
-    # "Janan" is no January: not an inquiry date (the old substring test sent it to /inquiries_date).
-    run(telegram_bot.handle_natural_language_message, "consultations handled by Arshia Janan", None)
-    assert routed == ["consultations handled by Arshia Janan"] and consult_reads(portal.asked) == []
+    # "Janan" is no January (the old substring test sent it to /inquiries_date): a consultation
+    # question that names no date is today's report (the free-text router's rule), read for today only.
+    text = report_of(run(telegram_bot.handle_natural_language_message, "consultations handled by Arshia Janan", None)[0])
+    assert "Report — 28 September 2026*" in text and routed == []
+    assert consult_reads(portal.asked) == [day_key("2026-09-28"), TOTALS_KEY]
+    portal.asked.clear()
     # A date-like word that cannot be read is said so, never today's report.
-    for said in ("how many consultations on 31 Sep", "consultations last week"):
-        text = report_of(run(telegram_bot.handle_natural_language_message, said, None)[0])
-        assert "couldn't read" in text and "Report —" not in text
+    text = report_of(run(telegram_bot.handle_natural_language_message, "how many consultations on 31 Sep", None)[0])
+    assert "couldn't read" in text and "Report —" not in text
+    # A span of days is asked again one day at a time, never today's report.
+    text = report_of(run(telegram_bot.handle_natural_language_message, "consultations last week", None)[0])
+    assert "one day at a time" in text and "Report —" not in text
+    assert consult_reads(portal.asked) == []
+
+
+def test_free_text_asking_for_a_specific_date_gets_the_date_prompt(portal):
+    inquiry_portal(portal)
+    chat, context = run(telegram_bot.handle_natural_language_message,
+                        "consultations on a specific date", None)
+    assert "specific date" in report_of(chat) and "Report —" not in report_of(chat)
+    assert context.user_data.get("awaiting_date_for") == "inquiries"
     assert consult_reads(portal.asked) == []

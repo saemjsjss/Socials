@@ -32,7 +32,7 @@ import random
 import re
 import time
 import warnings
-from collections import deque
+from collections import Counter, deque
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from typing import Callable, Optional, Tuple
@@ -391,9 +391,10 @@ _ROUTER_SYSTEM = (
     "- verified_date: verified students on one specific date other than today\n"
     "- inquiries_today: consultancy inquiries / consultations handled today (상담, 문의)\n"
     "- inquiries_date: consultancy inquiries on one specific date other than today\n"
-    "- calendar: upcoming schedule, deadlines and intakes (일정, 마감)\n"
+    "- calendar: upcoming schedule, deadlines, DHL shipments and application windows (일정, 마감)\n"
     "- passports: passport audit, students whose passport data is wrong or missing (여권)\n"
-    "- stats: overall statistics and totals (전체 통계)\n"
+    "- stats: overall statistics and totals: pending payments, applications under review, students per "
+    "program or intake, documents to review (전체 통계, 결제 대기)\n"
     "- missing_report: students with missing documents or missing data\n"
     "- crosscheck: cross-check payments against records for a date or a student\n"
     "- chat: greetings, thanks, praise, small talk, or anything that is not a data request\n\n"
@@ -404,7 +405,7 @@ _ROUTER_SYSTEM = (
     "Answer with JSON only: {\"command\": one of the commands, \"date\": \"YYYY-MM-DD\" or null, "
     "\"english_query\": the request as one short English sentence, \"language\": \"ko\" if the new "
     "utterance is Korean, otherwise \"en\"}. The date is null unless the command is verified_date, "
-    "inquiries_date or crosscheck with a spoken date."
+    "inquiries_date, crosscheck or passports with a spoken date."
 )
 
 _ROUTER_SCHEMA = {
@@ -430,7 +431,7 @@ def _iso_day(value) -> Optional[date]:
 
 _KO_WEEKDAYS = ("월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일")
 _EN_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
-_DATED_COMMANDS = ("verified_today", "verified_date", "inquiries_today", "inquiries_date", "crosscheck")
+_DATED_COMMANDS = ("verified_today", "verified_date", "inquiries_today", "inquiries_date", "crosscheck", "passports")
 
 _MONTH_WORD = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
                r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b\.?")
@@ -637,12 +638,45 @@ async def _dispatch(routed: dict, update, context, heard: str) -> tuple:
         await bot.crosscheck_date_command(update, context)     # asks which date
         return "crosscheck_date", None
 
-    direct = {"calendar": bot.calendar_command, "passports": bot.passports_command,
-              "stats": bot.stats_command, "missing_report": bot.missing_command}.get(command)
-    if direct is None:
-        return None, None
-    await direct(update, context)
-    return command, None
+    if command == "passports":
+        # Passport problems: the live passport cross-check for the day named (today when none), the
+        # route typed questions take (src.bot.ask), never a stored or hardcoded passport list.
+        if day is None:
+            day = _one_day(query, today) or _relative_day(heard, today) or today
+        if day == today:
+            await bot.crosscheck_today_command(update, context)
+            return "crosscheck_today", day
+        ud["override_text"] = _portal_day(day)
+        await bot.crosscheck_date_command(update, context)
+        return "crosscheck_date", day
+
+    if command == "calendar":
+        # The English words go along, so /calendar applies their dates ("this week", "on 2 Oct").
+        span = None
+        if query:
+            from src.bot import ask
+            ud["override_text"] = query
+            window = ask.calendar_query(query, today).window
+            if window is not None and window.last is not None:
+                span = window.first if window.first == window.last else (window.first, window.last)
+        await bot.calendar_command(update, context)
+        return "calendar", span
+
+    if command == "stats":
+        # A specific figure ("pending payments", "students in the March 2027 intake") takes the
+        # typed route that reads it live; only a general request is the whole /stats.
+        from src.bot import ask
+        kind = ask.classify(query, today).kind if query else "unknown"
+        if kind not in ("unknown", "stats", "hello", "pin"):
+            await bot.handle_natural_language_message(update, context, query=query)
+            return f"stats:{kind}", None
+        await bot.stats_command(update, context)
+        return "stats", None
+
+    if command == "missing_report":
+        await bot.missing_command(update, context)
+        return command, None
+    return None, None
 
 
 _CUTE_EN = (
@@ -652,38 +686,41 @@ _CUTE_EN = (
 )
 
 _FACT_RULES = (
-    "- Use only facts from the written answer; never invent numbers, names or dates. Say the key "
-    "number (a total); never read out full dates, lists or names.\n"
+    "- Use only the facts given; never invent numbers, names or dates. Say the one or two figures "
+    "that answer the question, each with the words of its own fact; never read out lists or names.\n"
     "- Write numbers as digits (they are read out correctly).\n"
 )
-_ASK_RULE = ("- If the written answer asks the user for something (a date, or to choose a program), ask for "
-             "it briefly.\n")
+_ASK_RULE = ("- If there are no facts and the written answer asks the user for something (a date, or to "
+             "choose a program), ask for it briefly; if it says the portal could not be read, say so; say "
+             "no number then.\n")
+_DAY_RULE = ("- Say the day exactly as it is given under 'The day' (or no day at all), never another day; "
+             "when there is no day, never say one.\n")
 
 _REPLY_SYSTEM_EN = (
     "You are Jennie, the cute and cheerful voice of the office bot of Hangeul Korean Language & Visa "
     "in Dhaka. Say, in a short English voice note, the answer to what the user just asked, using the "
-    "bot's written answer. If there is no written answer, just reply naturally.\n"
+    "facts the bot just read from the portal. If there is no written answer, just reply naturally.\n"
     + _CUTE_EN +
     "Rules:\n"
     "- English only, ONE short sentence, at most <LIMIT> characters.\n"
-    + _FACT_RULES + _ASK_RULE +
-    "- When there is nothing (0), say so in words (no students today).\n"
+    + _FACT_RULES + _ASK_RULE + _DAY_RULE +
+    "- When the figure is 0, say in words that there were none.\n"
     "- No Markdown, asterisks, emojis, bullet points or URLs.\n"
     "Output only the words Jennie says."
 )
 
 _REPLY_SYSTEM_KO = (
     "You are Jennie (제니), the cute and cheerful voice of the office bot of Hangeul Korean Language & "
-    "Visa. Say, in a short KOREAN voice note, the answer to what the user just asked, using the bot's "
-    "written answer (usually English). If there is no written answer, just reply naturally.\n"
+    "Visa. Say, in a short KOREAN voice note, the answer to what the user just asked, using the facts "
+    "the bot just read from the portal (in English). If there is no written answer, just reply naturally.\n"
     "Rules:\n"
     "- Korean (Hangul) only, in a cute 애교 style: friendly endings like ~요, ~용, ~어용, ~구요, and "
     "you may start with '짜잔!'. Warm and polite, never rude.\n"
     "- ONE short sentence, at most <LIMIT> characters.\n"
-    + _FACT_RULES + _ASK_RULE +
-    "- When there is nothing (0), say 없어요 instead of a number.\n"
+    + _FACT_RULES + _ASK_RULE + _DAY_RULE +
+    "- When the figure is 0, say 없어요 instead of a number.\n"
     "- No Markdown, asterisks, emojis, bullet points, URLs or English sentences.\n"
-    "Example: 짜잔! 오늘 서류 검증된 학생은 2명이에용!\n"
+    "Example (the bot asked which date): 어느 날짜를 볼까용?\n"
     "Output only the words Jennie says."
 )
 
@@ -826,12 +863,28 @@ def _facts_ok(said: str, *sources: str) -> bool:
     return said_numbers <= allowed
 
 
+def _said_part(raw: str, language: str, limit: int) -> str:
+    """The brain's words as plain text, cut where _speech_text cuts them to fit `limit` (at the end of
+    a sentence): what is checked is what Jennie actually says. A first sentence too long to fit is
+    checked whole."""
+    plain = re.sub(r"\s+", " ", _plain(raw or "")).strip()
+    sentences = [s for s in re.split(r"(?<=[.!?。…~])\s+", plain) if s]
+    kept = ""
+    for sentence in sentences:
+        longer = f"{kept} {sentence}".strip()
+        if kept and len(_speech_text(longer, language, 10 ** 4)) > limit:
+            break
+        kept = longer
+    return kept or plain
+
+
 async def _say(system: str, prompt: str, language: str, limit: int, *sources: str,
-               check: Optional[Callable[[str], bool]] = None) -> str:
+               check: Optional[Callable[[str], bool]] = None, numbers: Optional[set] = None) -> str:
     """One brain call for words to speak; once more, told which numbers there are, if they quote a
-    number the sources do not have (or fail `check`, a stricter test of the words said). Small talk
-    (no written answer) is checked too: its numbers must come from the question, so a data question
-    the router took for chat gets no invented figures.
+    number the `sources` do not have (_facts_ok; small talk: the question's numbers only) or fail
+    `check` (the stricter test of the words said: brief.claims_problem against the facts read, for
+    an answer from the portal). `numbers`: the numbers the second try is told it may say (default:
+    the sources' numbers).
     Words over `limit` are asked for once more, shorter: cut to fit, a Korean sentence would lose its
     end, where the number is ("...학생은 모두 스물다섯 명이에용"). "" when the brain is down or kept
     getting the facts wrong."""
@@ -841,16 +894,18 @@ async def _say(system: str, prompt: str, language: str, limit: int, *sources: st
         if not raw:
             return ""
         spoken = _clean_reply(raw, language, limit)
-        facts_ok = _facts_ok(_plain(raw), *sources) and (check is None or check(_plain(raw)))
+        said = _said_part(raw, language, limit)     # the words that are actually spoken, before spelling
+        facts_ok = (not sources or _facts_ok(said, *sources)) and (check is None or check(said))
         too_long = len(_clean_reply(raw, language, TTS_MAX_CHARS)) > limit
         if spoken and facts_ok and (not too_long or attempt):
             return spoken
         if not attempt:
             hints = []
             if not facts_ok:
-                numbers = sorted(set().union(*(_numbers_in(s) for s in sources)))[:20]
-                hints.append(f"(The only numbers you may say: {', '.join(str(n) for n in numbers)}.)" if numbers
-                             else "(Do not say any numbers.)")
+                allowed = numbers if numbers is not None else set().union(*(_numbers_in(s) for s in sources))
+                allowed = sorted(allowed)[:20]
+                hints.append(f"(The only numbers you may say: {', '.join(str(n) for n in allowed)}, each with "
+                             "the words of its own fact.)" if allowed else "(Do not say any numbers.)")
             if too_long:
                 hints.append(f"(Too long: say it in ONE short sentence of at most {int(limit * 0.7)} characters.)")
             if hints:
@@ -858,18 +913,278 @@ async def _say(system: str, prompt: str, language: str, limit: int, *sources: st
     return ""
 
 
-async def spoken_reply(question: str, language: str, answer: str = "", turns=()) -> str:
+# --------------------------------------------------------------------------- the facts Jennie may say
+
+# "Total Students Verified: 2", "• *Pending payments:* `2` (students.php...)", "Admitted: 0 — ...":
+# one figure a line, the way every command writes its headline figures.
+_FACT_LINE_RE = re.compile(
+    r"^(?P<label>[A-Za-z][A-Za-z0-9 '’/&().,+-]{1,80}?)\s*:\s*(?P<value>\d[\d,]*(?:\.\d+)?(?:\s*BDT)?)"
+    r"\s*(?:\(.*\)|[—–-].*|\.)?\s*$")
+_ITEMS_LINE_RE = re.compile(r"^(?P<label>[A-Za-z][A-Za-z '’]{2,60}?)\s*\((?P<value>\d+)\s+items?\)")
+_DATE_IN_LABEL_RE = re.compile(rf"(?<!\d)\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?{_MONTH_WORD}"
+                               rf"|\b{_MONTH_WORD}\s+\d{{1,2}}(?!\d)|\d{{4}}-\d{{2}}-\d{{2}}", re.I)
+# A written answer that says there is nothing, as the commands word it -> that 0 as a fact.
+_NOTHING_FACTS = (
+    (re.compile(r"^No student payments were verified\b", re.I), "Students whose payment was verified: 0"),
+    (re.compile(r"^No (?:new )?consultation requests were (?:recorded|received)\b", re.I),
+     "Consultation requests received: 0"),
+    (re.compile(r"^No payment-verified students found\b", re.I), "Payment-verified students cross-checked: 0"),
+    (re.compile(r"^No admitted students on the portal\b", re.I), "Admitted students: 0"),
+)
+ANSWER_FACTS_MAX = 8
+
+
+def answer_facts(answer: str) -> list:
+    """The facts a command's written answer states, one figure a line ("Total Students Verified: 2",
+    "Consultation requests received: 0"): its "label: figure" lines (a label on several lines, such
+    as each student's "Payment", is a detail, not a fact), its "(N items)" headings and its "No ..."
+    lines. What Jennie may say about an answer from the portal; [] when it states no figure (a
+    question back, or "Couldn't read the portal")."""
+    lines, counts = [], Counter()
+    for raw in _plain(answer or "").splitlines():
+        line = raw.replace("৳", " ").strip(" .")
+        line = re.sub(r"\s+", " ", line).strip()
+        fact = None
+        for pattern, said in _NOTHING_FACTS:
+            if pattern.search(line):
+                fact = said
+        m = _FACT_LINE_RE.match(line) if fact is None else None
+        if m and not _DATE_IN_LABEL_RE.search(m.group("label")):
+            fact = f"{m.group('label').strip()}: {m.group('value').strip()}"
+        m = _ITEMS_LINE_RE.match(line) if fact is None else None
+        if m:
+            fact = f"{m.group('label').strip()}: {m.group('value')}"
+        if fact:
+            label = fact.rsplit(":", 1)[0].strip().lower()
+            counts[label] += 1
+            lines.append((label, fact))
+    facts = [fact for label, fact in lines if counts[label] == 1]
+    return list(dict.fromkeys(facts))[:ANSWER_FACTS_MAX]
+
+
+def _day_words(day, language: str, today: date) -> str:
+    """The day an answer is for, as Jennie says it ("today", "on 12 September", "9월 12일"); ""
+    when it is for no particular day (a live figure)."""
+    if isinstance(day, tuple):
+        first, last = day
+        if language == "ko":
+            # A spelled-out range would not fit one short line: the week when it is one.
+            monday = today - timedelta(days=today.weekday())
+            if last == monday + timedelta(days=6) and first in (today, monday):
+                return "이번 주"
+            if (first, last) == (monday + timedelta(days=7), monday + timedelta(days=13)):
+                return "다음 주"
+            if (first, last) == (monday - timedelta(days=7), monday - timedelta(days=1)):
+                return "지난주"
+            return "그 기간"
+        return f"from {first.day} {first:%B} to {last.day} {last:%B}"
+    if not isinstance(day, date):
+        return ""
+    back = (today - day).days
+    if language == "ko":
+        return {0: "오늘", 1: "어제", 2: "그저께"}.get(back, f"{day.month}월 {day.day}일")
+    return {0: "today", 1: "yesterday"}.get(back, f"on {day.day} {day:%B}" + (f" {day.year}" if day.year != today.year else ""))
+
+
+def _day_problem(said: str, day, today: date) -> Optional[str]:
+    """Why the days Jennie names are not the answer's own day ("today" for 12 Sep), or None."""
+    named = set(_query_days(said, today))
+    if not named:
+        return None
+    if isinstance(day, tuple):
+        allowed = set(day)
+    elif isinstance(day, date):
+        allowed = {day}
+    else:
+        allowed = {today}                       # a live figure: "right now", "today"
+    wrong = named - allowed
+    return f"another day ({', '.join(sorted(str(d) for d in wrong))})" if wrong else None
+
+
+def _without_days(said: str) -> str:
+    return _QUERY_DAY_RE.sub(" ", said or "")
+
+
+# Words Jennie may use in a spoken answer besides the facts' own (brief.claims_problem allows no
+# other word, so an invented name or status is never spoken).
+_JENNIE_WORDS = """ta da tada yay yey yippee hooray hurray woohoo wow hehe hehehe hihi okie okey okay ok ookie
+dokie oki aww awww yes good great news evening night morning hello hi hey jennie boss team sweet lovely nice happy
+super cheer busy here you your we our us got get have has had there right now just so checked check found see look
+looks like say says said tell told answer chat total students student payment payments paid verified verification
+consultations consultation inquiries inquiry requests request came received done handled records audited
+crosschecked cross pending under review applications application window windows deadlines deadline due dhl
+shipments calendar reminders admitted documents docs program programs university universities stage waiting
+approval on for from to in of the a an and with were was is are will be been these those this that it its week
+weekend month next coming upcoming soon item items happened came arrived made went there's new""".split()
+_MONTH_AND_DAY_WORDS = ("january february march april may june july august september october november december "
+                        "today yesterday tomorrow day before").split()
+
+
+def _fact_problem(said: str, facts: list, question: str, language: str, day, today: date) -> Optional[str]:
+    """Why Jennie's English words about an answer from the portal may not be spoken, or None. The
+    days she names must be the answer's own; she must say a figure (or that there was none); and
+    every figure must be the figure of the fact her words describe: brief.claims_problem against
+    the facts read. Korean words cannot go through that check (it reads English only): a Korean
+    sentence about the facts is built from them instead (_korean_line), never taken from the brain."""
+    if language == "ko":
+        return "Korean words cannot be checked against the facts (the sentence is built from them)"
+    problem = _day_problem(said, day, today)
+    if problem:
+        return problem
+    rest = _without_days(said)
+    if not _numbers_in(rest) and not _SAID_NOTHING_RE.search(rest):
+        return "no figure"
+    from src.bot.brief import claims_problem
+    extra = _JENNIE_WORDS + _MONTH_AND_DAY_WORDS + re.findall(r"[a-z]+", _checkable(question, facts).lower())
+    return claims_problem(_checkable(rest, facts), facts, extra)
+
+
+# Subjects the daily brief never reports (brief.claims_problem refuses them outright), which an
+# answer's own facts can be about ("Students in the MARCH 2027 intake: 177").
+_SUBJECT_RE = re.compile(r"\b(intake|passport|visa)s?\b", re.I)
+
+
+def _checkable(said: str, facts: list) -> str:
+    """Jennie's words as brief.claims_problem reads them against an answer's facts: a consultation is
+    what the facts call an inquiry, and a subject the brief never reports (an intake, a passport) is
+    fine when the facts themselves are about it."""
+    text = re.sub(r"\bconsult(?:ation|ations)\b", "inquiries", said or "", flags=re.I)
+    about = " ".join(facts).lower()
+    return _SUBJECT_RE.sub(lambda m: "item" if m.group(1).lower() in about else m.group(0), text)
+
+
+# Korean words for the figure a fact counts, and its counter, for Jennie's own sentence about it
+# (the first of these a fact of the answer matches is the one she says). "timed": the words carry
+# their own period ("이번 주"), so no day goes before them.
+_KO_TOPICS = (
+    (r"students? verified|student payments? verified|payment was verified", "검증된 학생은", "명", False),
+    (r"requests? received|inquiries received|consultations? received", "상담 요청은", "건", False),
+    (r"records? audited|cross-?checked", "크로스체크한 학생은", "명", False),
+    (r"^pending payments?", "결제 대기 중인 학생은", "명", False),
+    (r"applications? under review|^under review", "심사 중인 지원서는", "건", False),
+    (r"^deadlines", "마감은", "건", False),
+    (r"^dhl shipments", "DHL 발송은", "건", False),
+    (r"^calendar items", "일정은", "개", False),
+    (r"^reminders for today", "오늘 일정은", "개", True),
+    (r"^admitted", "입학 완료 학생은", "명", False),
+    (r"^total students", "전체 학생은", "명", False),
+    (r"^open windows", "열려 있는 입학 창구는", "개", False),
+    (r"^docs to review", "검토할 서류는", "건", False),
+    (r"^applied this week", "이번 주 지원한 학생은", "명", True),
+    (r"^applied this month", "이번 달 지원한 학생은", "명", True),
+    (r"^students who applied", "지원한 학생은", "명", False),
+    (r"^students in the (?P<month>[a-z]+) (?P<year>\d{4}) intake", "{year}년 {month}월 인테이크 학생은", "명", True),
+)
+
+
+def _headline(facts: list) -> Optional[tuple]:
+    """(the fact, its Korean words, counter, timed) Jennie says about an answer: the first fact
+    matching the first topic that any fact matches; None when none does."""
+    for pattern, words, counter, timed in _KO_TOPICS:
+        for fact in facts:
+            m = re.search(pattern, fact.rsplit(":", 1)[0].strip(), re.I)
+            if m:
+                if "{month}" in words:
+                    month = next((i for i, name in enumerate(_MONTHS, 1)
+                                  if name.lower().startswith(m.group("month").lower()[:3])), None)
+                    if month is None:
+                        continue
+                    words = words.format(year=m.group("year"), month=month)
+                return fact, words, counter, timed
+    return None
+
+
+def _fact_value(fact: str) -> Optional[int]:
+    m = re.search(r"\d[\d,]*", fact.rsplit(":", 1)[-1])
+    return int(m.group(0).replace(",", "")) if m else None
+
+
+def _korean_line(facts: list, day, today: date) -> str:
+    """Jennie's Korean sentence about an answer, built from its headline fact ("짜잔! 어제 상담 요청은
+    21건이에용!"); "" when no fact has Korean words here."""
+    head = _headline(facts)
+    if head is None:
+        return ""
+    fact, words, counter, timed = head
+    value = _fact_value(fact)
+    if value is None:
+        return ""
+    when = "" if timed else (_day_words(day, "ko", today) or "지금")
+    words = f"{when} {words}".strip()
+    if value == 0:
+        return f"{words} 없어용!"
+    copula = "이에용" if (ord(counter[-1]) - 0xAC00) % 28 else "예용"      # 명이에용, 건이에용, 개예용
+    line = f"짜잔! {words} {value}{counter}{copula}!"
+    if len(_speech_text(line, "ko", 10 ** 4)) > REPLY_MAX_CHARS["ko"]:
+        line = line[len("짜잔! "):]                # the figure must fit, the cheer need not
+    return line
+
+
+def _english_line(facts: list, day, today: date) -> str:
+    """Jennie's plain English sentence about an answer's headline fact, when the brain's own words
+    did not check out: "Okie! Total Students Verified today: 2, hehe!"."""
+    head = _headline(facts)
+    fact = head[0] if head else (facts[0] if facts else "")
+    if not fact:
+        return ""
+    label, value = (x.strip() for x in fact.rsplit(":", 1))
+    when = _day_words(day, "en", today)
+    label = re.sub(r"\s*\([^)]*\)", "", label)
+    if _fact_value(fact) == 0:
+        return f"Aww, {label}{' ' + when if when else ''}: none, hehe!"
+    return f"Okie! {label}{' ' + when if when else ''}: {value}, hehe!"
+
+
+async def spoken_reply(question: str, language: str, answer: str = "", turns=(), day=None) -> str:
     """ONE short sentence Jennie says about the written answer (or, with no answer, to the small
-    talk), in `language` ("ko" = cute Korean, anything else = cute English), ready for speech."""
+    talk), in `language` ("ko" = cute Korean, anything else = cute English), ready for speech.
+
+    `day` is the day the answer is for (a date, a (first, last) range, or None for live figures):
+    she names that day or none. An answer from the portal is spoken from the facts it states
+    (answer_facts), never from the rest of its text: in English the brain words it and
+    brief.claims_problem checks every figure against those facts (_fact_problem), once more if
+    not, then a plain sentence of the headline fact; in Korean her sentence is built from the
+    headline fact itself (_korean_line: the brain's Korean cannot be checked word by word), and
+    a fact with no Korean words here is left to the text answer. An answer with no figure (a
+    question back, a portal that could not be read) is said with no number and never as "none"."""
     language = "ko" if language == "ko" else "en"
     system = (_REPLY_SYSTEM_KO if language == "ko" else _REPLY_SYSTEM_EN).replace(
         "<LIMIT>", str(REPLY_TARGET_CHARS[language]))
+    today = _now().date()
+    history = f"Recent conversation:\n{_history_text(turns, False)}\n\n"
+    if not answer:
+        prompt = (f"{history}The user just said (spoken): {question}\n\n"
+                  f"The bot's written answer:\n(none, this is small talk)\n\nJennie says:")
+        return (await _say(system, prompt, language, REPLY_MAX_CHARS[language], "", question)
+                or _FALLBACK[(language, False)])
+
+    facts = answer_facts(answer)
+    when = _day_words(day, "en", today)
+    if facts:
+        if language == "ko":
+            # Korean words cannot be checked against the facts, so the sentence is built from the
+            # headline fact itself, or, for a fact with no Korean words here, not said at all.
+            return (_clean_reply(_korean_line(facts, day, today), "ko", REPLY_MAX_CHARS["ko"])
+                    or _FALLBACK[("ko", True)])
+        prompt = (f"{history}The user just said (spoken): {question}\n\n"
+                  f"The day: {when or '(none: these are live figures, say no day)'}\n\n"
+                  "Facts the bot just read from the portal (one figure a line):\n"
+                  + "\n".join(f"- {f}" for f in facts) + "\n\nJennie says:")
+        figures = set().union(*(_numbers_in(f.rsplit(":", 1)[-1]) for f in facts))
+        spoken = await _say(system, prompt, language, REPLY_MAX_CHARS[language],
+                            check=lambda said: _fact_problem(said, facts, question, language, day, today) is None,
+                            numbers=figures)
+        if spoken:
+            return spoken
+        return _clean_reply(_english_line(facts, day, today), "en", REPLY_MAX_CHARS["en"]) or _FALLBACK[("en", True)]
+
     written = _plain(answer)[:ANSWER_MAX_CHARS]
-    prompt = (f"Recent conversation:\n{_history_text(turns, False)}\n\n"
-              f"The user just said (spoken): {question}\n\n"
-              f"The bot's written answer:\n{written or '(none, this is small talk)'}\n\nJennie says:")
-    return (await _say(system, prompt, language, REPLY_MAX_CHARS[language], written, question)
-            or _FALLBACK[(language, bool(written))])
+    prompt = (f"{history}The user just said (spoken): {question}\n\n"
+              f"The day: {when or '(none)'}\n\nFacts the bot just read from the portal: (none)\n\n"
+              f"The bot's written answer:\n{written}\n\nJennie says:")
+    no_figure = lambda said: not _numbers_in(said) - _numbers_in(question) and not _SAID_NOTHING_RE.search(said)
+    return (await _say(system, prompt, language, REPLY_MAX_CHARS[language], check=no_figure, numbers=set())
+            or _FALLBACK[(language, True)])
 
 
 # Jennie's cheerful words in the spoken brief, besides the facts' own words (brief.claims_problem
@@ -1410,7 +1725,18 @@ async def _answer_voice(update: Update, context: ContextTypes.DEFAULT_TYPE, timi
     answer = capture.text()
     if ran != "chat" and not answer:
         return
-    speech = await spoken_reply(heard, reply_language, answer, turns)
+    if ran_day is None and ran != "chat" and (ran == "fallback" or str(ran).startswith("stats:")):
+        # The typed routing ran: the day it answered for is the day its words name.
+        try:
+            from src.bot import ask
+            asked = ask.classify(query, _now().date())
+            ran_day = asked.day or ((asked.window.first, asked.window.last)
+                                    if asked.window and asked.window.last else None)
+            if ran_day is None and asked.kind in ask.ONE_DAY_KINDS and not asked.problem:
+                ran_day = _now().date()
+        except Exception:
+            ran_day = None
+    speech = await spoken_reply(heard, reply_language, answer, turns, day=ran_day)
     if ran == "chat":
         await _note(message, f"💬 {speech}")      # small talk: Jennie's words are the text answer
     _remember(chat_id, heard, reply_language, ran, ran_day, speech)

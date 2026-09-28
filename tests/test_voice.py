@@ -365,12 +365,12 @@ def test_korean_voice_is_routed_answered_and_spoken(service, llm, verified_today
     assert not any(t.startswith("⏳") for t in shown)
     assert voice.UNAVAILABLE_NOTE not in shown
 
-    # Two brain calls: one routing call, one short reply that saw the captured answer.
-    assert llm.kinds() == ["route", "reply"]
-    routing, reply = llm.calls
+    # One brain call, the routing: Jennie's Korean sentence is built from the figure the answer
+    # states ("Total Students Verified: 2"), since Korean words cannot be checked against the facts.
+    assert llm.kinds() == ["route"]
+    routing, = llm.calls
     assert "NEW utterance: 오늘 검증된 학생 몇 명이야?" in routing["user"]
     assert routing["format"]["properties"]["command"]["enum"] == list(voice.ROUTE_COMMANDS)
-    assert "KOREAN" in reply["system"] and "Student Payment Verifications" in reply["user"]
 
     assert service.uploads and b"korean-opus" in service.uploads[0]
     assert service.tts_payloads == [{"text": "짜잔! 오늘 검증된 학생은 두명이에용!",
@@ -410,24 +410,28 @@ def test_capture_collects_the_commands_final_text(monkeypatch):
     assert chat.visible() == ["✅ *Report* — `3` students", "The answer is 42."]   # all really sent
     assert proxy.effective_chat.id == ADMIN_ID                  # everything else is the real update
 
-    # And through the real natural-language routing (the LLM-agent branch edits its status note).
-    async def get_dashboard():
-        return {"summary": {}}
+    # And through the real natural-language routing (a question with no route edits its status
+    # note into the answer: the dashboard facts the LLM picks, or "I can't answer that").
+    async def fetch_html(path, timeout=60.0, params=None):
+        assert path == "index.php"
+        return ('<div class="dash-sec"><h2 class="ds-t">Admissions flow</h2></div><div class="stats-row">'
+                '<a class="stat-card" href="admission_windows.php?status=active"><span class="stat-num">3</span>'
+                '<span class="stat-lbl">Open windows</span></a></div>')
 
-    async def empty_list(*args, **kwargs):
+    asked = []
+
+    async def answer_agent_query(query, facts):
+        asked.append((query, facts))
         return []
 
-    async def answer_agent_query(query, context):
-        return f"Answer to: {query}"
-
-    monkeypatch.setattr(admin_client, "get_dashboard", get_dashboard)
-    monkeypatch.setattr(admin_client, "get_applications", empty_list)
-    monkeypatch.setattr(admin_client, "get_inquiries", empty_list)
+    monkeypatch.setattr(admin_client, "fetch_html", fetch_html)
     monkeypatch.setattr(ollama_client, "answer_agent_query", answer_agent_query)
     capture = voice._Capture()
     asyncio.run(telegram_bot.handle_natural_language_message(
         voice._CapturingUpdate(update, capture), context, query="what is the office phone policy"))
-    assert capture.text() == "Answer to: what is the office phone policy"
+    assert asked == [("what is the office phone policy", ["Open windows (Admissions flow): 3"])]
+    assert capture.text().startswith("🤷 I can't answer that from the portal yet.\n")
+    assert "🤔" not in capture.text()
 
 
 def test_crosscheck_route_no_longer_hits_missing_re_import(monkeypatch):
@@ -490,9 +494,9 @@ def test_brain_down_still_answers_through_the_typed_routing(service, llm, verifi
     # The typed-question routing took the words as heard, and the report is in the chat.
     assert len(verified_today) == 1
     assert any("Student Payment Verifications" in t for t in chat.visible())
-    # Jennie still speaks: a short honest line instead of the brain's summary.
+    # Jennie still speaks: the answer's own headline figure, for the day the words name.
     spoken = service.tts_payloads[0]["text"]
-    assert spoken == voice._FALLBACK[("en", True)]
+    assert spoken == "Okie! Total Students Verified today: two, hehe!"
     assert len(context.bot.replies()) == 1
 
 
