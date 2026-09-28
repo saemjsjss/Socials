@@ -14,7 +14,6 @@ from telegram.ext import (
 
 from src.config import settings
 from src.scraper.client import admin_client
-from src.scraper.ocr_validator import AUDIT_REGISTRY
 from src.llm.ollama_client import ollama_client
 from src.bot.scheduler import setup_scheduler
 
@@ -598,10 +597,13 @@ async def crosscheck_today_command(update: Update, context: ContextTypes.DEFAULT
     if not is_authorized(update):
         return
     context.user_data["override_text"] = "today"
+    context.user_data["crosscheck_date_only"] = True
     await crosscheck_command(update, context)
 
 async def crosscheck_date_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menu 6: Total crosscheck verified students from live data (ask me specific date each time)."""
+    """Menu 6: Total crosscheck verified students from live data (ask me specific date each time).
+    What it is given must be a date: anything else is "I couldn't read that date", never today
+    and never a name search."""
     if not is_authorized(update):
         return
 
@@ -613,15 +615,17 @@ async def crosscheck_date_command(update: Update, context: ContextTypes.DEFAULT_
 
     if not raw_input:
         context.user_data["awaiting_date_for"] = "crosscheck"
+        # Legacy Markdown does not nest entities: code spans inside _italics_ showed their backticks.
         await update.message.reply_text(
             "📅 *Live Crosscheck Verified Students*\n\n"
             "Please enter the *specific date* to cross-check verified students:\n"
-            "_(e.g. `12 Sep 2026`, `yesterday`, or `YYYY-MM-DD`)_",
+            "(e.g. `12 Sep 2026`, `yesterday` or `2026-09-12`)",
             parse_mode="Markdown"
         )
         return
 
     context.user_data["override_text"] = raw_input
+    context.user_data["crosscheck_date_only"] = True
     await crosscheck_command(update, context)
 
 async def consultations_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -748,40 +752,89 @@ async def verified_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply_long(update.message, report_text, edit=status_msg)
     logger.info(f"Dispatched verified students for {display_date} to chat_id {chat_id}")
 
+PASSPORTS_OCR_MAX = 5      # today's verified students /passports checks by OCR (seconds each)
+
+
+def format_passports_report(students: list, today_cards: Optional[list], display_date: str, read_at: str,
+                            today_problem: str = "") -> str:
+    """/passports' report (Telegram Markdown): how many students on the portal have a passport scan
+    uploaded and how many do not (by their Passport Status), and today's payment-verified students
+    with the verdict of the live OCR check of their scans (_crosscheck_card dicts; those without a
+    "verdict" were not checked; None with today_problem when the verification stamps could not be
+    read). Only called after every page of students.php was read."""
+    from collections import Counter
+    from src.bot.brief import esc
+    def has_scan(s):
+        return any(f.startswith("passport_") for f in s.get("files") or [])
+
+    with_scan = [s for s in students if has_scan(s)]
+    without = [s for s in students if not has_scan(s)]
+    lines = [
+        f"🛂 *Passport Scans — live from the portal ({read_at})*",
+        f"• *Students on the portal:* `{len(students)}`",
+        f"• *With a passport scan uploaded:* `{len(with_scan)}`",
+        f"• *Without a passport scan:* `{len(without)}`",
+    ]
+    if without:
+        by_status = Counter((s.get("details") or {}).get("Passport Status") or "not given" for s in without)
+        lines.append("   └ Passport Status: " + ", ".join(f"{esc(k)} `{v}`" for k, v in by_status.most_common()))
+    if today_cards is None:
+        lines += ["", f"📅 *Payment-verified today ({display_date}):* not available ({esc(today_problem)})"]
+        today_cards = []
+    else:
+        lines += ["", f"📅 *Payment-verified today ({display_date}):* `{len(today_cards)}`"]
+    if not today_cards and not today_problem:
+        lines.append("ℹ️ No payment was verified today, so no scan was checked. Another day: "
+                     "`/crosscheck_date 12 Sep 2026`; one student: `/crosscheck 432`.")
+    for idx, c in enumerate(today_cards, 1):
+        scan = "✅ scan uploaded" if c["passport_file"] else "⏳ no scan uploaded"
+        lines.append(f"*{idx}. {esc(c['name'])}* (ID: `{c['id']}`) — {scan}")
+        if c.get("verdict"):
+            lines.append(f"   └ 🔍 {esc(c['verdict'])}")
+        else:
+            lines.append("   └ 🔍 not checked here (see `/crosscheck_today`)")
+    ocr = "; each verdict comes from an OCR check of the scan made just now" if any(
+        c.get("verdict") for c in today_cards) else ""
+    lines += ["", f"_Read live from all {len(students)} students on students.php{ocr}._"]
+    return "\n".join(lines)
+
+
 async def passports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /passports command reporting passport verification and match audit statistics."""
+    """/passports and /passport_audit: the passport scans on the portal right now, read live from
+    every page of students.php, and a live OCR check of the scans of the students whose payment was
+    verified today (the first PASSPORTS_OCR_MAX; /crosscheck_today checks them all). Nothing stored
+    is shown as current, and a portal that cannot be read is said so, never counted as 0."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from src.bot.replies import portal_error_reply
+    from src.dates import local_today
     chat_id = update.effective_chat.id
     if not is_authorized(update):
         logger.warning(f"Unauthorized /passports attempt from chat_id: {chat_id}")
         await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{chat_id}`", parse_mode="Markdown")
         return
 
-    msg = (
-        "🛂 *Student Passport Verification & Match Audit*\n\n"
-        "📅 *Today's Verified Students (10 Sep 2026):*\n"
-        "• *Students Payment-Verified Today:* `5`\n"
-        "• ✅ *Passport 100% Matched:* `4 students` *(100% of uploaded)*\n"
-        "   1️⃣ *DEB BIKASH CHANDRA* (ID 432) — Exact MRZ Match\n"
-        "   2️⃣ *HABIB MD FAHMID* (ID 431) — Exact MRZ Match\n"
-        "   3️⃣ *SHAHADAT MD TANZIM* (ID 430) — Exact MRZ Match\n"
-        "   4️⃣ *HANNAN MD RAKIN* (ID 429) — Exact MRZ Match\n"
-        "• ⏳ *Passport Scan Pending:* `1 student`\n"
-        "   └ *IQBAL MD MONIRUL* (ID 433: Paid via bank, passport not yet uploaded)\n\n"
-        "📊 *Overall Portal Audit (All 47 Uploaded Passports):*\n"
-        "• *Total Passports Uploaded:* `47`\n"
-        "• ✅ *100% Verified Matches:* `42 students` *(89.4%)*\n"
-        "• ⚠️ *Minor Typos / Discrepancies:* `4 students` *(8.5%)*\n"
-        "   ├ *ID 407 (HANNAN FURKAN):* MRZ given name is `FORKAN`\n"
-        "   ├ *ID 404 (ZAKI MD REZWANUL ISLAM):* Expiry blank on portal\n"
-        "   ├ *ID 395 (AHSAN NIZAMUDDIN):* Expiry date off by 11 days\n"
-        "   └ *ID 366 (EMON MOHAMMAD TALHA):* Expiry date off by 1 day\n"
-        "• ❌ *Invalid Document Upload:* `1 student` *(ID 154: Admission ad banner)*\n"
-        "• 📄 *Missing Passport Scans:* `214 students`"
-    )
+    today = local_today()
+    display = today.strftime("%d %B %Y")
+    status_msg = await update.message.reply_text(
+        "⏳ _Reading every student's passport scan live from the portal..._", parse_mode="Markdown")
     try:
-        await update.message.reply_text(msg, parse_mode="Markdown")
-    except Exception:
-        await update.message.reply_text(msg)
+        from src.scraper.client import PortalUnavailable
+        students = await admin_client.read_students()
+        read_at = datetime.now(ZoneInfo(settings.REPORT_TIMEZONE)).strftime("%d %b %Y, %H:%M")
+        try:
+            _stamp_guard(students)
+            cards, problem = [_crosscheck_card(s) for s, _ in _verified_between(students, today, today)], ""
+        except PortalUnavailable as e:          # the counts stand; only "verified today" is unknown
+            cards, problem = None, f"couldn't read the portal's verification stamps: {e.reason}"
+        if cards:
+            await _audit_cards(cards[:PASSPORTS_OCR_MAX], status_msg, f"verified today ({display})")
+        text = format_passports_report(students, cards, display, read_at, problem)
+    except Exception as e:
+        logger.error(f"Error in passports_command: {e}")
+        text = portal_error_reply("Passport scans", e)
+    await _send_blocks(update.message, text, status_msg)
+    logger.info(f"Dispatched live passport status to chat_id {chat_id}")
 
 def format_calendar_report(cal_data: dict, filter_query: Optional[str] = None) -> str:
     """Format calendar events and application deadlines into a clean summary."""
@@ -1245,93 +1298,290 @@ def _chunk_message(text: str, limit: int = 3900) -> list:
     return split_text(text, limit) if telegram_len(text) > limit else [text]
 
 
-async def _audit_crosscheck_row(tr, stu_id, stu_name_row, text):
-    """Build the cross-check result dict for one matched verified-student row.
-    Shared by /crosscheck (single date / id / name) and the date-range cross-check."""
-    import re
-    dob_m = re.search(r"DOB\s+([\d\-]+)", text)
-    pass_no_m = re.search(r"Passport No\s+([A-Za-z0-9]+)", text)
-    pass_exp_m = re.search(r"Passport Expiry\s+([\d\-]+)", text)
-    amt_m = re.search(r"Paid:\s*([\d,]+\.?\d*\s*BDT\s*[A-Za-z\s]+?)(?:Verified|$)", text)
-    ver_m = re.search(r"Payment verified by\s+([A-Za-z\s\.]+?)\s*[·•·]\s*([^<\n]+)", text)
-    prog_m = re.search(r"Program\s+([A-Za-z\s\(\)\']+?)(?:Preferred|$)", text)
+# --------------------------------------------------------------------------- /crosscheck, /audit
+# /crosscheck_today, /crosscheck_date, /crosscheck_range (and _between, _period), /passports.
+# Every command reads the whole student list live (admin_client.read_students: every page, session
+# renewed when it expired, a failed read raised), picks students by the row's own "Payment verified
+# by NAME · 27 Sep, 17:19" stamp (never any other text in the row), and checks each passport scan
+# by OCR right then (admin_client.audit_student_passport).
 
-    pass_a = tr.find("a", href=re.compile(r"view_doc\.php\?f=passport_"))
-    doc_filename = re.search(r"f=([^&]+)", pass_a.get("href")).group(1) if pass_a else None
-    has_pass_doc = bool(pass_a)
-    has_rcpt_doc = bool(tr.find("a", href=re.compile(r"view_doc\.php\?f=receipt_")))
+CROSSCHECK_NAME_MAX = 10       # students one name search checks by OCR (several seconds each)
 
-    form_data = {
-        "name": stu_name_row,
-        "dob": dob_m.group(1).strip() if dob_m else "",
-        "passport_no": pass_no_m.group(1).strip() if pass_no_m else "",
-        "passport_expiry": pass_exp_m.group(1).strip() if pass_exp_m else ""
-    }
+# The command, punctuation and the words around what a /crosscheck asks for ("cross check father
+# name of student 527", "crosscheck student Tahira please"): what is left is an ID or a name.
+_CROSSCHECK_WORDS_RE = re.compile(
+    r"/\w+(?:@\w+)?|[?!.,:;'\"()\[\]]|\b(?:cross\s*-?\s*check(?:ing|ed|s)?|crosscheck|audit|check|verify|verified"
+    r"|verification|students?|id|uid|no|number|for|of|the|a|an|info|information|details?|please|pls|show"
+    r"|me|give|tell|about|on|only|specific|passports?|documents?|docs?|fathers?|mothers?|parents?"
+    r"|address(?:es)?|names?|dob|and|with|against|records?|payments?|his|her|their|live|data|who|is)\b", re.I)
 
-    audit_res = await admin_client.audit_student_passport(stu_id, form_data, doc_filename)
 
+def _crosscheck_query(raw: str, date_only: bool = False) -> Dict[str, Any]:
+    """What a /crosscheck text asks for:
+      {"kind": "date", "day"}   a day (read by src.dates.parse_user_date; no date at all is today)
+      {"kind": "uid", "uid"}    a portal student ID, the N of student_edit.php?id=N ("527", "#527",
+                                "student 527", "id: 527")
+      {"kind": "hng", "hng"}    an HNG student ID ("HNG-2026-931")
+      {"kind": "name", "name"}  a part of a name, at least 3 letters ("Tahira", "Kumar")
+      {"kind": "error", "reply"}  a date that cannot be read ("31 Sep", "Sep"), or too little to go on.
+    Month names count only as whole words, so "Kumar" or "Junaira" is a name, never a date. With
+    date_only (/crosscheck_date, /crosscheck_today) anything but a date is "I couldn't read that date"."""
+    from src.bot.replies import date_error_reply
+    from src.dates import has_date_hint, local_today, parse_user_date
+    text = re.sub(r"\s+", " ", raw or "").strip()
+    body = re.sub(r"^/\w+(?:@\w+)?\s*", "", text)
+    command = "/crosscheck_date" if date_only else "/crosscheck"
+    day = parse_user_date(body, local_today(), prefer_past=True)
+    if day is not None:
+        return {"kind": "date", "day": day}
+    rest = re.sub(r"\s+", " ", _CROSSCHECK_WORDS_RE.sub(" ", body)).strip()
+    if not rest:
+        return {"kind": "date", "day": local_today()}
+    if date_only:
+        return {"kind": "error", "reply": date_error_reply(body, command)}
+    hng = re.search(r"\bHNG-\d{4}-\d+\b", body, re.I)
+    if hng:
+        return {"kind": "hng", "hng": hng.group(0).upper()}
+    uid = re.fullmatch(r"#?\s*(\d{1,6})", rest)
+    if uid:
+        return {"kind": "uid", "uid": str(int(uid.group(1)))}
+    if has_date_hint(rest):
+        return {"kind": "error", "reply": date_error_reply(body, command)}
+    if len(re.sub(r"[^A-Za-z]", "", rest)) < 3:
+        return {"kind": "error", "reply": (
+            "⚠️ I need a date, a student ID or at least 3 letters of a name to cross-check, e.g. "
+            "`/crosscheck 27 Sep 2026`, `/crosscheck 432` or `/crosscheck Fahmid`.")}
+    return {"kind": "name", "name": rest}
+
+
+def _stamp_guard(students: list) -> None:
+    """Raise PortalUnavailable when the list's verification stamps cannot be read (the checks of
+    client.read_verified_students): student rows but no "Payment verified by" line on any of them,
+    or a line whose date is not "DD Mon, HH:MM". Then no day's list can be told, not even "none"."""
+    from src.dates import parse_stamp
+    from src.scraper.client import PortalUnavailable
+    lines = [s for s in students if s.get("verified_line")]
+    if students and not lines:
+        raise PortalUnavailable(f"students.php: {len(students)} student rows but no 'Payment verified by' "
+                                "line on any of them (layout not recognised)")
+    unreadable = [s for s in lines if parse_stamp(s.get("verified_stamp", "")) is None]
+    if unreadable:
+        raise PortalUnavailable(f"students.php: {len(unreadable)} verification line(s) with a date the bot "
+                                "cannot read (layout not recognised)")
+
+
+def _verified_between(students: list, first, last) -> list:
+    """(student, day) for every student whose own payment-verification stamp is on a day from
+    `first` to `last` (parsers.verification: whole day and month tokens, never the transfer-intake
+    options' "2027 SEPTEMBER" or the "Applied On" date; not before the student applied). Callers
+    first make sure src.dates.yearless_day_problem has nothing against `first`, and `last` is not
+    after today (the stamps have no year)."""
+    from datetime import timedelta
+    from src.scraper.parsers import verification
+    days = [first + timedelta(days=i) for i in range((last - first).days + 1)]
+    found = []
+    for s in students:
+        day = next((d for d in days if verification(s, d) is not None), None)
+        if day is not None:
+            found.append((s, day))
+    return found
+
+
+def _stamp_minutes(student: dict) -> int:
+    from src.dates import parse_stamp
+    stamp = parse_stamp(student.get("verified_stamp", ""))
+    if not stamp or not stamp.time:
+        return 0
+    hours, minutes = stamp.time.split(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def _crosscheck_card(student: dict) -> Dict[str, Any]:
+    """What a cross-check card shows of one students.php record (parse_students_page): only the
+    portal's own values, "" where the portal shows none."""
+    from src.dates import parse_stamp
+    details = student.get("details") or {}
+    files = student.get("files") or []
+    passport_file = next((f for f in files if f.startswith("passport_")), None)
+    stamp = parse_stamp(student.get("verified_stamp", ""))
+    name = student.get("student_name") or details.get("Full Name") or ""
+    amount = student.get("paid") or student.get("verified_income") or ""
     return {
-        "id": stu_id,
-        "name": form_data["name"] or "Student",
-        "program": prog_m.group(1).strip() if prog_m else "N/A",
-        "dob": form_data["dob"] or "N/A",
-        "pass_no": form_data["passport_no"] or "None",
-        "pass_exp": form_data["passport_expiry"] or "None",
-        "has_pass_doc": has_pass_doc,
-        "has_rcpt_doc": has_rcpt_doc,
-        "payment": amt_m.group(1).strip() if amt_m else "",
-        "verifier": ver_m.group(1).strip() if ver_m else "",
-        "ver_time": ver_m.group(2).strip()[:15] if ver_m else "",
-        "fields": audit_res.get("fields", {}),
-        "verdict": audit_res["verdict"]
+        "id": student.get("uid") or "", "hng": student.get("student_id") or "",
+        "name": name or "—", "name_raw": name,
+        "program": student.get("program") or details.get("Program") or "",
+        "dob": details.get("DOB") or "", "pass_no": details.get("Passport No") or "",
+        "pass_exp": details.get("Passport Expiry") or "", "passport_status": details.get("Passport Status") or "",
+        "passport_file": passport_file, "has_pass_doc": bool(passport_file),
+        "has_rcpt_doc": any(f.startswith("receipt_") for f in files),
+        "payment": " ".join(x for x in (amount, student.get("method")) if x),
+        "verifier": student.get("verified_by") or "", "ver_time": stamp.text if stamp else "",
+        "fields": {}, "verdict": "", "status": "",
     }
 
 
-def _format_crosscheck_results(results: list, header_title: str) -> str:
-    """Render cross-check result dicts into the Telegram summary (shared formatter)."""
-    lines = [
-        f"📋 *Verified Student Information Cross-Check — {header_title}*",
-        f"• *Total Records Audited:* `{len(results)}`\n"
-    ]
+async def _audit_cards(cards: list, status_msg=None, what: str = "") -> None:
+    """Check each card's passport scan by OCR, one after another (admin_client.audit_student_passport),
+    filling its "fields", "status" and "verdict". A card with no scan on the portal is "Pending
+    Passport Scan" without any check. A check that fails says so on its own card; the rest go on."""
+    from src.bot.brief import esc
+    from src.scraper.client import portal_error_reason
+    todo = [c for c in cards if c["passport_file"]]
+    if todo and status_msg is not None:
+        try:
+            await status_msg.edit_text(f"⏳ _Checking {len(todo)} passport scan(s) {esc(what)} by OCR "
+                                       "(about 10 seconds each)..._", parse_mode="Markdown")
+        except Exception:
+            pass
+    for c in cards:
+        if not c["passport_file"]:
+            c.update(fields={}, status="MISSING_DOCUMENT",
+                     verdict="⏳ Pending Passport Scan (no scan uploaded on the portal)")
+            continue
+        form = {"name": c["name_raw"], "dob": c["dob"], "passport_no": c["pass_no"], "passport_expiry": c["pass_exp"]}
+        try:
+            res = await admin_client.audit_student_passport(c["id"], form, c["passport_file"])
+        except Exception as e:
+            logger.error(f"Cross-check of student {c['id']} failed: {portal_error_reason(e)}")
+            res = {"fields": {}, "status": "ERROR", "verdict": f"❌ Couldn't check this scan: {portal_error_reason(e)}"}
+        c.update(fields=res.get("fields") or {}, status=res.get("status", ""), verdict=res.get("verdict", ""))
+
+
+def _format_crosscheck_results(results: list, header_title: str, checked: Optional[int] = None,
+                               note: str = "") -> str:
+    """The cross-check report (Telegram Markdown): a header, then one card per student, the blocks
+    separated by a blank line (so _send_blocks never cuts a card in half)."""
+    from src.bot.brief import esc
+    head = [f"📋 *Verified Student Information Cross-Check — {esc(header_title)}*",
+            f"• *Total Records Audited:* `{len(results)}`"]
+    if checked is not None:
+        head.append(f"• _Read live from all {checked} students on students.php; each scan was checked by OCR just now._")
+    if note:
+        head.append(note)
+    blocks = ["\n".join(head)]
     for idx, r in enumerate(results, 1):
-        doc_status = "✅ Uploaded" if r['has_pass_doc'] else "⏳ None (Marked WILL APPLY)"
-        rcpt_status = "✅ Verified" if r['has_rcpt_doc'] else "Recorded"
+        ident = f"`{r['id'] or '—'}`" + (f" · `{r['hng']}`" if r.get("hng") else "")
+        rcpt = "receipt ✅ uploaded" if r["has_rcpt_doc"] else "no receipt uploaded"
+        if r["has_pass_doc"]:
+            scan = "✅ Uploaded"
+        else:
+            scan = "⏳ None uploaded" + (f" (Passport Status: {esc(r['passport_status'])})" if r.get("passport_status") else "")
+        verified = (f"{esc(r['verifier'])} ({r['ver_time']})" if r["verifier"] and r["ver_time"]
+                    else esc(r["verifier"]) if r["verifier"] else "— (no payment verification on the portal)")
+        lines = [
+            f"*{idx}. {esc(r['name'])}* (ID: {ident})",
+            f"   ├ 🎓 *Program:* {esc(r['program'] or '—')}",
+            f"   ├ 💰 *Payment:* `{(r['payment'] or '—').replace('`', '')}` ({rcpt})",
+            f"   ├ 👤 *Verified by:* {verified}",
+            f"   ├ 🛂 *Passport Scan:* {scan}",
+            f"   ├ 📝 *Portal:* Pass `{r['pass_no'] or '—'}` | Exp `{r['pass_exp'] or '—'}` | DOB `{r['dob'] or '—'}`",
+        ]
+        f_fields = r.get("fields") or {}
+        for key, icon, label in (("father_name", "👨", "Father"), ("mother_name", "👩", "Mother"),
+                                 ("address", "🏠", "Address")):
+            f = f_fields.get(key) or {}
+            doc = (f.get("doc") or "").replace("`", "")
+            if key == "address" and len(doc) > 40:
+                doc = doc[:40] + "..."
+            if doc:
+                lines.append(f"   ├ {icon} *{label}:* `{doc}` ({esc(f.get('verdict') or 'Checked')})")
+            elif f.get("verdict"):
+                lines.append(f"   ├ {icon} *{label}:* {esc(f['verdict'])}")
+        lines.append(f"   └ 🔍 *Audit Verdict:* {esc(r.get('verdict') or '—')}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
-        audit_verdict = r["verdict"]
-        f_fields = r.get("fields", {})
 
-        lines.append(f"*{idx}. {r['name']}* (ID: `{r['id']}`)")
-        lines.append(f"   ├ 🎓 *Program:* {r['program']}")
-        lines.append(f"   ├ 💰 *Payment:* `{r['payment']}` ({rcpt_status})")
-        lines.append(f"   ├ 👤 *Verified by:* {r['verifier']} ({r['ver_time']})")
-        lines.append(f"   ├ 🛂 *Passport Scan:* {doc_status}")
-        lines.append(f"   ├ 📝 *Portal:* Pass `{r['pass_no']}` | Exp `{r['pass_exp']}` | DOB `{r['dob']}`")
+async def _send_blocks(message, text: str, status_msg=None) -> int:
+    """Send a report whose blocks are separated by blank lines in as few messages as fit under
+    Telegram's limit, never cutting a block (a student's card) in half; the first message replaces
+    status_msg (the "⏳" note). A block too long for one message is split between its lines.
+    Markdown Telegram refuses is sent again as plain text (src.bot.replies). -> messages sent."""
+    from src.bot.replies import CHUNK_CHARS, reply_long, split_text, telegram_len
+    pieces: List[str] = []
+    current = ""
+    for block in text.split("\n\n"):
+        joined = f"{current}\n\n{block}" if current else block
+        if telegram_len(joined) <= CHUNK_CHARS:
+            current = joined
+            continue
+        if current:
+            pieces.append(current)
+        parts = split_text(block) if telegram_len(block) > CHUNK_CHARS else [block]
+        pieces.extend(parts[:-1])
+        current = parts[-1] if parts else ""
+    if current.strip():
+        pieces.append(current)
+    for i, piece in enumerate(pieces):
+        await reply_long(message, piece, edit=status_msg if i == 0 else None)
+    return len(pieces)
 
-        if f_fields:
-            f_fath = f_fields.get("father_name", {})
-            f_moth = f_fields.get("mother_name", {})
-            f_addr = f_fields.get("address", {})
 
-            if f_fath.get("doc"):
-                lines.append(f"   ├ 👨 *Father:* `{f_fath['doc']}` ({f_fath.get('verdict', 'Checked')})")
-            elif f_fath.get("verdict"):
-                lines.append(f"   ├ 👨 *Father:* {f_fath.get('verdict')}")
+async def build_crosscheck_report(query: Dict[str, Any], status_msg=None) -> str:
+    """The cross-check report for a _crosscheck_query (a "date" query carries "first", "last" and
+    "display"): every page of students.php read live, the students picked (by verification stamp,
+    portal ID, HNG ID or name), each passport scan checked by OCR. Raises PortalUnavailable when the
+    list cannot be read whole, so a failed read is never "no students found"."""
+    from src.bot.brief import esc
+    students = await admin_client.read_students()
+    checked, note = len(students), ""
+    kind = query["kind"]
+    if kind == "date":
+        _stamp_guard(students)
+        found = _verified_between(students, query["first"], query["last"])
+        if query["first"] != query["last"]:
+            found.sort(key=lambda sd: (sd[1], _stamp_minutes(sd[0])))
+        picked, title = [s for s, _ in found], query["display"]
+        if not picked:
+            if query["first"] != query["last"]:
+                return (f"ℹ️ *No payment-verified students found between {esc(title)} to cross-check.*\n"
+                        f"_(All {checked} students on students.php were read live.)_")
+            return (f"ℹ️ *No payment-verified students found for {esc(title)} to cross-check.*\n"
+                    f"_(All {checked} students on students.php were read live.)_\n\n"
+                    "💡 *Examples:*\n"
+                    "• Specific Date: `/crosscheck 10 Sep` or `/crosscheck yesterday`\n"
+                    "• Specific Student ID: `/crosscheck 432` or `/crosscheck 431`\n"
+                    "• Specific Student Name: `/crosscheck Fahmid` or `/crosscheck Bikash`")
+    elif kind in ("uid", "hng"):
+        key, value = ("uid", query["uid"]) if kind == "uid" else ("student_id", query["hng"])
+        picked = [s for s in students if (s.get(key) or "").upper() == value]
+        title = f"Student ID #{value}" if kind == "uid" else f"Student {value}"
+        if not picked:
+            return (f"ℹ️ *No student found matching ID `{value}`* "
+                    f"(all {checked} students on students.php were read live).")
+    else:
+        wanted = re.sub(r"\s+", " ", query["name"]).strip().lower()
+        picked = [s for s in students
+                  if wanted in re.sub(r"\s+", " ", s.get("student_name") or (s.get("details") or {}).get("Full Name") or "").lower()]
+        title = f"Student '{query['name']}'"
+        if not picked:
+            shown = query["name"].replace("`", "")
+            return (f"ℹ️ *No student found matching Name `{shown}`* "
+                    f"(all {checked} students on students.php were read live).")
+        if len(picked) > CROSSCHECK_NAME_MAX:
+            rest = picked[CROSSCHECK_NAME_MAX:]
+            listed = ", ".join(f"{esc(s.get('student_name') or '—')} (`{s.get('uid') or '—'}`)" for s in rest[:40])
+            more = f" and {len(rest) - 40} more" if len(rest) > 40 else ""
+            note = (f"• ⚠️ {len(picked)} students match; the first {CROSSCHECK_NAME_MAX} are checked below. "
+                    f"The others: {listed}{more}. Send `/crosscheck <ID>` for one of them.")
+            picked = picked[:CROSSCHECK_NAME_MAX]
+    cards = [_crosscheck_card(s) for s in picked]
+    await _audit_cards(cards, status_msg, f"for {title}")
+    return _format_crosscheck_results(cards, title, checked=checked, note=note)
 
-            if f_moth.get("doc"):
-                lines.append(f"   ├ 👩 *Mother:* `{f_moth['doc']}` ({f_moth.get('verdict', 'Checked')})")
-            elif f_moth.get("verdict"):
-                lines.append(f"   ├ 👩 *Mother:* {f_moth.get('verdict')}")
 
-            if f_addr.get("doc"):
-                short_addr = f_addr['doc'][:40] + ("..." if len(f_addr['doc']) > 40 else "")
-                lines.append(f"   ├ 🏠 *Address:* `{short_addr}` ({f_addr.get('verdict', 'Checked')})")
-            elif f_addr.get("verdict"):
-                lines.append(f"   ├ 🏠 *Address:* {f_addr.get('verdict')}")
-
-        lines.append(f"   └ 🔍 *Audit Verdict:* {audit_verdict}")
-        lines.append("")
-
-    return "\n".join(lines).strip()
+async def _crosscheck_run(update: Update, query: Dict[str, Any], waiting: str, title: str) -> None:
+    """Show `waiting`, build the report, and send it in its place (a failed portal read as
+    "Couldn't read the portal: ..." for `title`)."""
+    from src.bot.brief import esc
+    from src.bot.replies import portal_error_reply
+    status_msg = await update.message.reply_text(waiting, parse_mode="Markdown")
+    try:
+        text = await build_crosscheck_report(query, status_msg)
+    except Exception as e:
+        logger.error(f"Error in crosscheck ({title}): {e}")
+        text = portal_error_reply(f"Cross-check for {esc(title)}", e)
+    await _send_blocks(update.message, text, status_msg)
 
 
 def _parse_date_range(raw: str):
@@ -1368,52 +1618,12 @@ def _parse_date_range(raw: str):
     return d1, d2, f"{d1.strftime('%d %b %Y')} → {d2.strftime('%d %b %Y')}"
 
 
-async def build_crosscheck_range_report(start_date, end_date, display: str):
-    """Live cross-check of every payment-verified student verified between two dates."""
-    import re
-    from datetime import timedelta
-    from bs4 import BeautifulSoup
-
-    if not admin_client.is_authenticated:
-        await admin_client.login()
-    url = f"{admin_client.base_url}/students.php"
-    resp = await admin_client.client.get(url)
-    if "login.php" in str(resp.url):
-        admin_client.is_authenticated = False
-        await admin_client.login()
-        resp = await admin_client.client.get(url)
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    # one 'DD Mon' pattern per day in the range — same substring match the single-date view uses
-    patterns, d = [], start_date
-    while d <= end_date:
-        patterns.append(d.strftime("%d %b").lower())
-        d += timedelta(days=1)
-
-    results, seen = [], set()
-    for tr in soup.find_all("tr"):
-        text = tr.get_text(" ", strip=True)
-        if "Payment verified by" not in text:
-            continue
-        tl = text.lower()
-        if not any(p in tl for p in patterns):
-            continue
-        edit_a = tr.find("a", href=re.compile(r"student_edit\.php\?id=\d+"))
-        stu_id = re.search(r"id=(\d+)", edit_a.get("href")).group(1) if edit_a else "N/A"
-        if stu_id in seen:
-            continue
-        seen.add(stu_id)
-        name_m = re.search(r"Full Name\s+([A-Za-z\s\.]+?)(?:DOB|$)", text)
-        stu_name_row = name_m.group(1).strip() if name_m else ""
-        results.append(await _audit_crosscheck_row(tr, stu_id, stu_name_row, text))
-
-    if not results:
-        return f"ℹ️ *No payment-verified students found between {display} to cross-check.*", 0
-    return _format_crosscheck_results(results, display), len(results)
-
-
 async def crosscheck_range_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menu 7: Total crosscheck verified students live between a START date and an END date."""
+    """Menu 7: Total crosscheck verified students live between a START date and an END date
+    (also /crosscheck_between, /crosscheck_period). The students are those whose own verification
+    stamp is on a day in the range, read from every page of students.php."""
+    from src.bot.brief import esc
+    from src.dates import local_today, user_date_problem, yearless_day_problem
     chat_id = update.effective_chat.id
     if not is_authorized(update):
         await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{chat_id}`", parse_mode="Markdown")
@@ -1441,8 +1651,10 @@ async def crosscheck_range_command(update: Update, context: ContextTypes.DEFAULT
 
     start_date, end_date, display = _parse_date_range(raw_input)
     if not start_date:
+        why = user_date_problem(raw_input, prefer_past=True)
+        why = f" ({esc(why)})" if why and not why.startswith("it names more than one date") else ""
         await update.message.reply_text(
-            "⚠️ I couldn't read two dates there. Please send a *start* and *end* date, e.g. "
+            f"⚠️ I couldn't read two dates there{why}. Please send a *start* and *end* date, e.g. "
             "`1 Sep 2026 to 15 Sep 2026`.",
             parse_mode="Markdown"
         )
@@ -1457,213 +1669,70 @@ async def crosscheck_range_command(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
-    status_msg = await update.message.reply_text(
-        f"⏳ _Cross-checking every payment-verified student from {display} live against their "
-        "passport documents… this can take a few minutes._",
-        parse_mode="Markdown"
-    )
-    try:
-        report, count = await build_crosscheck_range_report(start_date, end_date, display)
-        for chunk in _chunk_message(report):
-            try:
-                await update.message.reply_text(chunk, parse_mode="Markdown")
-            except Exception:
-                await update.message.reply_text(chunk)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-    except Exception as e:
-        logger.error(f"Error in crosscheck_range_command: {e}")
-        await update.message.reply_text(f"❌ Error during range cross-check: `{e}`")
+    # The portal's verification stamps have no year: a start day that has come round again since
+    # cannot be told apart from that later day, and days after today have not happened yet.
+    today = local_today()
+    problem = yearless_day_problem(start_date, today)
+    if problem:
+        await update.message.reply_text(
+            f"ℹ️ *Cross-check for {esc(display)}:* not available ({esc(problem)}).", parse_mode="Markdown")
+        return
+    if end_date > today:
+        end_date = today
+        display = f"{start_date.strftime('%d %b %Y')} → {today.strftime('%d %b %Y')} (today)"
+
+    await _crosscheck_run(
+        update, {"kind": "date", "first": start_date, "last": end_date, "display": display},
+        f"⏳ _Cross-checking every payment-verified student from {esc(display)} live against their "
+        "passport documents… this can take a few minutes._", display)
 
 
 async def crosscheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /crosscheck [date/student_id] to cross-check verified student info, Father, Mother, DOB, and Address."""
+    """Handle /crosscheck and /audit [date | student ID | HNG ID | name] (and /crosscheck_today,
+    /crosscheck_date): the students verified that day, or the one(s) asked for, read live from every
+    page of students.php, each passport scan checked by OCR against their portal entries (name,
+    DOB, passport number and expiry by the MRZ; father, mother and address by the printed page).
+    A date that cannot be read, a day the portal's yearless stamps cannot answer for, and a failed
+    portal read each get their own clear reply, never "none found"."""
+    from src.bot.brief import esc
+    from src.dates import local_today, yearless_day_problem
     chat_id = update.effective_chat.id
+    user_data = context.user_data if getattr(context, "user_data", None) is not None else {}
+    date_only = bool(user_data.pop("crosscheck_date_only", False))
     if not is_authorized(update):
         await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{chat_id}`", parse_mode="Markdown")
         return
 
     raw_input = ""
-    if hasattr(context, "user_data") and context.user_data.get("override_text"):
-        raw_input = context.user_data.pop("override_text")
+    if user_data.get("override_text"):
+        raw_input = user_data.pop("override_text")
     elif context and context.args:
         raw_input = " ".join(context.args)
     elif update.message and update.message.text:
         raw_input = update.message.text
 
-    # Parse query intent: specific student ID, specific student Name, or specific Date
-    import re
-    text_q = (raw_input or "").strip()
-    is_date = any(m in text_q.lower() for m in ["sep", "oct", "nov", "dec", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "today", "yesterday", "2026", "2025", "2024"])
-
-    stu_id_target = None
-    id_match = re.search(r'\b(?:id\s*[:#]?\s*|#)?(\d{2,5})\b', text_q, re.I)
-    if id_match and not is_date:
-        stu_id_target = id_match.group(1)
-
-    stu_name_target = None
-    if not is_date and not stu_id_target:
-        clean_name = re.sub(r'/(?:crosscheck|audit)\b', '', text_q, flags=re.I)
-        clean_name = re.sub(r'\b(?:cross\s*check|audit|check|student|for|info|details?|please|show|only|specific)\b', '', clean_name, flags=re.I).strip()
-        if len(clean_name) >= 3:
-            stu_name_target = clean_name
-
-    portal_date = None
-    display_date = None
-    date_pattern = ""
-    if not stu_id_target and not stu_name_target:
-        parsed = normalize_date_input(text_q)
-        if parsed is None:
-            from src.bot.replies import date_error_reply
-            await update.message.reply_text(date_error_reply(text_q, "/crosscheck_date"), parse_mode="Markdown")
+    query = _crosscheck_query(raw_input, date_only=date_only)
+    if query["kind"] == "error":
+        logger.info(f"/crosscheck: could not read {raw_input!r} from chat_id {chat_id}")
+        await update.message.reply_text(query["reply"], parse_mode="Markdown")
+        return
+    if query["kind"] == "date":
+        day = query["day"]
+        title = day.strftime("%d %B %Y")
+        problem = yearless_day_problem(day, local_today())
+        if problem:
+            await update.message.reply_text(
+                f"ℹ️ *Cross-check for {title}:* not available ({esc(problem)}).", parse_mode="Markdown")
             return
-        portal_date, display_date = parsed
-        date_pattern = portal_date[:6] if len(portal_date) >= 6 else "10 Sep"
+        query.update(first=day, last=day, display=title)
+    elif query["kind"] == "name":
+        title = f"Student '{query['name']}'"
+    else:
+        title = f"Student ID #{query.get('uid') or query.get('hng')}"
 
-    status_msg = await update.message.reply_text("⏳ _Cross-checking student information, Father, Mother, DOB & Address against documents..._", parse_mode="Markdown")
-    try:
-        if not admin_client.is_authenticated:
-            await admin_client.login()
-        resp = await admin_client.client.get(f"{admin_client.base_url}/students.php")
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(resp.text, "html.parser")
-        rows = soup.find_all("tr")
-
-        results = []
-        for tr in rows:
-            text = tr.get_text(" ", strip=True)
-            edit_a = tr.find("a", href=re.compile(r"student_edit\.php\?id=\d+"))
-            stu_id = re.search(r"id=(\d+)", edit_a.get("href")).group(1) if edit_a else "N/A"
-            name_m = re.search(r"Full Name\s+([A-Za-z\s\.]+?)(?:DOB|$)", text)
-            stu_name_row = name_m.group(1).strip() if name_m else ""
-
-            matched = False
-            if stu_id_target:
-                if stu_id == stu_id_target:
-                    matched = True
-            elif stu_name_target:
-                if stu_name_target.lower() in stu_name_row.lower():
-                    matched = True
-            elif portal_date:
-                if "Payment verified by" in text and date_pattern.lower() in text.lower():
-                    matched = True
-
-            if matched:
-                dob_m = re.search(r"DOB\s+([\d\-]+)", text)
-                pass_no_m = re.search(r"Passport No\s+([A-Za-z0-9]+)", text)
-                pass_exp_m = re.search(r"Passport Expiry\s+([\d\-]+)", text)
-                amt_m = re.search(r"Paid:\s*([\d,]+\.?\d*\s*BDT\s*[A-Za-z\s]+?)(?:Verified|$)", text)
-                ver_m = re.search(r"Payment verified by\s+([A-Za-z\s\.]+?)\s*[\u00b7\u2022·]\s*([^<\n]+)", text)
-                prog_m = re.search(r"Program\s+([A-Za-z\s\(\)\']+?)(?:Preferred|$)", text)
-
-                pass_a = tr.find("a", href=re.compile(r"view_doc\.php\?f=passport_"))
-                doc_filename = re.search(r"f=([^&]+)", pass_a.get("href")).group(1) if pass_a else None
-                has_pass_doc = bool(pass_a)
-                has_rcpt_doc = bool(tr.find("a", href=re.compile(r"view_doc\.php\?f=receipt_")))
-
-                form_data = {
-                    "name": stu_name_row,
-                    "dob": dob_m.group(1).strip() if dob_m else "",
-                    "passport_no": pass_no_m.group(1).strip() if pass_no_m else "",
-                    "passport_expiry": pass_exp_m.group(1).strip() if pass_exp_m else ""
-                }
-
-                audit_res = await admin_client.audit_student_passport(stu_id, form_data, doc_filename)
-
-                results.append({
-                    "id": stu_id,
-                    "name": form_data["name"] or "Student",
-                    "program": prog_m.group(1).strip() if prog_m else "N/A",
-                    "dob": form_data["dob"] or "N/A",
-                    "pass_no": form_data["passport_no"] or "None",
-                    "pass_exp": form_data["passport_expiry"] or "None",
-                    "has_pass_doc": has_pass_doc,
-                    "has_rcpt_doc": has_rcpt_doc,
-                    "payment": amt_m.group(1).strip() if amt_m else "",
-                    "verifier": ver_m.group(1).strip() if ver_m else "",
-                    "ver_time": ver_m.group(2).strip()[:15] if ver_m else "",
-                    "fields": audit_res.get("fields", {}),
-                    "verdict": audit_res["verdict"]
-                })
-
-        if not results:
-            if stu_id_target:
-                msg = f"ℹ️ *No student found matching ID `{stu_id_target}`.*"
-            elif stu_name_target:
-                msg = f"ℹ️ *No student found matching Name `{stu_name_target}`.*"
-            else:
-                msg = (
-                    f"ℹ️ *No payment-verified students found for {display_date} to cross-check.*\n\n"
-                    "💡 *Examples:*\n"
-                    "• Specific Date: `/crosscheck 10 Sep` or `/crosscheck yesterday`\n"
-                    "• Specific Student ID: `/crosscheck 432` or `/crosscheck 431`\n"
-                    "• Specific Student Name: `/crosscheck Fahmid` or `/crosscheck Bikash`"
-                )
-        else:
-            if stu_id_target:
-                header_title = f"Student ID #{stu_id_target}"
-            elif stu_name_target:
-                header_title = f"Student '{stu_name_target}'"
-            else:
-                header_title = display_date
-
-            lines = [
-                f"📋 *Verified Student Information Cross-Check — {header_title}*",
-                f"• *Total Records Audited:* `{len(results)}`\n"
-            ]
-            for idx, r in enumerate(results, 1):
-                doc_status = "✅ Uploaded" if r['has_pass_doc'] else "⏳ None (Marked WILL APPLY)"
-                rcpt_status = "✅ Verified" if r['has_rcpt_doc'] else "Recorded"
-
-                audit_verdict = r["verdict"]
-                f_fields = r.get("fields", {})
-
-                lines.append(f"*{idx}. {r['name']}* (ID: `{r['id']}`)")
-                lines.append(f"   ├ 🎓 *Program:* {r['program']}")
-                lines.append(f"   ├ 💰 *Payment:* `{r['payment']}` ({rcpt_status})")
-                lines.append(f"   ├ 👤 *Verified by:* {r['verifier']} ({r['ver_time']})")
-                lines.append(f"   ├ 🛂 *Passport Scan:* {doc_status}")
-                lines.append(f"   ├ 📝 *Portal:* Pass `{r['pass_no']}` | Exp `{r['pass_exp']}` | DOB `{r['dob']}`")
-
-                if f_fields:
-                    f_fath = f_fields.get("father_name", {})
-                    f_moth = f_fields.get("mother_name", {})
-                    f_addr = f_fields.get("address", {})
-
-                    if f_fath.get("doc"):
-                        lines.append(f"   ├ 👨 *Father:* `{f_fath['doc']}` ({f_fath.get('verdict', 'Checked')})")
-                    elif f_fath.get("verdict"):
-                        lines.append(f"   ├ 👨 *Father:* {f_fath.get('verdict')}")
-
-                    if f_moth.get("doc"):
-                        lines.append(f"   ├ 👩 *Mother:* `{f_moth['doc']}` ({f_moth.get('verdict', 'Checked')})")
-                    elif f_moth.get("verdict"):
-                        lines.append(f"   ├ 👩 *Mother:* {f_moth.get('verdict')}")
-
-                    if f_addr.get("doc"):
-                        short_addr = f_addr['doc'][:40] + ("..." if len(f_addr['doc']) > 40 else "")
-                        lines.append(f"   ├ 🏠 *Address:* `{short_addr}` ({f_addr.get('verdict', 'Checked')})")
-                    elif f_addr.get("verdict"):
-                        lines.append(f"   ├ 🏠 *Address:* {f_addr.get('verdict')}")
-
-                lines.append(f"   └ 🔍 *Audit Verdict:* {audit_verdict}")
-                lines.append("")
-
-            msg = "\n".join(lines).strip()
-
-        try:
-            await update.message.reply_text(msg, parse_mode="Markdown")
-        except Exception:
-            await update.message.reply_text(msg)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-    except Exception as e:
-        logger.error(f"Error in crosscheck: {e}")
-        await update.message.reply_text(f"❌ Error during cross-check: `{e}`")
+    await _crosscheck_run(
+        update, query, "⏳ _Cross-checking student information, Father, Mother, DOB & Address against documents..._",
+        title)
 
 async def handle_natural_language_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                           query: Optional[str] = None):
