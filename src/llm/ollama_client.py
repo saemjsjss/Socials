@@ -28,9 +28,20 @@ def _label_words(text: str) -> List[str]:
             words.append(w)
     return words
 
-# The model stays in VRAM for good ("Jennie's brain"): no call ever unloads it, so no question,
-# typed or spoken, waits for it to load again.
+# While Jennie's voice is on, the model stays in VRAM for good ("Jennie's brain"), so no spoken
+# question waits for it to load. Otherwise it loads for a question and Ollama unloads it after
+# settings.BRAIN_IDLE_UNLOAD idle, leaving the GPU free (brain_pinned()).
 KEEP_ALIVE = -1
+
+
+def brain_pinned() -> bool:
+    """Is the brain kept in VRAM for good? Only for Jennie's voice (or BRAIN_ALWAYS_LOADED)."""
+    return bool(settings.JENNIE_VOICE_ENABLED or settings.BRAIN_ALWAYS_LOADED)
+
+
+def keep_alive():
+    """The keep_alive every call sends: -1 (never unload) when pinned, else the idle timeout."""
+    return KEEP_ALIVE if brain_pinned() else (settings.BRAIN_IDLE_UNLOAD or "5m")
 TEMPERATURE = 0.3
 
 # A prompt longer than num_ctx is cut by Ollama without any error: it keeps only about its last half
@@ -65,7 +76,7 @@ class OllamaClient:
         return opts
 
     def _payload(self, num_predict: Optional[int] = None, **fields) -> Dict[str, Any]:
-        return {"model": self.model, "stream": False, "keep_alive": KEEP_ALIVE,
+        return {"model": self.model, "stream": False, "keep_alive": keep_alive(),
                 "options": self.options(num_predict), **fields}
 
     def prompt_fits(self, what: str, *texts: Optional[str]) -> bool:

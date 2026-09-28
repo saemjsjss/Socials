@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     JENNIE_VOICE_ENABLED: bool = False
     JENNIE_VOICE_URL: str = "http://127.0.0.1:8765"   # must be this PC (127.0.0.1 / localhost)
     JENNIE_SPOKEN_BRIEF: bool = True                  # also speak the daily brief (needs the above on)
+    # Keep the brain (OLLAMA_MODEL) in VRAM for good. Off by default: it is pinned only while
+    # JENNIE_VOICE_ENABLED is on; otherwise it loads for a question and unloads after
+    # BRAIN_IDLE_UNLOAD of no use, so the GPU is free the rest of the time.
+    BRAIN_ALWAYS_LOADED: bool = False
+    BRAIN_IDLE_UNLOAD: str = "5m"
 
     # API Server
     API_HOST: str = "0.0.0.0"

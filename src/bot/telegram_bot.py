@@ -566,10 +566,11 @@ def _ask_date_again(context, kind: str, raw: str) -> None:
     """After a date the command could not read: when the words were typed in answer to its own
     "which date?" question, ask it again (the date error invites another date, and the next message
     is read as that date). Only for words that look like a date try (a digit, a month or weekday
-    name...), so other words do not keep the question open."""
+    name...) or a short answer of one or two words (a typo such as "tomorow"), so a whole new
+    question does not keep it open."""
     from src.dates import has_date_hint
     ud = getattr(context, "user_data", None)
-    if ud is not None and ud.get(DATE_PROMPT_KEY) == kind and has_date_hint(raw):
+    if ud is not None and ud.get(DATE_PROMPT_KEY) == kind and (has_date_hint(raw) or len(raw.split()) <= 2):
         ud["awaiting_date_for"] = kind
 
 
@@ -1542,7 +1543,7 @@ async def _audit_cards(cards: list, status_msg=None, what: str = "") -> None:
 
 # Card statuses whose scan was not read by OCR: no scan uploaded, the portal could not be read, the
 # OCR engine could not start, or the check failed ("" is a card that was not audited at all).
-_NOT_OCR_CHECKED = ("", "MISSING_DOCUMENT", "PORTAL_UNREADABLE", "OCR_UNAVAILABLE", "ERROR")
+_NOT_OCR_CHECKED = ("", "MISSING_DOCUMENT", "PORTAL_UNREADABLE", "OCR_UNAVAILABLE", "ERROR", "SCAN_UNREADABLE")
 
 
 def _ocr_checked(cards: list) -> int:
@@ -2226,8 +2227,15 @@ async def post_init(application: Application):
 
     # Jennie's brain: load the local LLM now and keep it in VRAM, so the first question (typed or
     # spoken) is answered warm; then the voice filler clips. In the background: startup never waits.
-    from src.bot.scheduler import warm_brain
-    application.create_task(warm_brain(), name="brain-warm-up")
+    # With the voice off the brain is not pinned: it loads for the first question instead, and
+    # a copy pinned by an earlier run is let go now, so the GPU is free.
+    from src.llm.ollama_client import brain_pinned
+    if brain_pinned():
+        from src.bot.scheduler import warm_brain
+        application.create_task(warm_brain(), name="brain-warm-up")
+    else:
+        from src.llm.ollama_client import ollama_client
+        application.create_task(ollama_client.unload(), name="brain-release")
 
 def build_telegram_application():
     """Build and configure the Telegram application instance."""

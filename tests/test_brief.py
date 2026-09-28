@@ -313,7 +313,7 @@ def test_every_count_is_exact(portal):
     ]
     assert section(text, 2) == [
         "*2) PAYMENT-VERIFIED STUDENTS TODAY*",
-        "• 2 students  |  Total: 28,000.00 BDT",
+        "• 2 students  |  Total: 28,000.00 BDT (verified income)",
         "  1. RAHIM UDDIN — KOREAN LANGUAGE PROGRAM (KLP) — 20,000.00 BDT Cash — verified by MAHIRA JANAN at 10:15",
         "  2. NUSRAT JAHAN — BACHELOR'S DEGREE — 8,000.00 BDT bKash — verified by NOSHIN SAMAD at 11:40",
     ]
@@ -418,7 +418,7 @@ def test_a_past_day_counts_that_day_and_skips_the_calendar(portal):
     assert text.startswith("📋 *HANGEUL BRIEF FOR 27 September 2026* — read 28 Sep 2026, 18:05")
     assert section(text, 1)[:2] == ["*1) CONSULTATIONS ON 27 SEP 2026*",
                                     "• Received: 2  |  Done: 1 (1 consulted, 0 file opened)"]
-    assert section(text, 2)[1] == "• 1 student  |  Total: 20,000.00 BDT"
+    assert section(text, 2)[1] == "• 1 student  |  Total: 20,000.00 BDT (verified income)"
     assert section(text, 4)[1].startswith("• shown for today only")
     assert ("GET", "calendar.php") not in portal.asked
 
@@ -918,7 +918,7 @@ def test_the_verified_reader_says_not_available_when_its_layout_is_not_recognise
     # A short list with no page count is the whole list.
     pages["students.php"] = students_page(VERIFIED_X).replace("Page 1 of 1", "")
     portal.pages.update(pages)
-    assert section(compose(), 2)[1] == "• 1 student  |  Total: 20,000.00 BDT"
+    assert section(compose(), 2)[1] == "• 1 student  |  Total: 20,000.00 BDT (verified income)"
 
 
 def brief_students_per_page():

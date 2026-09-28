@@ -148,7 +148,12 @@ def _same_student(old: Dict[str, str], new: Dict[str, str]) -> int:
 
 # Name words many students share: one of these alone does not make two names alike.
 _COMMON_NAME_WORDS = {"md", "mst", "most", "mohammad", "mohammed", "muhammad", "mohammod", "mohamed", "sk",
-                      "sheikh", "shaikh", "syed", "sayed", "kazi", "mir", "mia", "miah"}
+                      "sheikh", "shaikh", "syed", "sayed", "kazi", "mir", "mia", "miah",
+                      # the commonest Bangladeshi surnames: siblings and strangers share them
+                      "rahman", "islam", "hossain", "hossen", "hussain", "uddin", "akter", "akhter",
+                      "khatun", "ahmed", "ahmad", "hasan", "hassan", "haque", "hoque", "alam",
+                      "begum", "sarker", "sarkar", "chowdhury", "khan", "ali", "miah", "sultana",
+                      "karim", "rana", "mondal", "biswas", "das", "roy", "saha"}
 
 
 def _mobile(rec: Dict[str, str]) -> str:
@@ -166,12 +171,21 @@ def _likely_same(old: Dict[str, str], new: Dict[str, str]) -> float:
     if not a or not b:
         return 0.0
     ratio = SequenceMatcher(None, a, b).ratio()
-    shared = {w for w in re.findall(r"[a-z]+", a.lower()) if len(w) >= 3 and w not in _COMMON_NAME_WORDS} \
-        & set(re.findall(r"[a-z]+", b.lower()))
+    words_a, words_b = re.findall(r"[a-z]+", a.lower()), re.findall(r"[a-z]+", b.lower())
+    shared = {w for w in words_a if len(w) >= 3 and w not in _COMMON_NAME_WORDS} & set(words_b)
+    # Alike by the words that tell people apart: "RAHMAN MST SHIULY" and "RAHMAN MD ALAM" share
+    # only a surname (siblings on one mobile), "MD MASHIUL" -> "MD MASHIOL" is a spelling fix.
+    tell_a = " ".join(w for w in words_a if w not in _COMMON_NAME_WORDS)
+    tell_b = " ".join(w for w in words_b if w not in _COMMON_NAME_WORDS)
+    tell_ratio = SequenceMatcher(None, tell_a, tell_b).ratio() if tell_a and tell_b else 0.0
+    completed = set(words_a) <= set(words_b) or set(words_b) <= set(words_a)   # "HASAN MD" -> "HASAN MD RAIYAN"
     mobile = _mobile(old)
-    if mobile and mobile == _mobile(new) and (ratio >= 0.6 or shared):
-        return 1.0 + ratio
     dob = pb.clean_value(old.get("DOB", ""))
+    new_dob = pb.clean_value(new.get("DOB", ""))
+    if dob and new_dob and dob != new_dob:
+        return 0.0                  # two dates of birth: two people (a family shares one mobile)
+    if mobile and mobile == _mobile(new) and (tell_ratio >= 0.7 or shared or completed):
+        return 1.0 + ratio
     if dob and dob == pb.clean_value(new.get("DOB", "")) and pb._norm_key(a) == pb._norm_key(b):
         return 1.0
     return 0.0

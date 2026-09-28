@@ -1134,6 +1134,18 @@ def calendar_answer(items: List[CalItem], q: CalendarQuery, today: date) -> str:
         lines.append(f"_...and {len(pool) - MAX_CALENDAR_LISTED} more._")
     if not pool:
         lines.append(f"ℹ️ None on the calendar{' for ' + esc(w.title()) if w else ''}.")
+    if w is not None:
+        last = w.last or date.max
+        done_in = sorted((i for i in items if i.done and (i.start or i.end) is not None
+                          and (i.start or i.end) <= last and (i.end or i.start) >= w.first
+                          and (not q.dhl or "dhl" in (i.kind + " " + i.title).lower())
+                          and (not q.words or all(x in f"{i.title} {i.where} {i.kind} {i.note}".lower()
+                                                  for x in q.words))),
+                         key=lambda i: (i.end or date.min))
+        if done_in:
+            lines.append("_Not counted, marked done on the portal: " + ", ".join(
+                esc(i.title) + (f" (due {i.end:%d %b})" if i.end else "") for i in done_in[:5])
+                + (f" and {len(done_in) - 5} more" if len(done_in) > 5 else "") + "._")
     if q.dhl and w is None:
         done = sorted((i for i in items if i.done and "dhl" in (i.kind + " " + i.title).lower()),
                       key=lambda i: (i.end or date.min), reverse=True)

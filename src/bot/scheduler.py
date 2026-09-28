@@ -297,7 +297,11 @@ async def keep_brain_warm():
     CPU: Ollama never moves a loaded model, and with keep_alive -1 never unloads it, so a model that
     loaded while the GPU was full (the voice service keeps its speech model there for a few minutes
     after each reply) would answer slowly until the bot restarts. It is unloaded and loaded again;
-    if the GPU is still full, the next check (10 minutes later) tries again. Otherwise nothing to do."""
+    if the GPU is still full, the next check (10 minutes later) tries again. Otherwise nothing to do.
+    Nothing at all when the brain is not pinned (voice off): it then loads only for a question."""
+    from src.llm.ollama_client import brain_pinned
+    if not brain_pinned():
+        return
     try:
         state = await ollama_client.residency()
         if state.get("loaded") and state.get("on_gpu"):

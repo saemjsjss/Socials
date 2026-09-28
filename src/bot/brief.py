@@ -219,7 +219,11 @@ def section_verified(verified: Optional[List[Dict[str, Any]]], portal_day: str, 
     head = f"• {_plural(len(verified), 'student')}"
     if amounts:
         total = f"{sum(amounts):,.2f} BDT"
-        head += f"  |  Total: {total}"
+        income = sum(1 for v in verified if v.get("verified_income"))
+        source = ("verified income" if income and income >= len(amounts) else
+                  "verified income, or the amount paid where no income is shown" if income else
+                  "amounts paid")
+        head += f"  |  Total: {total} ({source})"
         if len(amounts) < len(verified):
             head += f" (the {len(amounts)} with an amount on the portal; {len(verified) - len(amounts)} without)"
             facts.append(f"Total amount verified {said} (only the rows with an amount): {total}")
