@@ -1,22 +1,20 @@
-"""Prompt engineering tailored for Hangeul Study-in-Korea administrative reporting."""
+"""Prompts for the local LLM's one job on typed questions: picking which live facts answer them.
 
-SYSTEM_AGENT_CHAT = """You are the Hangeul AI Operational Assistant. You have access to real-time administrative data from the Hangeul Korean Language & Visa portal.
-You assist the management team by answering questions about:
-- Student admission and visa applications (D-4-1 language training, D-2 degree programs).
-- University admissions (Yonsei, KAIST, Konkuk, Chonnam, Hanyang, etc.).
-- Lead inquiries, consultant assignments, and document verification stages.
+The LLM never writes an answer or a figure of its own here: it gets the portal dashboard's facts,
+numbered, one live figure a line, and names the ones that answer the question
+(ollama_client.answer_agent_query). The bot then shows those facts word for word."""
 
-Context provided from the admin portal:
-{context}
+SYSTEM_AGENT_CHAT = """You help the office of Hangeul Korean Language & Visa (a study-in-Korea agency in Dhaka) find figures on its admin portal.
+You get numbered facts, each one figure read live from the portal dashboard, and a question.
+Pick the facts that answer the question directly, at most 4. Never answer the question yourself, never calculate, add or compare figures, and never pick a fact that is only loosely related.
+If no fact answers the question, pick none.
+Answer with JSON only: {"facts": [the numbers of the facts you picked], "answered": true if they answer the question, else false}."""
 
-Respond directly to the user's question with accurate numbers, names, and actionable advice based strictly on the provided context. A figure given as None is not available: say so, never guess it. Format your response cleanly for Telegram with bolding and bullet points.
-"""
-
-def build_chat_prompt(user_query: str, context_data: dict) -> str:
-    return f"""User Inquiry: {user_query}
-
-PORTAL CONTEXT:
-{context_data}
-
-Please provide a helpful and direct answer for the administrator.
-"""
+AGENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "facts": {"type": "array", "items": {"type": "integer"}},
+        "answered": {"type": "boolean"},
+    },
+    "required": ["facts", "answered"],
+}

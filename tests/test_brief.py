@@ -614,12 +614,16 @@ def test_stats_and_fallback_answers_show_not_available_for_missing_figures(monke
     assert "not available" in telegram_bot.format_stats_report(empty)
     assert "not available" in telegram_bot.format_stats_report({"error": "Authentication failed"})
 
-    for ctx in ({"dashboard": empty}, {"dashboard": {}}, {}):
-        for q in ("total students", "visa approved", "report today"):
-            answer = ollama_client._answer_query_fallback(q, ctx)
-            assert not re.search(r"\b(?:262|261)\b", answer), answer          # the old stand-ins
-    brief_text = ollama_client._generate_structured_report_fallback(empty, [], [])
-    assert "not available" in brief_text and "262" not in brief_text
+    # The fallback (the brain down) only ever picks the portal's own facts, word for word: no
+    # stand-in figure of its own, and nothing when the dashboard gave nothing.
+    from src.bot import ask
+    facts = [f.line() for f in ask.dashboard_facts(INDEX) if f.value is not None]
+    assert ollama_client._answer_query_fallback("total students", facts) == [
+        "Total students (Direct / legacy pipeline): 330"]
+    for q in ("total students", "visa approved", "report today"):
+        assert ollama_client._answer_query_fallback(q, []) == []
+        assert not any(re.search(r"\b(?:262|261)\b", f) for f in ollama_client._answer_query_fallback(q, facts))
+    assert not hasattr(ollama_client, "_generate_structured_report_fallback")
 
 
 # --------------------------------------------------------------------------- the calendar reader

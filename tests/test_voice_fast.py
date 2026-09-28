@@ -201,8 +201,15 @@ TODAY, YESTERDAY = date(2026, 9, 28), date(2026, 9, 27)
      date(2026, 9, 20)),
     (route("inquiries_date", None, "How many consultations on September 20?"),     # the date from the words
      ("inquiries_date_command", "20 Sep 2026"), "inquiries_date", date(2026, 9, 20)),
-    (route("calendar", None, "What deadlines are coming up?"), ("calendar_command", None), "calendar", None),
-    (route("passports"), ("passports_command", None), "passports", None),
+    # The calendar gets the English words, so their dates apply; a span of days is remembered.
+    (route("calendar", None, "What deadlines are coming up?"), ("calendar_command", "What deadlines are coming up?"),
+     "calendar", None),
+    (route("calendar", None, "Any deadlines this week?"), ("calendar_command", "Any deadlines this week?"),
+     "calendar", (TODAY, date(2026, 10, 4))),
+    # Passport problems: the live passport cross-check, never the old hardcoded /passports text.
+    (route("passports"), ("crosscheck_today_command", None), "crosscheck_today", TODAY),
+    (route("passports", "2026-09-12", "Passport problems on 12 September"), ("crosscheck_date_command", "12 Sep 2026"),
+     "crosscheck_date", date(2026, 9, 12)),
     (route("stats"), ("stats_command", None), "stats", None),
     (route("missing_report"), ("missing_command", None), "missing_report", None),
     (route("crosscheck", "2026-09-27"), ("crosscheck_date_command", "27 Sep 2026"), "crosscheck_date", YESTERDAY),
@@ -284,7 +291,7 @@ def test_dated_follow_up_uses_the_chat_history(service, llm, commands):
     assert commands == [("verified_today_command", None), ("verified_date_command", "27 Sep 2026")]
     second_route = [c for c in llm.calls if c["kind"] == "route"][1]
     assert "User: 오늘 검증된 학생 몇 명이야?" in second_route["user"]
-    assert "Jennie (verified_today 2026-09-28): 짜잔! 오늘 검증된 학생은" in second_route["user"]
+    assert "Jennie (verified_today 2026-09-28): 짜잔!" in second_route["user"]
     assert "NEW utterance: 그럼 어제는?" in second_route["user"]
     assert "Today is Monday 2026-09-28" in second_route["system"]
     assert "Sunday 2026-09-27" in second_route["system"]
@@ -522,10 +529,11 @@ def test_reply_is_one_short_sentence(service, llm, verified_today):
 
 
 def test_a_too_long_korean_reply_is_asked_again_shorter(service, llm, verified_today, monkeypatch):
-    """Cut to fit, a Korean sentence would lose its end, where the number is: ask again instead."""
-    service.text, service.language = "오늘 검증된 학생 몇 명이야?", "ko"
-    long_line = "짜잔! 오늘 서류랑 결제까지 전부 검증이 끝난 학생은 모두 합쳐서 2명이에용!"
-    replies = iter([long_line, "짜잔! 오늘은 2명이에용!"])
+    """Cut to fit, a Korean sentence would lose its end: ask again instead. (An answer with a
+    figure is never the brain's Korean: here the bot asked back which date.)"""
+    service.text, service.language = "검증된 학생 날짜별로 볼 수 있어?", "ko"
+    long_line = "네~ 어느 날짜의 검증된 학생을 알려드릴까용? 날짜를 꼭 말씀해 주시면 바로 찾아드릴게용!"
+    replies = iter([long_line, "어느 날짜를 볼까용?"])
     real = llm.chat
 
     async def brain(messages, format=None, **kwargs):
@@ -536,12 +544,38 @@ def test_a_too_long_korean_reply_is_asked_again_shorter(service, llm, verified_t
         return await real(messages, format=format, **kwargs)
 
     monkeypatch.setattr(ollama_client, "chat", brain)
+    llm.route_default = {**ROUTE_TODAY, "command": "verified_date", "english_query": "Verified students by date?",
+                         "language": "ko"}
     update, context, chat = voice_update(voice=FakeVoice())
     run_note(update, context)
+    assert context.user_data["awaiting_date_for"] == "verified"            # /verified_date asked which date
     tries = [c for c in llm.calls if c["kind"] == "reply"]
     assert len(tries) == 2 and "at most 22 characters" in tries[1]["user"]
-    assert service.tts_payloads[0]["text"] == "짜잔! 오늘은 두명이에용!"
+    assert "Facts the bot just read from the portal: (none)" in tries[0]["user"]
+    assert service.tts_payloads[0]["text"] == "어느 날짜를 볼까용?"
     assert len(voice._speech_text(long_line, "ko", 10 ** 4)) > voice.REPLY_MAX_CHARS["ko"]
+
+
+def test_a_korean_answer_is_built_from_its_figure_for_its_day(service, llm, commands):
+    service.text, service.language = "어제 상담 몇 건이었어?", "ko"
+    llm.route_default = route("inquiries_date", "2026-09-27", "How many consultations yesterday?", "ko")
+
+    async def inquiries_date_command(update, context):
+        commands.append(("inquiries_date_command", context.user_data.get("override_text")))
+        await update.message.reply_text("📞 *Consultancy Inquiries Report — 27 September 2026*\n"
+                                        "• *Total Inquiries on Portal:* `999`\n• *Inquiries Received:* `21`\n"
+                                        "• *Inquiries Done:* `17`")
+
+    telegram_bot_attr = telegram_bot.inquiries_date_command
+    telegram_bot.inquiries_date_command = inquiries_date_command
+    try:
+        update, context, chat = voice_update(voice=FakeVoice())
+        run_note(update, context)
+    finally:
+        telegram_bot.inquiries_date_command = telegram_bot_attr
+    assert commands == [("inquiries_date_command", "27 Sep 2026")]
+    assert [c["kind"] for c in llm.calls] == ["route"]                      # no second brain call
+    assert service.tts_payloads[0]["text"] == "짜잔! 어제 상담 요청은 이십일건이에용!"
 
 
 def test_small_talk_never_invents_a_number(service, llm, commands):
@@ -586,11 +620,11 @@ def test_a_number_not_in_the_answer_is_never_spoken(service, llm, verified_today
     assert len(tries) == 2 and "(The only numbers you may say:" in tries[1]["user"]
     assert service.tts_payloads[0]["text"] == "Yay! two students were verified today, hehe!"
 
-    # Wrong twice: Jennie says where the answer is instead of a wrong number.
+    # Wrong twice: Jennie says the answer's own headline figure instead of a wrong number.
     llm.reply_en = "Yay! 99 students were verified today!"
     update, context, chat = voice_update(voice=FakeVoice())
     run_note(update, context)
-    assert service.tts_payloads[-1]["text"] == voice._FALLBACK[("en", True)]
+    assert service.tts_payloads[-1]["text"] == "Okie! Total Students Verified today: two, hehe!"
 
 
 def test_numbers_are_read_from_digits_and_words():
@@ -698,7 +732,7 @@ def test_every_ollama_call_sends_one_num_ctx_and_keeps_the_model_resident(monkey
     async def everything():
         await client.generate_response("typed question", system="agent")          # typed path
         await brief.llm_summary(["Consultation requests received today: 2"])     # 18:05 brief summary
-        await ollama_client.answer_agent_query("how are we doing?", {"dashboard": {}})
+        await ollama_client.answer_agent_query("how are we doing?", ["Total students (Direct / legacy pipeline): 330"])
         await telegram_bot._ai_write_email("remind about passport", {"name": "A"}, "Passport")
         await voice.route("오늘 검증된 학생 몇 명이야?")                            # voice routing
         await voice.spoken_reply("verified today?", "en", "Total Students Verified: 2")
@@ -716,8 +750,10 @@ def test_every_ollama_call_sends_one_num_ctx_and_keeps_the_model_resident(monkey
         assert "think" not in body                              # a non-thinking model
     assert {json.dumps({k: v for k, v in b["options"].items() if k != "num_predict"}) for b in calls} == {
         json.dumps({"temperature": 0.3, "num_ctx": settings.OLLAMA_NUM_CTX})}
-    routing = next(b for b in calls if "format" in b)
+    routing = next(b for b in calls if "format" in b and "command" in b["format"]["properties"])
     assert routing["format"]["required"] == ["command", "date", "english_query", "language"]
+    picking = next(b for b in calls if "format" in b and "facts" in b["format"]["properties"])
+    assert picking["options"]["num_predict"] == 60                   # the typed-question fact pick
 
 
 def test_warm_up_reports_where_the_model_is(monkeypatch):

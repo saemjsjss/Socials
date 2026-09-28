@@ -1,17 +1,32 @@
+import json
 import logging
+import re
 import time
 from typing import Optional, Dict, Any, List
 import httpx
 
 from src.config import settings
-from src.llm.prompts import SYSTEM_AGENT_CHAT
+from src.llm.prompts import AGENT_SCHEMA, SYSTEM_AGENT_CHAT
 
 logger = logging.getLogger("hangeul.llm")
 
+# A typed question the bot has no route for: the LLM only picks which live facts answer it.
+AGENT_MAX_TOKENS = 60           # a JSON list of a few numbers
+AGENT_TIMEOUT = 30.0            # seconds (a warm call takes well under one)
+AGENT_MAX_FACTS = 5
 
-def _fig(value) -> str:
-    """A portal figure for a fallback answer: "not available" when the portal did not give it."""
-    return "not available" if value is None else str(value)
+_LABEL_STOP = {"a", "an", "the", "of", "to", "for", "in", "on", "and", "or", "by", "at", "with", "is", "are"}
+
+
+def _label_words(text: str) -> List[str]:
+    """The telling words of a label or a question: lower case, a plural 's' dropped, no filler."""
+    words = []
+    for w in re.findall(r"[a-z0-9]+", (text or "").lower()):
+        if len(w) > 3 and w.endswith("s") and not w.endswith(("ss", "us", "is")):
+            w = w[:-1]
+        if w not in _LABEL_STOP:
+            words.append(w)
+    return words
 
 # The model stays in VRAM for good ("Jennie's brain"): no call ever unloads it, so no question,
 # typed or spoken, waits for it to load again.
@@ -185,16 +200,56 @@ class OllamaClient:
     # and rates): src/bot/brief.py builds it from the portal in code and asks the LLM only for
     # one checked summary sentence, through chat().
 
-    async def answer_agent_query(self, query: str, context: dict) -> str:
-        """Answer a natural language question using Ollama."""
-        system = SYSTEM_AGENT_CHAT.format(context=context)
-        prompt = f"User Question: {query}\n\nProvide a concise and factual answer:"
-        
-        health = await self.check_health()
-        if health.get("reachable") and health.get("target_model_ready"):
-            return await self.generate_response(prompt=prompt, system=system)
-            
-        return self._answer_query_fallback(query, context)
+    async def answer_agent_query(self, query: str, facts: List[str]) -> Optional[List[str]]:
+        """Which of `facts` (one live portal figure a line, e.g. "Total students (Direct / legacy
+        pipeline): 330") answer the typed question `query`. The LLM only picks them, by number,
+        and the caller shows the picked facts word for word: it never writes a figure of its own,
+        so every number shown is the portal's (src/bot/ask.py answer_unknown).
+
+        -> the picked facts, in the order given ([] when none answers the question); None when
+        the brain is down or answered nonsense, or when the facts do not fit its context
+        (prompt_fits: Ollama would cut the prompt silently and the pick could be wrong)."""
+        facts = [f for f in (facts or []) if f and f.strip()]
+        if not facts:
+            return []
+        numbered = "\n".join(f"{i}. {f}" for i, f in enumerate(facts, 1))
+        user = f"Facts:\n{numbered}\n\nQuestion: {query}\n\nJSON:"
+        if not self.prompt_fits("agent", SYSTEM_AGENT_CHAT, user):
+            return None
+        raw = await self.chat([{"role": "system", "content": SYSTEM_AGENT_CHAT}, {"role": "user", "content": user}],
+                              format=AGENT_SCHEMA, num_predict=AGENT_MAX_TOKENS, timeout=AGENT_TIMEOUT)
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            found = re.search(r"\{.*\}", raw, re.S)
+            try:
+                data = json.loads(found.group(0)) if found else None
+            except ValueError:
+                data = None
+        if not isinstance(data, dict) or not isinstance(data.get("facts"), list):
+            return None
+        if data.get("answered") is False:
+            return []
+        picked = sorted({int(n) for n in data["facts"]
+                         if isinstance(n, (int, float)) and not isinstance(n, bool) and 1 <= int(n) <= len(facts)})
+        return [facts[n - 1] for n in picked[:AGENT_MAX_FACTS]]
+
+    def _answer_query_fallback(self, query: str, facts: List[str]) -> List[str]:
+        """The facts a question names outright, with no LLM (answer_unknown tries this first, and it
+        is all there is while the brain is down): each fact whose whole label, the words before its
+        figure, is in the question ("how many open windows?" -> "Open windows (Admissions flow): 3").
+        Only the facts' own figures; [] when no label is named whole."""
+        asked = set(_label_words(query))
+        picked = []
+        for fact in facts or []:
+            label = re.sub(r"\([^)]*\)", " ", fact.rsplit(":", 1)[0])
+            label = label.split(" — ")[0]
+            words = _label_words(label)
+            if words and set(words) <= asked:
+                picked.append(fact)
+        return picked[:AGENT_MAX_FACTS]
 
     def _fallback_response(self, prompt: str) -> str:
         return (
@@ -203,157 +258,6 @@ class OllamaClient:
             "Request processed successfully."
         )
 
-    def _generate_structured_report_fallback(self, dashboard: dict, applications: list, inquiries: list, target_date: str = "today") -> str:
-        from zoneinfo import ZoneInfo
-        from datetime import datetime, timedelta
-        
-        try:
-            dhaka_tz = ZoneInfo(settings.REPORT_TIMEZONE)
-            now = datetime.now(dhaka_tz)
-        except Exception:
-            now = datetime.now()
-
-        t_low = target_date.lower().strip()
-        if t_low == "today":
-            formatted_date = now.strftime("%d %B %Y")
-        elif t_low == "yesterday":
-            formatted_date = (now - timedelta(days=1)).strftime("%d %B %Y")
-        else:
-            try:
-                parsed = datetime.strptime(target_date.strip(), "%Y-%m-%d")
-                formatted_date = parsed.strftime("%d %B %Y")
-            except ValueError:
-                formatted_date = target_date.strip()
-        total_came = len(inquiries)
-
-        done_leads = []
-        no_ans_leads = []
-        pending_leads = []
-        c_stats = {}
-
-        for r in inquiries:
-            status = str(r.get("status", "")).strip().lower()
-            c = r.get("consultant") or "Unassigned"
-            if c not in c_stats:
-                c_stats[c] = {"total": 0, "done": 0, "no_ans": 0, "pending": 0}
-            c_stats[c]["total"] += 1
-
-            if any(w in status for w in ["consulted", "done", "file opened"]):
-                done_leads.append(r)
-                c_stats[c]["done"] += 1
-            elif "no answer" in status:
-                no_ans_leads.append(r)
-                c_stats[c]["no_ans"] += 1
-            else:
-                pending_leads.append(r)
-                c_stats[c]["pending"] += 1
-
-        pct_done = (len(done_leads) / total_came * 100) if total_came else 0
-        pct_no_ans = (len(no_ans_leads) / total_came * 100) if total_came else 0
-        pct_pending = (len(pending_leads) / total_came * 100) if total_came else 0
-
-        prog_counts = {}
-        for r in inquiries:
-            p = r.get("program") or "General"
-            prog_counts[p] = prog_counts.get(p, 0) + 1
-
-        # Only the portal's own figures (None when it did not give one): never a stand-in number.
-        summary = (dashboard or {}).get("summary") or {}
-        total_students = _fig(summary.get("total_applicants"))
-        window_review = _fig(summary.get("window_apps_under_review"))
-
-        if total_came == 0:
-            return (
-                "📋 *HANGEUL DAILY OPERATIONAL BRIEF*\n"
-                f"*Date:* {formatted_date} (Asia/Dhaka)\n\n"
-                f"ℹ️ *No consultation inquiries were found on this date ({formatted_date}).*\n\n"
-                f"• *Total Students in System:* `{total_students}`\n"
-                f"• *University Window Apps Under Review:* `{window_review}`\n"
-            )
-
-        report = (
-            "📋 *HANGEUL DAILY OPERATIONAL BRIEF*\n"
-            f"*Date:* {formatted_date} (Asia/Dhaka)\n\n"
-            "📊 *HIGH-LEVEL SUMMARY*\n"
-            f"• *Total Inquiries Received:* `{total_came}`\n"
-            f"• *Done / Consulted:* `{len(done_leads)}` ({pct_done:.1f}%)\n"
-            f"• *Attempted (No Answer):* `{len(no_ans_leads)}` ({pct_no_ans:.1f}%)\n"
-            f"• *Pending / Unhandled (Waiting):* `{len(pending_leads)}` ({pct_pending:.1f}%)\n\n"
-            "👥 *COUNSELOR WORKLOAD & COMPLETION*\n"
-        )
-
-        for c, s in sorted(c_stats.items(), key=lambda x: -x[1]["total"]):
-            status_tag = f"{s['pending']} Pending ⏳" if s["pending"] > 0 else "All Contacted ✅"
-            report += f"  • *{c}:* {s['done']}/{s['total']} Done ({status_tag})\n"
-
-        report += "\n🎓 *INQUIRIES BY PROGRAM*\n"
-        for p, cnt in sorted(prog_counts.items(), key=lambda x: -x[1]):
-            report += f"  • {p}: `{cnt}` leads\n"
-
-        if pending_leads:
-            report += f"\n⏳ *PENDING LEADS WAITING FOR CONTACT ({len(pending_leads)})*\n"
-            for i, r in enumerate(pending_leads[:7], 1):
-                name = r.get("name") or "Applicant"
-                prog = r.get("program", "")
-                c_name = r.get("consultant", "Unassigned")
-                rec = r.get("received", "").split(" ")[-1] if r.get("received") else ""
-                time_str = f" [{rec}]" if rec else ""
-                report += f"  {i}. *{name}* ({prog}){time_str} ➔ `{c_name}`\n"
-
-        verified_students = _fig(summary.get("verified_students"))
-        pending_payment = _fig(summary.get("pending_payment"))
-
-        report += (
-            "\n🏛️ *PORTAL ENROLLMENT SNAPSHOT*\n"
-            f"• *Total Students in System:* `{total_students}` (Verified: `{verified_students}`)\n"
-            f"• *Pending Payments:* `{pending_payment}`\n"
-            f"• *University Window Apps Under Review:* `{window_review}`\n"
-        )
-
-        return report
-
-
-    def _answer_query_fallback(self, query: str, context: dict) -> str:
-        summary = (context.get("dashboard") or {}).get("summary") or {}
-        q_lower = query.lower()
-        
-        if any(w in q_lower for w in ["report", "brief", "summary", "today", "consultation", "came", "done", "high-level", "overview"]):
-            inquiries = context.get("sample_inquiries") or context.get("inquiries") or []
-            return self._generate_structured_report_fallback(
-                dashboard=context.get("dashboard", {}),
-                applications=context.get("sample_applications") or [],
-                inquiries=inquiries
-            )
-        elif "applicant" in q_lower or "student" in q_lower or "total" in q_lower:
-            return (
-                f"📋 *Applicant Statistics*\n"
-                f"• *Total Applicants on Record:* {_fig(summary.get('total_applicants'))}\n"
-                f"• *Window Applications Under Review:* {_fig(summary.get('window_apps_under_review'))}\n"
-                f"• *Verified Students:* {_fig(summary.get('verified_students'))}\n"
-                f"• *Pending Document Verification:* {_fig(summary.get('pending_document_verification'))}"
-            )
-        elif "visa" in q_lower or "approved" in q_lower:
-            # The portal dashboard has no visa figure; "Accepted" is accepted window applications.
-            return (
-                f"🛂 *Visa Status Update*\n"
-                f"• *Visas Approved YTD:* {_fig(summary.get('visa_approved_ytd'))}\n"
-                f"• *Accepted Window Applications:* {_fig(summary.get('window_apps_accepted'))}\n"
-                f"• *Pending Document Review:* {_fig(summary.get('pending_document_verification'))}\n"
-                f"• *Total Applicants:* {_fig(summary.get('total_applicants'))}"
-            )
-        elif "alert" in q_lower or "urgent" in q_lower:
-            alerts = context.get("dashboard", {}).get("urgent_alerts", [])
-            lines = ["⚠️ *Current Urgent Alerts:*"]
-            for a in alerts:
-                lines.append(f"• {a.get('message')}")
-            return "\n".join(lines)
-        else:
-            inquiries = context.get("sample_inquiries") or context.get("inquiries") or []
-            return self._generate_structured_report_fallback(
-                dashboard=context.get("dashboard", {}),
-                applications=context.get("sample_applications") or [],
-                inquiries=inquiries
-            )
 
 # Singleton Ollama instance
 ollama_client = OllamaClient()

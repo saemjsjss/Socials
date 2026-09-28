@@ -105,27 +105,18 @@ def normalize_date_input(text: str, strict: bool = False) -> Optional[tuple]:
     return day.strftime("%d %b %Y"), day.strftime("%d %B %Y")
 
 def parse_user_report_intent(text: str) -> tuple[bool, str, str]:
-    """Detect if user is asking for an operational report or specifying a date. The dates are ""
-    when the text's date cannot be read (report_command then says so)."""
-    import re
+    """Whether a text asks for the day's report (the factual brief, /report), and for which date.
+    Only a real report request counts: /report, or "report", "brief", "summary", "overview" or
+    "recap" with no subject that has its own answer (src.bot.ask.classify: "consultation report"
+    is the consultations, "how many ... today" is never a report, and month names count only as
+    whole words next to a day). The dates are "" when the text's date cannot be read (report_command
+    then says so)."""
+    from src.bot.ask import classify
     t_clean = (text or "").strip()
-    t_low = t_clean.lower()
-
-    if t_clean.startswith(('/report', '/consultations', '/inquiries')):
-        p_date, d_date = normalize_date_input(t_clean) or ("", "")
-        return True, p_date, d_date
-
-    triggers = ['report', 'summary', 'brief', 'consultation', 'inquiry', 'inquiries', 'came', 'done', 'how many', 'yesterday', 'today']
-    months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
-    has_trigger = any(t in t_low for t in triggers)
-    has_month = any(m in t_low for m in months)
-    has_date_pattern = bool(re.search(r'\b\d{1,4}[-/.]\d{1,2}(?:[-/.]\d{1,4})?\b', t_clean))
-
-    if has_trigger or has_month or has_date_pattern:
-        p_date, d_date = normalize_date_input(t_clean) or ("", "")
-        return True, p_date, d_date
-
-    return False, '', ''
+    if not (t_clean.startswith("/report") or classify(t_clean).kind == "report"):
+        return False, "", ""
+    p_date, d_date = normalize_date_input(t_clean) or ("", "")
+    return True, p_date, d_date
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /report [date]: the factual brief (src/bot/brief.py) for that date, as a reply."""
@@ -857,7 +848,14 @@ def format_calendar_report(cal_data: dict, filter_query: Optional[str] = None) -
     return "\n".join(lines).strip()
 
 async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /calendar [query] command."""
+    """Handle /calendar [query] (and /events, /deadlines, and calendar questions in plain words).
+
+    Bare, it is today's view (format_calendar_report). With words, they are read by
+    src.bot.ask.calendar_query: real dates ("this week" is today to Sunday, "next 7 days", "in
+    October", "on 2 Oct"), "deadline" / "due" for what closes within them, "DHL" for the DHL
+    items, and any other words (a university) searched for; the answer comes from calendar.php
+    read live (ask.answer_calendar), each item with its dates. A date that cannot be read gets a
+    clear error, never today's view instead; a calendar that cannot be read says so."""
     chat_id = update.effective_chat.id
     if not is_authorized(update):
         await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{chat_id}`", parse_mode="Markdown")
@@ -871,21 +869,27 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif update.message and update.message.text:
         raw_input = update.message.text
 
+    from src.bot import ask
+    from src.bot.replies import date_error_reply, reply_long
+    question = ask.calendar_query(raw_input)
+    if question.problem:
+        await update.message.reply_text(date_error_reply(raw_input, "/calendar", question.problem), parse_mode="Markdown")
+        return
+    if not question.default:
+        status_msg = await update.message.reply_text("⏳ _Consulting live calendar & admission deadlines..._",
+                                                     parse_mode="Markdown")
+        await reply_long(update.message, await ask.answer_calendar(question), edit=status_msg)
+        return
+
     status_msg = await update.message.reply_text("⏳ _Consulting live calendar & admission deadlines..._", parse_mode="Markdown")
     try:
         cal_data = await admin_client.get_calendar_events()
-        report = format_calendar_report(cal_data, filter_query=raw_input)
-        try:
-            await update.message.reply_text(report, parse_mode="Markdown")
-        except Exception:
-            await update.message.reply_text(report)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
+        report = format_calendar_report(cal_data)          # today's view: the words asked for nothing more
     except Exception as e:
         logger.error(f"Error checking calendar: {e}")
-        await update.message.reply_text(f"❌ Error checking calendar: `{e}`")
+        from src.bot.replies import portal_error_reply
+        report = portal_error_reply("The calendar", e)
+    await reply_long(update.message, report, edit=status_msg)
 
 def _send_gmail(to_list: list, subject: str, body: str):
     """Send an email via Gmail SMTP using GMAIL_ADDRESS + GMAIL_APP_PASSWORD.
@@ -1667,16 +1671,26 @@ async def crosscheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_natural_language_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                           query: Optional[str] = None):
-    """Process natural language questions through the local LLM agent.
-    A typed message is read from update.message.text; a voice note (src/bot/voice.py),
-    which has no text, passes its English query as `query` instead."""
+    """A typed question, answered by the command or the live read it asks for, never by a guess.
+    A typed message is read from update.message.text; a voice note (src/bot/voice.py), which has no
+    text, passes its English query as `query` instead.
+
+    The question is read by src.bot.ask.classify, on whole words ("across" is no "cross",
+    "shipping" no "pin", "Janan" and "summary" no month) and with real dates: consultations,
+    verified payments and cross-checks go to their commands for the day named (today when none;
+    a date that cannot be read gets the command's own "couldn't read" reply; a span of days is
+    asked again one day at a time, or cross-checked as a range); pending payments, window
+    applications under review, the dashboard's figures, intakes and application dates are read
+    live (src.bot.ask.reply); calendar questions go to /calendar with their words, which applies
+    the dates ("this week" is today to Sunday); passport questions go to the live cross-check.
+    Anything else gets the dashboard facts it names or the local LLM picks, word for word, or an
+    honest "I can't answer that from the portal yet" with the commands that can."""
     if not is_authorized(update):
         return
 
     if query is None:
         query = update.message.text or ""
     query = query.strip()
-    query_lower = query.lower()
 
     # 0. If a /sendmail conversation is in progress, this message belongs to it.
     if context.user_data.get("email_flow"):
@@ -1699,122 +1713,148 @@ async def handle_natural_language_message(update: Update, context: ContextTypes.
         elif awaiting == "crosscheck_range":
             await crosscheck_range_command(update, context)
             return
+        context.user_data.pop("override_text", None)
 
-    # 2. Route menu item 1 & 2: Consultancy inquiries queries
-    if "inquir" in query_lower or "consultan" in query_lower or "consultat" in query_lower:
-        if "today" in query_lower or "how many were done today" in query_lower:
-            await inquiries_today_command(update, context)
-            return
-        elif any(m in query_lower for m in ["yesterday", "sep", "oct", "nov", "dec", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "2026", "2025"]):
-            context.user_data["override_text"] = query
-            await inquiries_date_command(update, context)
-            return
-        elif "how many were done" in query_lower or "date" in query_lower or "specific" in query_lower:
-            await inquiries_date_command(update, context)
-            return
+    from src.bot import ask
+    from src.dates import local_today
+    today = local_today()
+    route = ask.classify(query, today)
+    kind = route.kind
+    ud = context.user_data
 
-    # 3. Route "pin" / "commands" / "pp pin" queries directly to pin_command
-    if any(k in query_lower for k in ["pin", "cheatsheet", "cheat sheet", "command list", "all commands", "menu"]):
+    def portal_day(day) -> str:
+        return day.strftime("%d %b %Y")
+
+    if kind == "hello":
+        await update.message.reply_text(ask.HELLO, parse_mode="Markdown")
+        return
+    if kind == "pin":
         await pin_command(update, context)
         return
 
-    # 4. Route menu item 5 & 6: Crosscheck verified students queries
-    if "cross" in query_lower or ("check" in query_lower and "verif" in query_lower) or any(k in query_lower for k in ["father", "mother", "address", "parent", "parents", "dob"]):
-        _r_start, _r_end, _ = _parse_date_range(query)
-        if _r_start and _r_start != _r_end:
-            context.user_data["override_text"] = query
+    # A span of days asked of an answer given one day at a time: which day (a passport check can
+    # be a range: the range cross-check).
+    if kind in ask.ONE_DAY_KINDS and route.window is not None:
+        w = route.window
+        if kind == "passports" and w.first <= today:
+            ud["override_text"] = f"{portal_day(w.first)} to {portal_day(min(w.last or today, today))}"
             await crosscheck_range_command(update, context)
             return
-        if "today" in query_lower:
+        ud["awaiting_date_for"] = {"passports": "crosscheck"}.get(kind, kind)
+        await update.message.reply_text(ask.one_day_reply(kind, w), parse_mode="Markdown")
+        return
+
+    # 2. Consultancy inquiries (menu items 1 and 2), for the day named; today when none.
+    if kind == "inquiries":
+        if route.problem:
+            ud["override_text"] = query                 # the command says it cannot read the date
+            await inquiries_date_command(update, context)
+        elif route.day is None or route.day == today:
+            await inquiries_today_command(update, context)
+        else:
+            ud["override_text"] = portal_day(route.day)
+            await inquiries_date_command(update, context)
+        return
+
+    # 3. Cross-checks (menu items 5-7): a range, a day, a student, or ask which date.
+    if kind == "crosscheck":
+        from src.dates import has_date_hint, parse_user_date
+        _r_start, _r_end, _ = _parse_date_range(query)
+        if _r_start and _r_start != _r_end:
+            ud["override_text"] = query
+            await crosscheck_range_command(update, context)
+            return
+        if route.window is not None and route.window.first <= today:
+            w = route.window                                # "cross-check last week": that range
+            ud["override_text"] = f"{portal_day(w.first)} to {portal_day(min(w.last or today, today))}"
+            await crosscheck_range_command(update, context)
+            return
+        named = parse_user_date(query, today, prefer_past=True)
+        if named is not None and named == today:
             await crosscheck_today_command(update, context)
             return
-        elif any(m in query_lower for m in ["yesterday", "sep", "oct", "nov", "dec", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "2026", "2025"]):
-            context.user_data["override_text"] = query
+        if named is not None:
+            ud["override_text"] = query
             await crosscheck_date_command(update, context)
             return
-        elif not any(k in query_lower for k in ["father", "mother", "address", "parent", "parents"]) and not re.search(r'\b\d{2,5}\b', query_lower):
+        by_student = ask._CROSS_FIELD_RE.search(query) or re.search(r"\b\d{2,5}\b", query)
+        if not by_student and has_date_hint(_DATE_FILLER_RE.sub(" ", query)):
+            ud["override_text"] = query                 # a date it cannot read: the command says so
             await crosscheck_date_command(update, context)
             return
-        context.user_data["override_text"] = query
+        if not by_student:
+            await crosscheck_date_command(update, context)      # it asks which date
+            return
+        ud["override_text"] = query
         await crosscheck_command(update, context)
         return
 
-    # 5. Route menu item 3 & 4: Total verified students queries. The date is read by the one strict
-    # parser (whole-word months: "separately" is no September), and a date-like word it cannot read
-    # goes to /verified_date, which says so, instead of silently becoming today.
-    if "verif" in query_lower:
-        from src.dates import has_date_hint, local_today, parse_user_date
-        named = parse_user_date(query, prefer_past=True)
-        if named is not None and named == local_today():
-            await verified_today_command(update, context)
-            return
-        elif named is not None or has_date_hint(_DATE_FILLER_RE.sub(" ", query)):
-            context.user_data["override_text"] = query
-            await verified_date_command(update, context)
-            return
-        elif re.search(r"\b(?:date|specific)\b", query_lower):
-            await verified_date_command(update, context)
-            return
-        context.user_data["override_text"] = query
-        await verified_command(update, context)
+    # Passport problems: the live passport cross-check for the day named (today when none).
+    if kind == "passports":
+        if route.problem:
+            ud["override_text"] = query
+            await crosscheck_date_command(update, context)
+        elif route.day is None or route.day == today:
+            await crosscheck_today_command(update, context)
+        else:
+            ud["override_text"] = portal_day(route.day)
+            await crosscheck_date_command(update, context)
         return
 
-    # Route "admitted" queries directly to admitted_command; what is left of the words once the
-    # question words are gone ("who is admitted to Hanyang?" -> "hanyang") is the search.
-    if "admit" in query_lower:
-        clean_q = re.sub(r"[?!.,;:]", " ", query_lower)
+    # 4. Verified students (menu items 3 and 4). The date is read by the one strict parser, and a
+    # date-like word it cannot read goes to /verified_date, which says so, instead of today.
+    if kind == "verified":
+        if route.day is not None and route.day == today:
+            await verified_today_command(update, context)
+        elif route.day is not None or route.problem:
+            ud["override_text"] = query
+            await verified_date_command(update, context)
+        elif re.search(r"\b(?:date|specific)\b", query, re.I):
+            await verified_date_command(update, context)
+        else:
+            ud["override_text"] = query
+            await verified_command(update, context)
+        return
+
+    # Admitted students: what is left of the words once the question words are gone ("who is
+    # admitted to Hanyang?" -> "hanyang") is the search.
+    if kind == "admitted":
+        clean_q = re.sub(r"[?!.,;:]", " ", query.lower())
         clean_q = re.sub(r"\b(?:show|list|get|give|tell|me|us|who|whom|which|what|is|are|was|were|has|have|been|all"
                          r"|the|any|students?|admitted|admit|admission|admissions|how|many|number|of|to|in|at|for"
                          r"|from|please|pls|currently|now|so|far|there|our|do|does|we|got)\b", " ", clean_q)
         clean_q = re.sub(r"\s+", " ", clean_q).strip()
         if clean_q:
-            context.user_data["override_query"] = clean_q
+            ud["override_query"] = clean_q
         await admitted_command(update, context)
         return
 
-    # Route calendar / event / deadline queries directly to calendar_command
-    cal_triggers = ["calendar", "event", "events", "deadline", "deadlines", "admission open", "application open"]
-    if any(t in query_lower for t in cal_triggers):
-        context.user_data["override_text"] = query
+    if kind == "missing":
+        await missing_command(update, context)
+        return
+    if kind == "stage":
+        await stage_command(update, context)
+        return
+    if kind == "calendar":
+        ud["override_text"] = query                     # /calendar reads the dates in the words
         await calendar_command(update, context)
         return
-
-    # Route passport matching / audit queries directly to passports_command
-    if "passport" in query_lower or "passports" in query_lower:
-        await passports_command(update, context)
-        return
-
-    is_report, p_date, d_date = parse_user_report_intent(query)
-    if is_report:
-        context.user_data["override_text"] = query
+    if kind == "report":
+        ud["override_text"] = query
         await report_command(update, context)
         return
+    if kind == "stats":
+        await stats_command(update, context)
+        return
 
-    status_msg = await update.message.reply_text("🤔 _Consulting Hangeul admin records..._", parse_mode="Markdown")
-    try:
-        dashboard = await admin_client.get_dashboard()
-        applications = await admin_client.get_applications()
-        inquiries = await admin_client.get_inquiries()
-
-        context_data = {
-            # The tile list repeats live_stats with links: left out of the small LLM context.
-            "dashboard": {k: v for k, v in dashboard.items() if k != "tiles"},
-            "sample_applications": applications[:5],
-            "inquiries": inquiries,
-            "sample_inquiries": inquiries
-        }
-
-        answer = await ollama_client.answer_agent_query(query=query, context=context_data)
-        try:
-            await status_msg.edit_text(answer, parse_mode="Markdown")
-        except BadRequest as e:
-            # The LLM's Markdown does not always parse ("Can't parse entities"): send it plain.
-            if "parse entities" not in str(e).lower():
-                raise
-            await status_msg.edit_text(answer)
-    except Exception as e:
-        logger.error(f"Error answering query: {e}")
-        await status_msg.edit_text(f"❌ Error: `{e}`", parse_mode="Markdown")
+    # Answers read live here: pending payments, window applications under review, the dashboard's
+    # figures, intakes, application dates; and a question with no route (the dashboard facts it
+    # names, or "I can't answer that from the portal yet").
+    if kind == "applied" and route.problem:
+        from src.bot.replies import date_error_reply
+        await update.message.reply_text(date_error_reply(query, reason=route.problem), parse_mode="Markdown")
+        return
+    await ask.reply(update.message, route, query)
 
 MISSING_PROGRAMS = [
     ("KLP", "🇰🇷 KLP"),
