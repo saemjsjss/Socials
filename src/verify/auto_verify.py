@@ -523,15 +523,33 @@ def run(budget: int = DEFAULT_BUDGET, only: List[str] | None = None,
             "skipped": skipped, "store": store}
 
 
+def _first_problem(result: Dict[str, Any], d: Dict[str, Any]) -> str:
+    """Why a student FAILed (the first failing rule) or is INCOMPLETE (the first document not
+    uploaded), from the stored document-check rows; "" when they are not at hand."""
+    import re
+    rows = (((result.get("store") or {}).get("documents") or {}).get(d.get("passport"), {}) or {}).get("rows") or []
+    want = "MISSING" if d.get("verdict") == "INCOMPLETE" else "FAIL"
+    for r in rows:
+        if r.get("verdict") == want:
+            detail = str(r.get("detail", ""))
+            m = re.search(r"\bFAIL:\s*([^|]+)", detail) if want == "FAIL" else None
+            detail = m.group(1).strip() if m else detail
+            text = f"{r.get('doc', '')}: {detail}".strip(": ")
+            return text if len(text) <= 160 else text[:159] + "…"
+    return ""
+
+
 def summary_lines(result: Dict[str, Any]) -> List[str]:
-    """The verification part of the Telegram message."""
+    """The verification part of the Telegram message: each student's verdict, with the first
+    failing rule (or missing document) for a FAIL or INCOMPLETE."""
     done = result.get("checked", [])
     if not done:
         return []
     bad = [d for d in done if d["verdict"] in ("FAIL", "INCOMPLETE") or d["differs"]]
     out = [f"🔍 Documents checked: {len(done)}"]
     for d in done:
-        bits = [d["verdict"]]
+        why = _first_problem(result, d) if d["verdict"] in ("FAIL", "INCOMPLETE") else ""
+        bits = [f"{d['verdict']} ({why})" if why else d["verdict"]]
         if d["differs"]:
             bits.append(f"{d['differs']} field(s) differ from the portal")
         if d.get("corrected"):

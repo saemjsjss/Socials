@@ -29,6 +29,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import cv2
+import httpx
 import numpy as np
 import pytest
 
@@ -113,17 +114,26 @@ def row_form(sid):
 
 
 def students_page():
-    rows = ["<tr><th>Student</th><th>Docs</th></tr>"]
-    for sid, s in STUDENTS.items():
+    """students.php as the portal lays it out (Sep 2026): a list row per student and its details
+    row, with the Full Name / DOB / Passport No / Passport Expiry fields, the passport link and
+    the edit link. One page, so no pager."""
+    rows = ['<tr><th></th><th>SL</th><th>Student</th><th>University</th><th>Program · Intake</th>'
+            '<th>Docs</th><th>Payment</th><th>Stage · Applied</th><th></th></tr>']
+    for sl, (sid, s) in enumerate(STUDENTS.items(), 1):
         p = s["profile"]
-        text = (f"Full Name {p['name']} DOB {p.get('dob', '')} "
-                f"Passport No {p.get('passport_no', '')} "
-                f"Passport Expiry {p.get('passport_expiry', '')}")
+        rows.append(f'<tr class="stu-row"><td></td><td>{sl}</td><td><strong class="stu-name">{p["name"]}</strong>'
+                    f'<span class="stu-sid">HNG-2026-{sid}</span></td><td>—</td>'
+                    '<td>KOREAN LANGUAGE PROGRAM (KLP)<div class="stu-sub">MARCH 2027</div></td>'
+                    '<td>100%</td><td>Verified</td><td>Payment Verified<div class="stu-sub">12 Jul 2026</div></td>'
+                    '<td></td></tr>')
+        dets = "".join(f'<div class="det-item"><label>{k}</label><span>{v or "—"}</span></div>' for k, v in (
+            ("Full Name", p["name"]), ("DOB", p.get("dob", "")), ("Passport No", p.get("passport_no", "")),
+            ("Passport Expiry", p.get("passport_expiry", ""))))
         links = f'<a href="student_edit.php?id={sid}">Edit</a>'
         if s["doc"]:
             links = f'<a href="view_doc.php?f={s["doc"]}">Passport</a> ' + links
-        rows.append(f"<tr><td>{text}</td><td>{links}</td></tr>")
-    return "<html><body><table>" + "".join(rows) + "</table></body></html>"
+        rows.append(f'<tr class="xp-row"><td colspan="9">{dets}{links}</td></tr>')
+    return '<html><body><table class="tbl stu-tbl">' + "".join(rows) + "</table></body></html>"
 
 
 def edit_page(sid):
@@ -189,11 +199,11 @@ class FakePortal:
     def __init__(self):
         self.requests = []
 
-    async def get(self, url, **kwargs):
-        self.requests.append(("GET", url))
+    async def get(self, url, params=None, **kwargs):
+        self.requests.append(("GET", url + (f"?{params}" if params else "")))
         await asyncio.sleep(0.005)   # a real round trip gives the loop back
         text, content, status = "", b"", 404
-        if url == f"{BASE}/students.php":
+        if url == f"{BASE}/students.php" and not params:
             text, status = students_page(), 200
         elif url.startswith(f"{BASE}/student_edit.php?id="):
             sid = url.split("id=", 1)[1]
@@ -205,7 +215,7 @@ class FakePortal:
                 content, status = scan_png(DOCS[fn]), 200
         if text:
             content = text.encode()
-        return SimpleNamespace(status_code=status, url=url, text=text, content=content)
+        return SimpleNamespace(status_code=status, url=httpx.URL(url), text=text, content=content)
 
     async def post(self, url, **kwargs):   # the watcher must never write to the portal
         self.requests.append(("POST", url))
@@ -402,12 +412,14 @@ def run_watcher(env):
     env.bot.sent.clear()
     env.portal.requests.clear()
     env.reader.threads.clear()
+    calls_before = env.reader.calls
     _, gaps, took = asyncio.run(with_ticker(scheduler.check_new_passport_uploads(env.app)))
     with open(scheduler.ALERTED_CACHE_FILE, encoding="utf-8") as f:
-        alerted = set(json.load(f))
+        memory = json.load(f)["scans"]
+    alerted = {e["uid"] for e in memory.values() if e["alert"] and e["sent"]}
     return SimpleNamespace(sent=list(env.bot.sent), requests=list(env.portal.requests),
-                           alerted=alerted, gaps=gaps, took=took,
-                           threads=set(env.reader.threads))
+                           alerted=alerted, memory=memory, gaps=gaps, took=took,
+                           threads=set(env.reader.threads), ocr_calls=env.reader.calls - calls_before)
 
 
 def test_watcher_sends_the_same_alerts_without_freezing_the_loop(env, monkeypatch):
@@ -418,10 +430,14 @@ def test_watcher_sends_the_same_alerts_without_freezing_the_loop(env, monkeypatc
     assert new.took >= 5 * BURN_S                  # 9001 and 9002: 2 reads each, 9003: 1
     assert main not in new.threads
     assert new.alerted == {"9002", "9003"}
-    assert [m["chat_id"] for m in new.sent] == [ADMIN_ID, ADMIN_ID]
-    assert "`ID 9002`" in new.sent[0]["text"] and "DOB mismatch" in new.sent[0]["text"]
-    assert "`DISCREPANCY`" in new.sent[0]["text"]
-    assert "`ID 9003`" in new.sent[1]["text"] and "`INVALID_DOCUMENT`" in new.sent[1]["text"]
+    assert set(new.memory) == {f"{sid}|{STUDENTS[sid]['doc']}" for sid in ("9001", "9002", "9003")}
+    # Both alerts in one message (newest upload first), each student with the HNG id and uid.
+    assert [m["chat_id"] for m in new.sent] == [ADMIN_ID]
+    text = new.sent[0]["text"]
+    assert text.startswith("🚨 *Automated Document Audit: 2 alerts*")
+    assert text.index("`ID 9003`") < text.index("`ID 9002`")
+    assert "`HNG-2026-9002`, `ID 9002`" in text and "DOB mismatch" in text and "`DISCREPANCY`" in text
+    assert "`HNG-2026-9003`, `ID 9003`" in text and "`INVALID_DOCUMENT`" in text
     assert all(m["parse_mode"] == "Markdown" for m in new.sent)
     assert {method for method, _ in new.requests} == {"GET"}      # read-only portal
     assert all(url.startswith(BASE) for _, url in new.requests)
@@ -443,8 +459,10 @@ def test_watcher_sends_the_same_alerts_without_freezing_the_loop(env, monkeypatc
     assert new.alerted == old.alerted              # same cache
     assert new.requests == old.requests            # same portal GETs, same order
 
-    # Next cycle: the cache still stops repeat alerts; only the clean student is re-audited.
+    # Next cycle: the memory stops repeat alerts, and no unchanged scan is audited again.
     again = run_watcher(env)
     assert again.sent == []
     assert again.alerted == {"9002", "9003"}
+    assert again.ocr_calls == 0
+    assert again.requests == [("GET", f"{BASE}/students.php")]
     assert max(again.gaps) < MAX_GAP_S

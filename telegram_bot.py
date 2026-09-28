@@ -1924,8 +1924,10 @@ async def stage_program_button(update: Update, context: ContextTypes.DEFAULT_TYP
         intakes = json.loads(out) if out else None
     except ValueError:
         intakes = None
-    if intakes is None:
-        await query.message.reply_text(f"❌ Could not load {label} intakes right now. Please try again in a minute.")
+    if isinstance(intakes, dict) or intakes is None:
+        why = intakes.get("error") if isinstance(intakes, dict) else None
+        await query.message.reply_text((f"❌ Couldn't read the portal: {why}.\n" if why else "❌ ")
+                                       + f"Could not load {label} intakes right now. Please try again in a minute.")
         return
     if not intakes:
         await query.message.reply_text(f"{label}: no students on the portal.")
