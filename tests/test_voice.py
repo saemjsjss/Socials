@@ -25,7 +25,7 @@ if str(BOT_ROOT) not in sys.path:
     sys.path.insert(0, str(BOT_ROOT))
 
 from src.config import settings  # noqa: E402
-from src.bot import scheduler, telegram_bot, voice  # noqa: E402
+from src.bot import brief, scheduler, telegram_bot, voice  # noqa: E402
 from src.llm.ollama_client import OllamaClient, ollama_client  # noqa: E402
 from src.scraper.client import admin_client  # noqa: E402
 
@@ -599,20 +599,17 @@ def test_voice_url_must_stay_on_this_pc(monkeypatch):
 
 # --------------------------------------------------------------------------- the daily brief
 
+BRIEF_FACTS = ["Consultation requests received today: 5", "Consultations done today: 3",
+               "Marked Consulted today: 3", "Marked File Opened today: 0"]
+
+
 def _brief_setup(monkeypatch):
-    async def get_dashboard():
-        return {"summary": {}}
+    async def compose_brief(day=None, with_summary=True):
+        return brief.Brief("📋 *HANGEUL DAILY BRIEF* — 28 September 2026, 18:05 (Asia/Dhaka)\n\n"
+                           "*1) CONSULTATIONS TODAY*\n• Received: 5  |  Done: 3 (3 consulted, 0 file opened)",
+                           BRIEF_FACTS)
 
-    async def empty_list(*args, **kwargs):
-        return []
-
-    async def report(**kwargs):
-        return "📋 *HANGEUL DAILY OPERATIONAL BRIEF*\n• *Total Inquiries Received:* `5`\n• *Done:* `3` (60.0%)"
-
-    monkeypatch.setattr(admin_client, "get_dashboard", get_dashboard)
-    monkeypatch.setattr(admin_client, "get_applications", empty_list)
-    monkeypatch.setattr(admin_client, "get_inquiries", empty_list)
-    monkeypatch.setattr(ollama_client, "generate_executive_report", report)
+    monkeypatch.setattr(scheduler, "compose_brief", compose_brief)
     bot = FakeBot()
     return SimpleNamespace(bot=bot), bot
 
@@ -620,8 +617,11 @@ def _brief_setup(monkeypatch):
 def test_spoken_brief_follows_the_text_brief(service, llm, monkeypatch):
     app, bot = _brief_setup(monkeypatch)
     asyncio.run(scheduler.send_daily_briefing(app))
-    assert len(bot.messages) == 1 and "DAILY OPERATIONAL BRIEF" in bot.messages[0]["text"]
-    assert llm.kinds() == ["brief"] and "Total Inquiries Received: 5" in llm.calls[0]["user"]
+    assert len(bot.messages) == 1 and "DAILY BRIEF" in bot.messages[0]["text"]
+    assert bot.messages[0]["parse_mode"] == "Markdown"
+    assert llm.kinds() == ["brief"] and "\n".join(BRIEF_FACTS) in llm.calls[0]["user"]
+    assert "*" not in llm.calls[0]["user"]                      # Jennie reads the plain facts
+    assert "18:05" not in llm.calls[0]["user"] and "DAILY BRIEF" not in llm.calls[0]["user"]
     assert service.tts_payloads == [{"text": "Good evening! We had five inquiries today and three are done.",
                                      "language": "en", "style": "aegyo"}]
     assert len(service.tts_payloads[0]["text"]) <= voice.BRIEF_MAX_CHARS

@@ -151,7 +151,7 @@ def parse_user_report_intent(text: str) -> tuple[bool, str, str]:
     return False, '', ''
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /report [date] command to produce an executive briefing."""
+    """Handle /report [date]: the factual brief (src/bot/brief.py) for that date, as a reply."""
     chat_id = update.effective_chat.id
     if not is_authorized(update):
         logger.warning(f"Unauthorized /report attempt from chat_id: {chat_id}")
@@ -171,22 +171,10 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_msg = await update.message.reply_text(f"⏳ _Gathering live portal records for {display_date}..._", parse_mode="Markdown")
     try:
-        dashboard = await admin_client.get_dashboard()
-        applications = await admin_client.get_applications()
-        inquiries = await admin_client.get_consultation_requests(target_date=portal_date)
-
-        report_text = await ollama_client.generate_executive_report(
-            dashboard_data=dashboard,
-            applications=applications,
-            inquiries=inquiries,
-            target_date=display_date
-        )
-
-        try:
-            await update.message.reply_text(report_text, parse_mode="Markdown")
-        except Exception as parse_err:
-            logger.warning(f"Markdown send failed ({parse_err}), falling back to plain text")
-            await update.message.reply_text(report_text)
+        from datetime import datetime
+        from src.bot.brief import compose_daily_brief, send_brief_text
+        report_text = await compose_daily_brief(day=datetime.strptime(portal_date, "%d %b %Y").date())
+        await send_brief_text(lambda text, mode: update.message.reply_text(text, parse_mode=mode), report_text)
 
         try:
             await status_msg.delete()
@@ -199,14 +187,14 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Failed to compile report: `{e}`")
 
 async def brief_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /brief — run the full 6:05 PM daily operational brief on demand."""
+    """Handle /brief — run the 6:05 PM factual daily brief on demand."""
     chat_id = update.effective_chat.id
     if not is_authorized(update):
         await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{chat_id}`", parse_mode="Markdown")
         return
 
     status_msg = await update.message.reply_text(
-        "⏳ _Compiling today's operational brief (live passport cross-check may take a moment)..._",
+        "⏳ _Reading today's figures from the live portal (this usually takes 10 to 30 seconds)..._",
         parse_mode="Markdown"
     )
     try:
@@ -222,30 +210,63 @@ async def brief_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error generating on-demand brief: {e}")
         await update.message.reply_text(f"❌ Failed to compile brief: `{e}`")
 
+def _fig(value) -> str:
+    """A figure for a report: "not available" when the portal did not give it (None)."""
+    return "not available" if value is None else str(value)
+
+
+def format_stats_report(dash: dict) -> str:
+    """/stats: the portal dashboard's own tiles, grouped as the portal groups them, with the
+    portal's own labels. A figure that could not be read says "not available", never 0."""
+    from src.bot.brief import esc
+    lines = ["📊 *Hangeul Admin Quick Stats*", ""]
+    tiles = (dash or {}).get("tiles")
+    if tiles:
+        groups = {}
+        for t in tiles:
+            groups.setdefault(t.get("group") or "Dashboard", []).append(t)
+        for group, items in groups.items():
+            lines.append(f"*{esc(group)}*")
+            lines += [f"• {esc(t['label'])}: `{_fig(t.get('text') or None)}`" for t in items]
+            lines.append("")
+        lines.append("_Pending payment and Under review are separate figures._")
+        return "\n".join(lines).strip()
+    summary = (dash or {}).get("summary") or {}
+    if tiles is not None or not summary:
+        # The live portal answered, but its dashboard figures could not be read.
+        return "\n".join(lines + ["• Dashboard figures: not available (the portal dashboard could not be read)."])
+    # Mock mode (src/scraper/mock_data.py) has a summary but no tiles.
+    degrees = summary.get("degree_programs") or {}
+    intake = summary.get("intake_pipeline") or {}
+    lines += [
+        f"• *Total Applicants:* `{_fig(summary.get('total_applicants'))}`",
+        f"• *Active Pipeline:* `{_fig(summary.get('active_applications'))}`",
+        f"• *Visas Approved YTD:* `{_fig(summary.get('visa_approved_ytd'))}`",
+        f"• *Pending Document Verification:* `{_fig(summary.get('pending_document_verification'))}`",
+        f"• *Monthly Inquiries:* `{_fig(summary.get('monthly_new_inquiries'))}`",
+        "",
+        "🎓 *Program Breakdown:*",
+        f"• KLP Language: `{_fig(summary.get('klp_language_students'))}`",
+        f"• Bachelor's: `{_fig(degrees.get('bachelors'))}` | Master's: `{_fig(degrees.get('masters'))}` | "
+        f"PhD: `{_fig(degrees.get('phd'))}`",
+        "",
+        "📅 *Intake Pipeline:*",
+    ]
+    lines += [f"• {k}: `{v}` students" for k, v in intake.items()]
+    return "\n".join(lines).strip()
+
+
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /stats command."""
     if not is_authorized(update):
         return
 
     dash = await admin_client.get_dashboard()
-    summary = dash.get("summary", {})
-    degrees = summary.get("degree_programs", {})
-    intake = summary.get("intake_pipeline", {})
-
-    msg = (
-        "📊 *Hangeul Admin Quick Stats*\n\n"
-        f"• *Total Applicants:* `{summary.get('total_applicants', 0)}`\n"
-        f"• *Active Pipeline:* `{summary.get('active_applications', 0)}`\n"
-        f"• *Visas Approved YTD:* `{summary.get('visa_approved_ytd', 0)}`\n"
-        f"• *Pending Document Verification:* `{summary.get('pending_document_verification', 0)}`\n"
-        f"• *Monthly Inquiries:* `{summary.get('monthly_new_inquiries', 0)}`\n\n"
-        "🎓 *Program Breakdown:*\n"
-        f"• KLP Language: `{summary.get('klp_language_students', 0)}`\n"
-        f"• Bachelor's: `{degrees.get('bachelors', 0)}` | Master's: `{degrees.get('masters', 0)}` | PhD: `{degrees.get('phd', 0)}`\n\n"
-        "📅 *Intake Pipeline:*\n"
-        + "\n".join([f"• {k}: `{v}` students" for k, v in intake.items()])
-    )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    msg = format_stats_report(dash)
+    try:
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except BadRequest:
+        await update.message.reply_text(msg.replace("*", "").replace("`", "").replace("_", ""))
 
 async def students_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /students command."""
@@ -639,16 +660,17 @@ def format_verified_students_report(verified_list: list, display_date: str) -> s
     ]
     
     for idx, s in enumerate(verified_list, 1):
-        name = s.get("name", "Student")
-        prog = s.get("program", "N/A")
-        method = s.get("method") or s.get("amount", "")
-        counselor = s.get("verified_by", "Admin")
+        # Only what the portal row shows: a missing field is "—", never a made-up value.
+        name = s.get("name") or "—"
+        prog = s.get("program") or "—"
+        payment = " ".join(x for x in (s.get("amount"), s.get("method")) if x) or "—"
+        counselor = s.get("verified_by") or "—"
         time_str = s.get("verified_time", "")
-        
+
         lines.append(f"*{idx}. {name}*")
         lines.append(f"   ├ 🎓 *Program:* {prog}")
-        lines.append(f"   ├ 💰 *Payment:* `{method}`")
-        lines.append(f"   └ 👤 *Verified by:* {counselor} ({time_str})")
+        lines.append(f"   ├ 💰 *Payment:* `{payment}`")
+        lines.append(f"   └ 👤 *Verified by:* {counselor}" + (f" ({time_str})" if time_str else ""))
         lines.append("")
         
     return "\n".join(lines).strip()
@@ -740,6 +762,12 @@ def format_calendar_report(cal_data: dict, filter_query: Optional[str] = None) -
     clean_q = re.sub(r'/(?:calendar|events|deadlines)\b', '', q, flags=re.IGNORECASE)
     clean_q = re.sub(r'\b(?:calendar|events?|deadlines?|what|is|on|for|show|give|me|the|details?|please|in|about)\b', '', clean_q, flags=re.IGNORECASE).strip()
 
+    # A calendar that could not be read (a timeout's error text can be empty: "error" in, not its
+    # truth) or whose layout was not recognised is "not available", never "0 reminders" or "no match".
+    if "error" in cal_data or ("layout_ok" in cal_data and not cal_data["layout_ok"]):
+        return ("📅 *Hangeul Admin Calendar & Deadlines*\n\n"
+                "ℹ️ Today's reminders are not available right now (the calendar page could not be read).")
+
     if clean_q and clean_q not in ["today", "all", "now"]:
         matched_today = [r for r in today_reminders if clean_q in r.get("title", "").lower() or clean_q in r.get("program", "").lower() or clean_q in r.get("date_range", "").lower()]
         matched_upcoming = [u for u in upcoming_events if clean_q in u.get("title", "").lower() or clean_q in u.get("program", "").lower() or clean_q in u.get("date_range", "").lower() or clean_q in u.get("date", "").lower() or clean_q in u.get("university", "").lower()]
@@ -774,18 +802,25 @@ def format_calendar_report(cal_data: dict, filter_query: Optional[str] = None) -
     # Default / Today View
     lines = [
         "📅 *Hangeul Admin Calendar & Deadlines*\n",
-        f"⚡ *Active Today ({len(today_reminders)} items):*"
+        f"⚡ *Reminders for today ({len(today_reminders)} items):*"
     ]
     for idx, r in enumerate(today_reminders, 1):
         prog = f" ({r['program']})" if r.get("program") else ""
-        left = f" — *{r['progress']}*" if r.get("progress") else ""
+        kind = f"{r['type']} · " if r.get("type") else ""
+        days = r.get("days_left")
+        left = f" — *{days} day{'' if days == 1 else 's'} left*" if days is not None else ""
         lines.append(f"{idx}. *{r['title']}*{prog}")
-        lines.append(f"   └ 🗓️ `{r['date_range']}`{left}")
+        lines.append(f"   └ 🗓️ {kind}`{r.get('date_range') or '—'}`{left}")
+    skipped = cal_data.get("skipped_untitled") or 0
+    if skipped:
+        lines.append(f"_({skipped} {'entry' if skipped == 1 else 'entries'} without a title "
+                     f"{'was' if skipped == 1 else 'were'} skipped)_")
 
-    lines.append("\n📌 *Upcoming University Application Openings:*")
+    lines.append("\n📌 *Upcoming:*")
     for idx, u in enumerate(upcoming_events[:6], 1):
         prog = f" ({u['program']})" if u.get("program") else ""
-        lines.append(f"• *{u['date']}:* {u['title']}{prog} (`{u['date_range']}`)")
+        status = f" — {u['status']}" if u.get("status") else ""
+        lines.append(f"• *{u['date']}:* {u['title']}{prog} (`{u.get('date_range') or '—'}`){status}")
 
     lines.append("\n💡 _Tip: Search any university or date, e.g. `/calendar Hanyang` or `/calendar 11 Sep`_")
     return "\n".join(lines).strip()
@@ -1723,7 +1758,8 @@ async def handle_natural_language_message(update: Update, context: ContextTypes.
         inquiries = await admin_client.get_inquiries()
 
         context_data = {
-            "dashboard": dashboard,
+            # The tile list repeats live_stats with links: left out of the small LLM context.
+            "dashboard": {k: v for k, v in dashboard.items() if k != "tiles"},
             "sample_applications": applications[:5],
             "inquiries": inquiries,
             "sample_inquiries": inquiries

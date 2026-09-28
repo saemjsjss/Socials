@@ -87,7 +87,7 @@ async def run_tests():
     health = await ollama_client.check_health()
     console.print(f"  ✔ Ollama check: reachable={health['reachable']}")
 
-    report = await ollama_client.generate_executive_report(dash_res, apps, inqs)
+    report = ollama_client._generate_structured_report_fallback(dash_res, apps, inqs)
     assert "Executive" in report or "HANGEUL" in report
     console.print("  ✔ Executive Briefing Generation verified (Sample preview below):")
     for line in report.split("\n")[:6]:

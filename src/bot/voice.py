@@ -35,7 +35,7 @@ import warnings
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -689,7 +689,8 @@ _REPLY_SYSTEM_KO = (
 
 _BRIEF_SYSTEM_EN = (
     "You are Jennie, the cute and cheerful voice of the office bot of Hangeul Korean Language & Visa "
-    "in Dhaka. Turn today's written operational brief into Jennie's short spoken evening update.\n"
+    "in Dhaka. Turn today's facts from the written operational brief into Jennie's short spoken "
+    "evening update. Say each number with the words of its own fact.\n"
     + _CUTE_EN +
     "Rules:\n"
     "- English only, one or two short sentences, at most <LIMIT> characters in total: a cute greeting "
@@ -825,10 +826,12 @@ def _facts_ok(said: str, *sources: str) -> bool:
     return said_numbers <= allowed
 
 
-async def _say(system: str, prompt: str, language: str, limit: int, *sources: str) -> str:
+async def _say(system: str, prompt: str, language: str, limit: int, *sources: str,
+               check: Optional[Callable[[str], bool]] = None) -> str:
     """One brain call for words to speak; once more, told which numbers there are, if they quote a
-    number the sources do not have. Small talk (no written answer) is checked too: its numbers must
-    come from the question, so a data question the router took for chat gets no invented figures.
+    number the sources do not have (or fail `check`, a stricter test of the words said). Small talk
+    (no written answer) is checked too: its numbers must come from the question, so a data question
+    the router took for chat gets no invented figures.
     Words over `limit` are asked for once more, shorter: cut to fit, a Korean sentence would lose its
     end, where the number is ("...학생은 모두 스물다섯 명이에용"). "" when the brain is down or kept
     getting the facts wrong."""
@@ -838,7 +841,7 @@ async def _say(system: str, prompt: str, language: str, limit: int, *sources: st
         if not raw:
             return ""
         spoken = _clean_reply(raw, language, limit)
-        facts_ok = _facts_ok(_plain(raw), *sources)
+        facts_ok = _facts_ok(_plain(raw), *sources) and (check is None or check(_plain(raw)))
         too_long = len(_clean_reply(raw, language, TTS_MAX_CHARS)) > limit
         if spoken and facts_ok and (not too_long or attempt):
             return spoken
@@ -869,12 +872,27 @@ async def spoken_reply(question: str, language: str, answer: str = "", turns=())
             or _FALLBACK[(language, bool(written))])
 
 
+# Jennie's cheerful words in the spoken brief, besides the facts' own words (brief.claims_problem
+# allows no other word, so an invented name or status falls back to _BRIEF_FALLBACK).
+_BRIEF_CHEER_WORDS = """ta da tada yay yey yippee hooray hurray woohoo wow hehe hehehe hihi okie okey okay ok
+ookie dokie oki aww awww yes good great evening night hello hi hey jennie boss everyone team sweet lovely
+nice happy super fighting cheer cheers busy bye see tomorrow rest well thank thanks you your here update
+brief chat check keep going amazing awesome wonderful fantastic little bit big let lets""".split()
+
+
 async def spoken_brief(brief_text: str) -> str:
-    """Jennie's short, cute English evening update about the written daily brief."""
+    """Jennie's short, cute English evening update from the daily brief's facts (brief.compose_brief:
+    one checked figure a line; never the whole brief, whose dates, times and tile figures would let
+    an invented figure through). Every figure she says must be the figure of the fact her words
+    describe, with no off-topic subject, name or status the facts do not have
+    (brief.claims_problem); else, after one more try, she says _BRIEF_FALLBACK."""
+    from src.bot.brief import claims_problem
     system = _BRIEF_SYSTEM_EN.replace("<LIMIT>", str(BRIEF_MAX_CHARS - 20))
     written = _plain(brief_text)[:ANSWER_MAX_CHARS]
-    prompt = f"Today's written operational brief:\n{written}\n\nJennie says:"
-    return await _say(system, prompt, "en", BRIEF_MAX_CHARS, written) or _BRIEF_FALLBACK
+    facts = written.splitlines()
+    prompt = f"Today's facts from the written operational brief:\n{written}\n\nJennie says:"
+    return await _say(system, prompt, "en", BRIEF_MAX_CHARS, written,
+                      check=lambda said: claims_problem(said, facts, _BRIEF_CHEER_WORDS) is None) or _BRIEF_FALLBACK
 
 
 # --------------------------------------------------------------------------- text for speech
@@ -1413,6 +1431,7 @@ async def _answer_voice(update: Update, context: ContextTypes.DEFAULT_TYPE, timi
 
 async def send_spoken_brief(bot, chat_id, brief_text: str) -> bool:
     """Speak a short, cute English summary of the daily brief to chat_id, after the text brief.
+    `brief_text` is the brief's facts, one a line (scheduler.send_daily_briefing).
     Never raises: False means the voice note was skipped (the reason is logged)."""
     try:
         speech = await spoken_brief(brief_text)

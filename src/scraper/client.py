@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import Optional, Dict, Any, List
 import httpx
 from bs4 import BeautifulSoup
@@ -12,13 +13,29 @@ from src.scraper.parsers import (
     parse_hangeul_live_dashboard,
     parse_hangeul_live_students,
     parse_consultation_requests,
-    parse_verified_students,
+    consultation_table,
+    scan_verified_students,
+    parse_pending_payments,
+    parse_window_applications,
+    count_under_review,
     parse_calendar_events
 )
 from src.scraper.ocr_validator import validate_passport_data, AUDIT_REGISTRY
 from src.scraper.mock_data import MOCK_DASHBOARD_STATS, MOCK_APPLICATIONS, MOCK_INQUIRIES
 
 logger = logging.getLogger("hangeul.client")
+
+# students.php lists 50 students a page; a cap so a misread "Page 1 of N" can never loop for long.
+STUDENTS_PER_PAGE = 50
+MAX_STUDENT_PAGES = 40
+# A portal page read may take its time downloading (consult_requests.php is ~2 MB), but a host
+# that does not even take the connection is given up on quickly.
+CONNECT_TIMEOUT = 10.0
+
+
+def _error_text(e: Exception) -> str:
+    """An exception as text that is never empty (str(httpx.ReadTimeout('')) is '')."""
+    return str(e) or type(e).__name__
 
 class HangeulAdminClient:
     """HTTP Client for Hangeul Admin with session persistence, CSRF handling & mock support."""
@@ -137,8 +154,8 @@ class HangeulAdminClient:
                 
             return parse_hangeul_live_dashboard(resp.text)
         except Exception as e:
-            logger.error(f"Failed to fetch dashboard: {e}")
-            return {"error": str(e)}
+            logger.error(f"Failed to fetch dashboard: {_error_text(e)}")
+            return {"error": _error_text(e)}
 
     async def get_applications(self, status: Optional[str] = None, intake: Optional[str] = None) -> List[Dict[str, Any]]:
         """Retrieve student applications and visa statuses."""
@@ -223,23 +240,91 @@ class HangeulAdminClient:
             
         return await self.get_consultation_requests(target_date="today")
 
-    async def get_verified_students(self, target_date: Optional[str] = "today") -> List[Dict[str, Any]]:
-        """Retrieve students whose payment was verified on target_date."""
+    async def fetch_html(self, path: str, timeout: float = 60.0) -> str:
+        """One read-only GET of a portal page, logging in again if the session expired -> its HTML.
+        Raises when the page cannot be fetched, so a caller can say "not available" instead of 0."""
         if not self.is_authenticated:
             await self.login()
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        limits = httpx.Timeout(timeout, connect=min(timeout, CONNECT_TIMEOUT))
+        resp = await self.client.get(url, timeout=limits)
+        if "login.php" in str(resp.url):
+            self.is_authenticated = False
+            await self.login()
+            resp = await self.client.get(url, timeout=limits)
+        if "login.php" in str(resp.url):
+            raise RuntimeError(f"{path}: the portal sent the login page")
+        resp.raise_for_status()
+        return resp.text
 
-        url = f"{self.base_url}/students.php"
+    async def read_consultations(self) -> Optional[List[Dict[str, Any]]]:
+        """Every row of consult_requests.php, read by column name. None when the page has no table,
+        or a table with rows in a layout the parser does not recognise; [] when it is empty.
+        All the parsing (the page is ~2 MB) runs in a worker thread."""
+        html = await self.fetch_html("consult_requests.php")
+        return await asyncio.to_thread(consultation_table, html)
+
+    async def read_verified_students(self, target_date: Optional[str] = "today",
+                                     all_pages: bool = True) -> List[Dict[str, Any]]:
+        """Students whose payment was verified on target_date, from students.php: every page
+        ("Page 1 of N", ?pg=N) when all_pages, since a student registered weeks ago and verified
+        today sits on a later page; else the first page only. Parsing runs in a worker thread
+        (a page is ~1 MB). Raises when a page cannot be read, and when the list cannot be read
+        whole or its layout is not recognised, so a caller says "not available" instead of 0:
+        a full first page with no "Page 1 of N" (the later pages could not be found), or student
+        rows with no "Payment verified by" line on any page (the line's wording changed)."""
+        found, seen = [], set()
+        page, pages = 1, 1
+        students = markers = 0
+        while page <= pages:
+            html = await self.fetch_html("students.php" + (f"?pg={page}" if page > 1 else ""))
+            if page == 1 and "<table" not in html:
+                raise RuntimeError("students.php has no student table")
+            scan = await asyncio.to_thread(scan_verified_students, html, target_date)
+            if all_pages:
+                m = re.search(r"Page \d+ of (\d+)", html)
+                if m:
+                    pages = min(int(m.group(1)), MAX_STUDENT_PAGES)
+                elif page == 1 and scan["students"] >= STUDENTS_PER_PAGE:
+                    raise RuntimeError(f"students.php shows {scan['students']} students but no "
+                                       "'Page 1 of N', so its later pages cannot be found")
+            students += scan["students"]
+            markers += scan["markers"]
+            for s in scan["verified"]:
+                key = s.get("uid") or (s.get("name"), s.get("verified_time"), s.get("amount"))
+                if key not in seen:     # a row can shift onto the next page while we read
+                    seen.add(key)
+                    found.append(s)
+            page += 1
+        if students and not markers:
+            raise RuntimeError(f"students.php: {students} student rows but no 'Payment verified by' "
+                               "line on any of them (layout not recognised)")
+        return found
+
+    async def get_verified_students(self, target_date: Optional[str] = "today") -> List[Dict[str, Any]]:
+        """Retrieve students whose payment was verified on target_date (first page of students.php)."""
         try:
-            resp = await self.client.get(url)
-            if "login.php" in str(resp.url):
-                self.is_authenticated = False
-                await self.login()
-                resp = await self.client.get(url)
-
-            return parse_verified_students(resp.text, target_date=target_date)
+            return await self.read_verified_students(target_date, all_pages=False)
         except Exception as e:
             logger.error(f"Error fetching verified students: {e}")
             return []
+
+    async def read_pending_payments(self) -> Optional[Dict[str, Any]]:
+        """Pending payments from students.php?status=pending ({"count", "listed", "badge"}), or None
+        when the page cannot be read. Kept apart from window applications under review."""
+        if self.mock_mode:
+            return None
+        html = await self.fetch_html("students.php?status=pending")
+        return await asyncio.to_thread(parse_pending_payments, html)
+
+    async def read_window_apps_under_review(self) -> Optional[int]:
+        """How many window applications are under review (window_applications.php?status=under_review,
+        counted by each row's own status), or None when the page's table is not recognised."""
+        if self.mock_mode:
+            return None
+        html = await self.fetch_html("window_applications.php?status=under_review")
+        rows = await asyncio.to_thread(parse_window_applications, html)
+        return None if rows is None else count_under_review(rows)
 
     async def get_calendar_events(self) -> Dict[str, Any]:
         """Retrieve calendar events, university application windows, and reminders from calendar.php."""
@@ -259,8 +344,9 @@ class HangeulAdminClient:
 
             return parse_calendar_events(resp.text)
         except Exception as e:
-            logger.error(f"Error fetching calendar events: {e}")
-            return {"today_reminders": [], "upcoming_events": []}
+            # Never an empty error: a timeout's text is '', which read as "no error, 0 reminders".
+            logger.error(f"Error fetching calendar events: {_error_text(e)}")
+            return {"today_reminders": [], "upcoming_events": [], "error": _error_text(e), "layout_ok": False}
 
     async def get_student_full_profile(self, student_id: str, force_live: bool = True) -> Dict[str, Any]:
         """Retrieve student profile details (Father, Mother, Address, DOB, etc.) via read-only GET."""

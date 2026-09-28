@@ -4,9 +4,14 @@ from typing import Optional, Dict, Any, List
 import httpx
 
 from src.config import settings
-from src.llm.prompts import SYSTEM_EXECUTIVE_REPORT, SYSTEM_AGENT_CHAT, build_report_prompt
+from src.llm.prompts import SYSTEM_AGENT_CHAT
 
 logger = logging.getLogger("hangeul.llm")
+
+
+def _fig(value) -> str:
+    """A portal figure for a fallback answer: "not available" when the portal did not give it."""
+    return "not available" if value is None else str(value)
 
 # The model stays in VRAM for good ("Jennie's brain"): no call ever unloads it, so no question,
 # typed or spoken, waits for it to load again.
@@ -176,16 +181,9 @@ class OllamaClient:
         except Exception as e:
             logger.warning(f"Ollama unload failed: {type(e).__name__}: {e}")
 
-    async def generate_executive_report(self, dashboard_data: dict, applications: list, inquiries: list, target_date: str = "today") -> str:
-        """Generate a complete executive briefing using Ollama with fallbacks."""
-        prompt = build_report_prompt(dashboard_data, applications, inquiries)
-        
-        health = await self.check_health()
-        if health.get("reachable") and health.get("target_model_ready"):
-            return await self.generate_response(prompt=prompt, system=SYSTEM_EXECUTIVE_REPORT)
-            
-        # High quality fallback format when Ollama is offline/starting
-        return self._generate_structured_report_fallback(dashboard_data, applications, inquiries, target_date=target_date)
+    # The daily brief is no longer written by the LLM (it invented passport numbers, visa counts
+    # and rates): src/bot/brief.py builds it from the portal in code and asks the LLM only for
+    # one checked summary sentence, through chat().
 
     async def answer_agent_query(self, query: str, context: dict) -> str:
         """Answer a natural language question using Ollama."""
@@ -259,9 +257,10 @@ class OllamaClient:
             p = r.get("program") or "General"
             prog_counts[p] = prog_counts.get(p, 0) + 1
 
-        summary = dashboard.get("summary", {})
-        total_students = summary.get("total_applicants", 262)
-        active_apps = summary.get("active_applications", 3)
+        # Only the portal's own figures (None when it did not give one): never a stand-in number.
+        summary = (dashboard or {}).get("summary") or {}
+        total_students = _fig(summary.get("total_applicants"))
+        window_review = _fig(summary.get("window_apps_under_review"))
 
         if total_came == 0:
             return (
@@ -269,7 +268,7 @@ class OllamaClient:
                 f"*Date:* {formatted_date} (Asia/Dhaka)\n\n"
                 f"ℹ️ *No consultation inquiries were found on this date ({formatted_date}).*\n\n"
                 f"• *Total Students in System:* `{total_students}`\n"
-                f"• *Active Review Queue:* `{active_apps}`\n"
+                f"• *University Window Apps Under Review:* `{window_review}`\n"
             )
 
         report = (
@@ -301,9 +300,8 @@ class OllamaClient:
                 time_str = f" [{rec}]" if rec else ""
                 report += f"  {i}. *{name}* ({prog}){time_str} ➔ `{c_name}`\n"
 
-        verified_students = summary.get("verified_students", 262)
-        pending_payment = summary.get("pending_payment", 0)
-        window_review = summary.get("window_apps_under_review", 2)
+        verified_students = _fig(summary.get("verified_students"))
+        pending_payment = _fig(summary.get("pending_payment"))
 
         report += (
             "\n🏛️ *PORTAL ENROLLMENT SNAPSHOT*\n"
@@ -316,7 +314,7 @@ class OllamaClient:
 
 
     def _answer_query_fallback(self, query: str, context: dict) -> str:
-        summary = context.get("dashboard", {}).get("summary", {})
+        summary = (context.get("dashboard") or {}).get("summary") or {}
         q_lower = query.lower()
         
         if any(w in q_lower for w in ["report", "brief", "summary", "today", "consultation", "came", "done", "high-level", "overview"]):
@@ -329,17 +327,19 @@ class OllamaClient:
         elif "applicant" in q_lower or "student" in q_lower or "total" in q_lower:
             return (
                 f"📋 *Applicant Statistics*\n"
-                f"• *Total Applicants on Record:* {summary.get('total_applicants', '262')}\n"
-                f"• *Currently Active Applications:* {summary.get('active_applications', '3')}\n"
-                f"• *Verified Students:* {summary.get('verified_students', '261')}\n"
-                f"• *Pending Document Verification:* {summary.get('pending_document_verification', '21')}"
+                f"• *Total Applicants on Record:* {_fig(summary.get('total_applicants'))}\n"
+                f"• *Window Applications Under Review:* {_fig(summary.get('window_apps_under_review'))}\n"
+                f"• *Verified Students:* {_fig(summary.get('verified_students'))}\n"
+                f"• *Pending Document Verification:* {_fig(summary.get('pending_document_verification'))}"
             )
         elif "visa" in q_lower or "approved" in q_lower:
+            # The portal dashboard has no visa figure; "Accepted" is accepted window applications.
             return (
                 f"🛂 *Visa Status Update*\n"
-                f"• *Visas Approved YTD:* {summary.get('visa_approved_ytd', '2')}\n"
-                f"• *Pending Document Review:* {summary.get('pending_document_verification', '21')}\n"
-                f"• *Total Applicants:* {summary.get('total_applicants', '262')}"
+                f"• *Visas Approved YTD:* {_fig(summary.get('visa_approved_ytd'))}\n"
+                f"• *Accepted Window Applications:* {_fig(summary.get('window_apps_accepted'))}\n"
+                f"• *Pending Document Review:* {_fig(summary.get('pending_document_verification'))}\n"
+                f"• *Total Applicants:* {_fig(summary.get('total_applicants'))}"
             )
         elif "alert" in q_lower or "urgent" in q_lower:
             alerts = context.get("dashboard", {}).get("urgent_alerts", [])

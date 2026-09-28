@@ -22,7 +22,7 @@ from test_voice import (  # noqa: F401  (fixtures are used by name)
     verified_today, voice_update,
 )
 from src.config import settings
-from src.bot import scheduler, telegram_bot, voice
+from src.bot import brief, scheduler, telegram_bot, voice
 from src.llm.ollama_client import KEEP_ALIVE, OllamaClient, ollama_client
 
 
@@ -697,7 +697,7 @@ def test_every_ollama_call_sends_one_num_ctx_and_keeps_the_model_resident(monkey
 
     async def everything():
         await client.generate_response("typed question", system="agent")          # typed path
-        await ollama_client.generate_executive_report({"summary": {}}, [], [])     # 18:05 brief
+        await brief.llm_summary(["Consultation requests received today: 2"])     # 18:05 brief summary
         await ollama_client.answer_agent_query("how are we doing?", {"dashboard": {}})
         await telegram_bot._ai_write_email("remind about passport", {"name": "A"}, "Passport")
         await voice.route("오늘 검증된 학생 몇 명이야?")                            # voice routing

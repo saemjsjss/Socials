@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from src.config import BOT_ROOT, settings
 from src.scraper.client import admin_client
 from src.llm.ollama_client import ollama_client
+from src.bot.brief import compose_brief, compose_daily_brief, _send_brief  # noqa: F401 (/brief imports them from here)
 from bs4 import BeautifulSoup
 import re
 import json
@@ -105,7 +106,8 @@ async def check_new_passport_uploads(bot_application):
         logger.error(f"Error in check_new_passport_uploads: {e}")
 
 async def send_daily_briefing(bot_application):
-    """Compile and push daily executive summary to Telegram."""
+    """Compose the factual daily brief (src/bot/brief.py: live portal figures counted in code)
+    and push it to the admin chat, then Jennie's spoken version of it."""
     chat_id = settings.TELEGRAM_ADMIN_CHAT_ID
     if not chat_id:
         logger.warning("No TELEGRAM_ADMIN_CHAT_ID configured. Skipping scheduled report.")
@@ -113,21 +115,8 @@ async def send_daily_briefing(bot_application):
 
     logger.info(f"Generating scheduled briefing ({settings.REPORT_TIMEZONE}) for chat {chat_id}...")
     try:
-        dashboard = await admin_client.get_dashboard()
-        applications = await admin_client.get_applications()
-        inquiries = await admin_client.get_inquiries()
-
-        report_text = await ollama_client.generate_executive_report(
-            dashboard_data=dashboard,
-            applications=applications,
-            inquiries=inquiries
-        )
-
-        await bot_application.bot.send_message(
-            chat_id=chat_id,
-            text=report_text,
-            parse_mode="Markdown"
-        )
+        composed = await compose_brief()
+        await _send_brief(bot_application.bot, chat_id, composed.text)
         logger.info("Scheduled briefing dispatched successfully.")
     except Exception as e:
         logger.error(f"Failed to dispatch scheduled briefing: {e}")
@@ -135,10 +124,12 @@ async def send_daily_briefing(bot_application):
 
     # Jennie reads a short summary of it aloud. Only after the text brief went out, and
     # nothing here may ever touch the text brief: every failure just skips the voice note.
+    # She is given the brief's facts (one checked figure a line), not the whole text, whose
+    # dates, clock times and tile figures would let a number be said about the wrong thing.
     if settings.JENNIE_VOICE_ENABLED and settings.JENNIE_SPOKEN_BRIEF:
         try:
             from src.bot.voice import send_spoken_brief
-            await send_spoken_brief(bot_application.bot, chat_id, report_text)
+            await send_spoken_brief(bot_application.bot, chat_id, "\n".join(composed.facts))
         except Exception as e:
             logger.error(f"Spoken daily brief skipped (the text brief was sent): {e}")
 
@@ -263,12 +254,16 @@ def setup_scheduler(bot_application):
         hour, minute = 18, 5
 
     tz = ZoneInfo(settings.REPORT_TIMEZONE)
+    # A stalled moment at 18:05 must not drop the brief: APScheduler's default grace is 1 second.
     scheduler.add_job(
         send_daily_briefing,
         CronTrigger(hour=hour, minute=minute, timezone=tz),
         args=[bot_application],
         id="daily_executive_briefing",
-        replace_existing=True
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
     )
 
     # 2. Automated Passport Upload Watcher (Every 30 minutes)
