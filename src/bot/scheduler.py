@@ -1,5 +1,6 @@
 import logging
 import time
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -13,6 +14,7 @@ from src.scraper.client import admin_client, portal_error_reason
 from src.llm.ollama_client import ollama_client
 from src.bot.brief import compose_brief, compose_daily_brief, _send_brief  # noqa: F401 (/brief imports them from here)
 from src.bot.replies import CHUNK_CHARS, send_pieces, telegram_len
+from src.cloud import bot_jobs
 import re
 import json
 import os
@@ -166,6 +168,8 @@ async def check_new_passport_uploads(bot_application):
     except Exception as e:
         logger.error(f"Passport audit check skipped: couldn't read the portal: {portal_error_reason(e)}")
         return
+    listed_at = bot_jobs.now()                 # when the list was read (for the Supabase copy)
+    checked: List[Tuple[Dict[str, Any], str, Dict[str, Any], Dict[str, Any], Any]] = []
 
     try:
         cache = load_watcher_cache()
@@ -215,6 +219,7 @@ async def check_new_passport_uploads(bot_application):
             scans[key] = entry
             audited += 1
             save_watcher_cache(cache)          # after every audit: a restart loses none of them
+            checked.append((s, scan, dict(form), result, bot_jobs.now()))
 
         pending = sorted((k for k in current if scans.get(k, {}).get("alert") and not scans[k].get("sent")),
                          key=lambda k: -_upload_time(current[k][1]))
@@ -224,6 +229,10 @@ async def check_new_passport_uploads(bot_application):
         logger.info(f"Passport audit check: {len(current)} scans on the portal, {audited} audited this run "
                     f"({found} with issues), {failed} could not be checked, {waiting} waiting for the next run; "
                     f"{sent} alert(s) sent in {messages} message(s), {len(pending) - sent} not sent yet.")
+        # The Supabase copy, last: the list, this run's audits and the memory as saved. Built in a
+        # worker thread and handed to the publisher process; it never raises or delays the above.
+        await bot_jobs.hand_over("passport_watcher", bot_jobs.watcher_batches, students, listed_at,
+                                 checked, cache, failed)
     except Exception as e:
         logger.error(f"Error in check_new_passport_uploads: {e}")
 
@@ -254,6 +263,10 @@ async def send_daily_briefing(bot_application):
             await send_spoken_brief(bot_application.bot, chat_id, "\n".join(composed.facts))
         except Exception as e:
             logger.error(f"Spoken daily brief skipped (the text brief was sent): {e}")
+
+    # The Supabase copy, after everything was sent: the brief as sent, its sections and facts, and
+    # what its portal reads returned. Handed to the publisher process; it never raises or delays.
+    await bot_jobs.hand_over("daily_brief", bot_jobs.brief_batches, composed)
 
 async def warm_brain(attempts: int = 3, retry_after: float = 30.0) -> bool:
     """Load Jennie's brain (the local LLM, settings.OLLAMA_MODEL) into VRAM and keep it there, so
@@ -336,6 +349,34 @@ async def run_missing_report():
     """Daily missing-information report from the progress sheets (src/sheets/missing_report.py).
     It sends its own Telegram summary + Excel file."""
     await _run_module("src.sheets.missing_report", "Missing-information report")
+
+
+# The Supabase "full picture": once an hour, first FULL_PICTURE_FIRST_MINUTES after the start, so
+# it runs midway between the portal sync's 15-minute and the watcher's 30-minute beats.
+FULL_PICTURE_MINUTES = 60
+FULL_PICTURE_FIRST_MINUTES = 7.5
+
+
+async def run_full_picture():
+    """The full picture for Supabase (src/cloud/full_picture.py, its own CPU-only process): every
+    page of students.php and of students.php?status=pending, the consultation requests of today
+    and yesterday and the all-time counts, the window applications under review, index.php and
+    calendar.php, read (GET only) and published, so Jeannie is complete even on a day nobody
+    asks the bot anything. Nothing at all while publishing is off; skipped in (and just before)
+    the quiet windows of the scheduled jobs (18:00-18:10, 08:25-08:40, 09:00-09:10) and while a
+    portal sync runs (the process checks again when it starts). It sends nothing to Telegram."""
+    try:
+        if not bot_jobs.handoff.enabled():
+            return
+        from src.cloud.full_picture import skip_reason
+        reason = skip_reason()
+    except Exception as e:
+        logger.error(f"Full picture publish could not start: {type(e).__name__}: {e}")
+        return
+    if reason:
+        logger.info(f"Full picture publish skipped: {reason}.")
+        return
+    await _run_module("src.cloud.full_picture", "Full picture publish")
 
 
 async def _run_module(module: str, label: str):
@@ -446,7 +487,19 @@ def setup_scheduler(bot_application):
         coalesce=True,
     )
 
+    # 7. The full picture for Supabase, once an hour (a no-op while publishing is off)
+    scheduler.add_job(
+        run_full_picture,
+        IntervalTrigger(minutes=FULL_PICTURE_MINUTES,
+                        start_date=datetime.now(tz) + timedelta(minutes=FULL_PICTURE_FIRST_MINUTES)),
+        id="cloud_full_picture",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
     scheduler.start()
-    logger.info(f"Scheduler active: daily briefing set for {hour:02d}:{minute:02d} ({settings.REPORT_TIMEZONE}), passport watcher running every 30m, portal sync every 15m, missing-info report 09:05.")
+    logger.info(f"Scheduler active: daily briefing set for {hour:02d}:{minute:02d} ({settings.REPORT_TIMEZONE}), passport watcher running every 30m, portal sync every 15m, missing-info report 09:05"
+                + (", Supabase full picture every 60m." if bot_jobs.handoff.enabled() else "."))
     return scheduler
 
