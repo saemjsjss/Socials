@@ -234,9 +234,13 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     from src.bot.replies import reply_long
+    from src.cloud import command_hooks as cloud
+    reads: Dict[str, Any] = {}
     dash = await admin_client.get_dashboard()
+    cloud.seen(reads, dashboard=dash)
     msg = format_stats_report(dash)
     await reply_long(update.message, msg)          # split under the limit, plain text if Markdown fails
+    cloud.publish(reads)                           # after the reply, not awaited (src/cloud/command_hooks.py)
 
 async def students_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /students: the newest applications on students.php (its first page), each with the
@@ -246,12 +250,15 @@ async def students_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     from src.bot.brief import esc
     from src.bot.replies import portal_error_reply, reply_long
+    from src.cloud import command_hooks as cloud
+    reads: Dict[str, Any] = {}
     try:
         apps = await admin_client.get_applications()
     except Exception as e:
         logger.error(f"Error in students_command: {e}")
         await update.message.reply_text(portal_error_reply("The student list", e), parse_mode="Markdown")
         return
+    cloud.seen(reads, page=apps)                   # page 1 only: never a complete list
     if not apps:
         await update.message.reply_text("ℹ️ The student list on the portal is empty.")
         return
@@ -265,6 +272,7 @@ async def students_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      f"`{(stage or '—').replace('`', '')}`")
         lines.append("")
     await reply_long(update.message, "\n".join(lines).strip())
+    cloud.publish(reads)
 
 def get_commands_cheatsheet_text() -> str:
     """Return the pinned cheatsheet markdown containing the 6 official menu commands and usage."""
@@ -343,14 +351,19 @@ async def admitted_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = context.user_data.pop("override_query", None)
 
     from src.bot.replies import portal_error_reply, reply_long
+    from src.cloud import command_hooks as cloud
+    reads: Dict[str, Any] = {}
     status_msg = await update.message.reply_text("🔍 _Retrieving admitted students live from portal..._", parse_mode="Markdown")
     try:
         result = await admin_client.get_admitted_students(query=query)
         text = format_admitted_report(result)
+        # Every page of the list (complete) and the dashboard's tiles it was read with.
+        cloud.seen(reads, students=result.get("listed"), dashboard=result.get("dashboard"))
     except Exception as e:
         logger.error(f"Error in admitted_command: {e}")
         text = portal_error_reply("Admitted students", e)
     await reply_long(update.message, text, edit=status_msg)
+    cloud.publish(reads)
 
 
 ADMITTED_ROSTER_MAX = 12
@@ -512,15 +525,19 @@ def format_inquiries_report(on_day: Dict[str, Any], totals: Optional[Dict[str, i
     return "\n".join(lines)
 
 
-async def build_inquiries_report(target_date_input: str = "today", strict: bool = False) -> str:
+async def build_inquiries_report(target_date_input: str = "today", strict: bool = False,
+                                 reads: Optional[Dict[str, Any]] = None) -> str:
     """The inquiries report for the day `target_date_input` names, read live: that day's requests
     from the portal's own date filter (so any day, not only those among the newest 500 requests its
     unfiltered list shows), and the all-time figures from its status tabs. A date that cannot be
     read (with `strict`, anything but a date) gets date_error_reply, a day to come says so, and a
-    failed read gets portal_error_reply: never a 0 or "none" standing in for "could not read"."""
+    failed read gets portal_error_reply: never a 0 or "none" standing in for "could not read".
+    `reads` (a dict, when given) keeps what was read, for src.cloud.command_hooks.publish."""
     from datetime import datetime
     from src.bot.replies import date_error_reply, portal_error_reply
+    from src.cloud import command_hooks as cloud
     from src.dates import local_today
+    from src.scraper.client import portal_error_reason
     parsed = normalize_date_input(target_date_input, strict=strict)
     if parsed is None:
         return date_error_reply(target_date_input, "/inquiries_date")
@@ -533,13 +550,17 @@ async def build_inquiries_report(target_date_input: str = "today", strict: bool 
     except Exception as e:
         logger.error(f"Inquiries for {portal_date} not read: {type(e).__name__}: {e}")
         return portal_error_reply(f"Consultancy inquiries for {display_date}", e)
+    cloud.seen(reads, consultations=on_day)
     totals, totals_error = None, None
     try:
         totals = await admin_client.read_consultation_totals()
     except Exception as e:
         logger.error(f"All-time consultation counts not read: {type(e).__name__}: {e}")
         totals_error = e
-    return format_inquiries_report(on_day, totals, display_date, totals_error)
+    cloud.seen(reads, totals=totals, totals_error=portal_error_reason(totals_error) if totals_error else None)
+    report = format_inquiries_report(on_day, totals, display_date, totals_error)
+    cloud.seen(reads, inquiries_report=report)
+    return report
 
 
 async def _send_inquiries_report(update: Update, raw_input: str, waiting: str, strict: bool) -> None:
@@ -547,14 +568,17 @@ async def _send_inquiries_report(update: Update, raw_input: str, waiting: str, s
     "⏳ `waiting`" message becomes its first piece (src.bot.replies.reply_long)."""
     from src.bot.brief import esc
     from src.bot.replies import reply_long
+    from src.cloud import command_hooks as cloud
     from src.scraper.client import portal_error_reason
+    reads: Dict[str, Any] = {}
     status_msg = await update.message.reply_text(f"⏳ _{waiting}_", parse_mode="Markdown")
     try:
-        report = await build_inquiries_report(raw_input, strict=strict)
+        report = await build_inquiries_report(raw_input, strict=strict, reads=reads)
     except Exception as e:
         logger.error(f"Error building the inquiries report for {raw_input!r}: {e}")
         report = f"❌ Error building the inquiries report: {esc(portal_error_reason(e))}"
     await reply_long(update.message, report, edit=status_msg)
+    cloud.publish(reads)
 
 
 # Set by handle_natural_language_message while a typed message answers a command's "which date?"
@@ -806,14 +830,18 @@ async def verified_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"ℹ️ *Verified students on {display_date}:* not available ({esc(problem)}).", parse_mode="Markdown")
         return
 
+    from src.cloud import command_hooks as cloud
+    reads: Dict[str, Any] = {}
     status_msg = await update.message.reply_text(f"⏳ _Gathering verified student records for {display_date}..._", parse_mode="Markdown")
     try:
         verified_list = await admin_client.get_verified_students(target_date=day)
+        cloud.seen(reads, verified=(day, verified_list))       # every page read, the stamp guard held
         report_text = format_verified_students_report(verified_list, display_date)
     except Exception as e:
         logger.error(f"Error fetching verified students: {e}")
         report_text = portal_error_reply(f"Verified students for {display_date}", e)
     await reply_long(update.message, report_text, edit=status_msg)
+    cloud.publish(reads)
     logger.info(f"Dispatched verified students for {display_date} to chat_id {chat_id}")
 
 PASSPORTS_OCR_MAX = 5      # today's verified students /passports checks by OCR (seconds each)
@@ -885,6 +913,8 @@ async def passports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{chat_id}`", parse_mode="Markdown")
         return
 
+    from src.cloud import command_hooks as cloud
+    reads: Dict[str, Any] = {}
     today = local_today()
     display = today.strftime("%d %B %Y")
     status_msg = await update.message.reply_text(
@@ -892,6 +922,7 @@ async def passports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         from src.scraper.client import PortalUnavailable
         students = await admin_client.read_students()
+        cloud.seen(reads, students=students)
         read_at = datetime.now(ZoneInfo(settings.REPORT_TIMEZONE)).strftime("%d %b %Y, %H:%M")
         try:
             _stamp_guard(students)
@@ -900,11 +931,13 @@ async def passports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cards, problem = None, f"couldn't read the portal's verification stamps: {e.reason}"
         if cards:
             await _audit_cards(cards[:PASSPORTS_OCR_MAX], status_msg, f"verified today ({display})")
+            cloud.seen(reads, cards=cards[:PASSPORTS_OCR_MAX])
         text = format_passports_report(students, cards, display, read_at, problem)
     except Exception as e:
         logger.error(f"Error in passports_command: {e}")
         text = portal_error_reply("Passport scans", e)
     await _send_blocks(update.message, text, status_msg)
+    cloud.publish(reads)
     logger.info(f"Dispatched live passport status to chat_id {chat_id}")
 
 CALENDAR_UPCOMING_MAX = 20     # timeline rows today's /calendar view lists
@@ -1026,9 +1059,12 @@ async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(date_error_reply(raw_input, "/calendar", question.problem), parse_mode="Markdown")
         return
     if not question.default:
+        from src.cloud import command_hooks as cloud
+        reads: Dict[str, Any] = {}
         status_msg = await update.message.reply_text("⏳ _Consulting live calendar & admission deadlines..._",
                                                      parse_mode="Markdown")
-        await reply_long(update.message, await ask.answer_calendar(question), edit=status_msg)
+        await reply_long(update.message, await ask.answer_calendar(question, reads=reads), edit=status_msg)
+        cloud.publish(reads)
         return
 
     status_msg = await update.message.reply_text("⏳ _Consulting live calendar & admission deadlines..._", parse_mode="Markdown")
@@ -1519,6 +1555,7 @@ async def _audit_cards(cards: list, status_msg=None, what: str = "") -> None:
     filling its "fields", "status" and "verdict". A card with no scan on the portal is "Pending
     Passport Scan" without any check. A check that fails says so on its own card; the rest go on."""
     from src.bot.brief import esc
+    from src.cloud import command_hooks as cloud
     from src.scraper.client import portal_error_reason
     todo = [c for c in cards if c["passport_file"]]
     if todo and status_msg is not None:
@@ -1533,12 +1570,14 @@ async def _audit_cards(cards: list, status_msg=None, what: str = "") -> None:
                      verdict="⏳ Pending Passport Scan (no scan uploaded on the portal)")
             continue
         form = {"name": c["name_raw"], "dob": c["dob"], "passport_no": c["pass_no"], "passport_expiry": c["pass_exp"]}
+        profile_before = cloud.profile_of(c["id"])
         try:
             res = await admin_client.audit_student_passport(c["id"], form, c["passport_file"])
         except Exception as e:
             logger.error(f"Cross-check of student {c['id']} failed: {portal_error_reason(e)}")
             res = {"fields": {}, "status": "ERROR", "verdict": f"❌ Couldn't check this scan: {portal_error_reason(e)}"}
         c.update(fields=res.get("fields") or {}, status=res.get("status", ""), verdict=res.get("verdict", ""))
+        cloud.audited(c, res, form, profile_before)      # the whole result, for Supabase (publishing on only)
 
 
 # Card statuses whose scan was not read by OCR: no scan uploaded, the portal could not be read, the
@@ -1635,13 +1674,17 @@ async def _send_blocks(message, text: str, status_msg=None) -> int:
     return len(pieces)
 
 
-async def build_crosscheck_report(query: Dict[str, Any], status_msg=None) -> str:
+async def build_crosscheck_report(query: Dict[str, Any], status_msg=None,
+                                  reads: Optional[Dict[str, Any]] = None) -> str:
     """The cross-check report for a _crosscheck_query (a "date" query carries "first", "last" and
     "display"): every page of students.php read live, the students picked (by verification stamp,
     portal ID, HNG ID or name), each passport scan checked by OCR. Raises PortalUnavailable when the
-    list cannot be read whole, so a failed read is never "no students found"."""
+    list cannot be read whole, so a failed read is never "no students found". `reads` (a dict, when
+    given) keeps what was read, for src.cloud.command_hooks.publish."""
     from src.bot.brief import esc
+    from src.cloud import command_hooks as cloud
     students = await admin_client.read_students()
+    cloud.seen(reads, students=students)
     checked, note = len(students), ""
     kind = query["kind"]
     if kind == "date":
@@ -1685,6 +1728,7 @@ async def build_crosscheck_report(query: Dict[str, Any], status_msg=None) -> str
             picked = picked[:CROSSCHECK_NAME_MAX]
     cards = [_crosscheck_card(s) for s in picked]
     await _audit_cards(cards, status_msg, f"for {title}")
+    cloud.seen(reads, cards=cards)
     return _format_crosscheck_results(cards, title, checked=checked, note=note)
 
 
@@ -1693,13 +1737,16 @@ async def _crosscheck_run(update: Update, query: Dict[str, Any], waiting: str, t
     "Couldn't read the portal: ..." for `title`)."""
     from src.bot.brief import esc
     from src.bot.replies import portal_error_reply
+    from src.cloud import command_hooks as cloud
+    reads: Dict[str, Any] = {}
     status_msg = await update.message.reply_text(waiting, parse_mode="Markdown")
     try:
-        text = await build_crosscheck_report(query, status_msg)
+        text = await build_crosscheck_report(query, status_msg, reads=reads)
     except Exception as e:
         logger.error(f"Error in crosscheck ({title}): {e}")
         text = portal_error_reply(f"Cross-check for {esc(title)}", e)
     await _send_blocks(update.message, text, status_msg)
+    cloud.publish(reads)
 
 
 def _parse_date_range(raw: str):

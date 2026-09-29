@@ -656,21 +656,25 @@ def _dashboard_answer(route: Route, facts: List[Fact], query: str) -> str:
     return "\n".join(lines)
 
 
-async def answer_dashboard(route: Route, query: str) -> str:
+async def answer_dashboard(route: Route, query: str, *, reads: Optional[Dict] = None) -> str:
     from src.bot.replies import portal_error_reply
+    from src.cloud import command_hooks as cloud
     try:
         facts = await _dashboard()
     except Exception as e:
         logger.warning(f"Dashboard answer ({route.topic}) not read: {type(e).__name__}: {e}")
         return portal_error_reply("The dashboard's figures", e)
+    cloud.seen(reads, facts=facts)
     return _dashboard_answer(route, facts, query)
 
 
-async def answer_pending() -> str:
+async def answer_pending(*, reads: Optional[Dict] = None) -> str:
     """Who is waiting for payment approval: every page of students.php?status=pending, checked in
-    code (a row counts only when its own Payment column says Pending), with the portal's own count."""
+    code (a row counts only when its own Payment column says Pending), with the portal's own count.
+    `reads` (a dict, when given) keeps what was read, for src.cloud.command_hooks.publish."""
     from src.bot.brief import esc
     from src.bot.replies import portal_error_reply
+    from src.cloud import command_hooks as cloud
     from src.scraper.client import PortalUnavailable, admin_client
     from src.scraper.parsers import StudentListLayoutError, parse_pending_payments, parse_students_page
     try:
@@ -689,6 +693,7 @@ async def answer_pending() -> str:
     except Exception as e:
         logger.warning(f"Pending payments not read: {type(e).__name__}: {e}")
         return portal_error_reply("Pending payments", e)
+    cloud.seen(reads, pending=(students, badge))            # every page read, each page's layout known
     pending = [s for s in students if re.sub(r"[^a-z]", "", (s.get("payment_status") or "").lower()) == "pending"]
     lines = ["💳 *Pending payments*",
              f"• Pending payments: `{len(pending)}` (students.php?status=pending, every page read)"]
@@ -718,10 +723,11 @@ async def answer_pending() -> str:
     return "\n".join(lines)
 
 
-async def answer_window_review() -> str:
+async def answer_window_review(*, reads: Optional[Dict] = None) -> str:
     """Window applications under review: window_applications.php?status=under_review, counted by
     each row's own status, and the dashboard's Under review tile beside it."""
     from src.bot.replies import portal_error_reply
+    from src.cloud import command_hooks as cloud
     from src.scraper.client import admin_client
     try:
         review = await admin_client.read_window_apps_under_review()
@@ -730,7 +736,9 @@ async def answer_window_review() -> str:
         return portal_error_reply("Window applications under review", e)
     tile = None
     try:
-        found = [f for f in await _dashboard() if f.group not in _CARDS and f.label.lower() == "under review"]
+        facts = await _dashboard()
+        cloud.seen(reads, facts=facts)
+        found = [f for f in facts if f.group not in _CARDS and f.label.lower() == "under review"]
         tile = found[0].value if len(found) == 1 else None
     except Exception as e:
         logger.info(f"Dashboard tile for window applications not read: {type(e).__name__}: {e}")
@@ -753,17 +761,19 @@ def _intake_key(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip()).upper()
 
 
-async def answer_intake(route: Route, query: str) -> str:
+async def answer_intake(route: Route, query: str, *, reads: Optional[Dict] = None) -> str:
     """Students per intake, counted from every page of students.php (the dashboard has no intake
     figure), for one intake when the words name one, and one program when they name one."""
     from src.bot.brief import esc
     from src.bot.replies import portal_error_reply
+    from src.cloud import command_hooks as cloud
     from src.scraper.client import admin_client
     try:
         students = await admin_client.read_students()
     except Exception as e:
         logger.warning(f"Intakes not read: {type(e).__name__}: {e}")
         return portal_error_reply("Students per intake", e)
+    cloud.seen(reads, students=students)
     program = _program_filter((query or "").lower())
     pool = [s for s in students if not program or program[1] in (s.get("program") or "").upper()]
     what = f" in {_PROGRAM_NAMES[program[0]]}" if program else ""
@@ -785,11 +795,12 @@ async def answer_intake(route: Route, query: str) -> str:
     return "\n".join(lines + [source])
 
 
-async def answer_applied(route: Route) -> str:
+async def answer_applied(route: Route, *, reads: Optional[Dict] = None) -> str:
     """How many students applied on a day or in a span of days, counted from the Applied date of
     every student on students.php."""
     from src.bot.brief import esc
     from src.bot.replies import portal_error_reply
+    from src.cloud import command_hooks as cloud
     from src.dates import parse_portal_date
     from src.scraper.client import admin_client
     first = route.day or (route.window.first if route.window else local_today())
@@ -801,6 +812,7 @@ async def answer_applied(route: Route) -> str:
     except Exception as e:
         logger.warning(f"Applied dates not read: {type(e).__name__}: {e}")
         return portal_error_reply(f"Students who applied {esc(label)}", e)
+    cloud.seen(reads, students=students)
     days = [parse_portal_date(s.get("applied_date") or s.get("applied_on") or "") for s in students]
     unread = sum(1 for d in days if d is None)
     count = sum(1 for d in days if d is not None and first <= d <= last)
@@ -812,10 +824,11 @@ async def answer_applied(route: Route) -> str:
     return "\n".join(lines)
 
 
-async def answer_unknown(query: str) -> str:
+async def answer_unknown(query: str, *, reads: Optional[Dict] = None) -> str:
     """A question no route fits: the dashboard facts whose whole label it names; else the ones the
     local LLM picks (ollama_client.answer_agent_query), shown word for word; else cant_answer."""
     from src.bot.brief import esc
+    from src.cloud import command_hooks as cloud
     from src.llm.ollama_client import ollama_client
     from src.scraper.client import portal_error_reason
     try:
@@ -823,6 +836,7 @@ async def answer_unknown(query: str) -> str:
     except Exception as e:
         logger.warning(f"Dashboard not read for a question: {type(e).__name__}: {e}")
         return cant_answer(f"the portal dashboard could not be read: {portal_error_reason(e)}")
+    cloud.seen(reads, facts=facts)
     lines = [f.line() for f in facts if f.value is not None]
     picked = ollama_client._answer_query_fallback(query, lines)
     how = "the figures whose label your question names"
@@ -840,27 +854,31 @@ async def answer_unknown(query: str) -> str:
 async def reply(message, route: Route, query: str) -> None:
     """Answer a question whose answer is built here (the kinds pending, window_review, dashboard,
     intake, applied and unknown): a "please wait" note, the live reads, then the answer in its
-    place (split under Telegram's limit)."""
+    place (split under Telegram's limit). What was read is then published to Supabase without
+    waiting (src.cloud.command_hooks; nothing while publishing is off)."""
     from src.bot.replies import reply_long
+    from src.cloud import command_hooks as cloud
+    reads: Dict = {}
     status = await message.reply_text("🤔 _Reading the live portal..._", parse_mode="Markdown")
     try:
         if route.kind == "pending":
-            text = await answer_pending()
+            text = await answer_pending(reads=reads)
         elif route.kind == "window_review":
-            text = await answer_window_review()
+            text = await answer_window_review(reads=reads)
         elif route.kind == "dashboard":
-            text = await answer_dashboard(route, query)
+            text = await answer_dashboard(route, query, reads=reads)
         elif route.kind == "intake":
-            text = await answer_intake(route, query)
+            text = await answer_intake(route, query, reads=reads)
         elif route.kind == "applied":
-            text = await answer_applied(route)
+            text = await answer_applied(route, reads=reads)
         else:
-            text = await answer_unknown(query)
+            text = await answer_unknown(query, reads=reads)
     except Exception as e:                   # never a silent failure
         logger.error(f"Question ({route.kind}) failed: {type(e).__name__}: {e}")
         from src.bot.replies import portal_error_reply
         text = portal_error_reply("The answer", e)
     await reply_long(message, text, edit=status)
+    cloud.publish(reads)
 
 
 # --------------------------------------------------------------------------- the calendar
@@ -1163,9 +1181,11 @@ def calendar_answer(items: List[CalItem], q: CalendarQuery, today: date) -> str:
     return "\n".join(lines)
 
 
-async def answer_calendar(q: CalendarQuery) -> str:
-    """calendar.php read live, its items filtered by the question (calendar_query)."""
+async def answer_calendar(q: CalendarQuery, *, reads: Optional[Dict] = None) -> str:
+    """calendar.php read live, its items filtered by the question (calendar_query). `reads` (a
+    dict, when given) keeps the items read, for src.cloud.command_hooks.publish."""
     from src.bot.replies import portal_error_reply
+    from src.cloud import command_hooks as cloud
     from src.scraper.client import PortalUnavailable, admin_client
     today = local_today()
     try:
@@ -1176,4 +1196,5 @@ async def answer_calendar(q: CalendarQuery) -> str:
     except Exception as e:
         logger.warning(f"Calendar not read: {type(e).__name__}: {e}")
         return portal_error_reply("The calendar", e)
+    cloud.seen(reads, calendar=items)
     return calendar_answer(items, q, today)
