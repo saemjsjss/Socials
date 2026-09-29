@@ -24,7 +24,8 @@ import asyncio
 import json
 import logging
 import re
-from typing import Dict, List
+import time
+from typing import Dict, List, Optional, Tuple
 
 from src.sheets import progress_builder as pb
 
@@ -54,7 +55,9 @@ _ISSUE_RE = re.compile(r'name="passport_issue_date"[^>]*value="([^"]*)"')
 MAX_UNREAD = 10      # edit pages that may time out before the refresh gives up (cache kept)
 
 
-async def _fetch_async(limit: int = 0) -> Dict[str, str]:
+async def _fetch_async(limit: int = 0, pages: Optional[Dict[str, Tuple[str, float]]] = None) -> Dict[str, str]:
+    """{passport: issue date} from every student's edit page. `pages`, when given, keeps each edit
+    page read ({uid: (html, time read)}), for the Supabase copy of the profiles made afterwards."""
     from src.scraper.client import PortalUnavailable, admin_client as c
     out: Dict[str, str] = {}
     try:
@@ -78,6 +81,8 @@ async def _fetch_async(limit: int = 0) -> Dict[str, str]:
                     unread.append(uid)
                     dates = None
                     break
+                if pages is not None:
+                    pages[str(uid)] = (html, time.time())
                 m = _ISSUE_RE.search(html)
                 if m and m.group(1).strip():
                     dates.add(m.group(1).strip())
@@ -98,11 +103,19 @@ async def _fetch_async(limit: int = 0) -> Dict[str, str]:
         await c.close()
 
 
-def refresh(limit: int = 0) -> Dict[str, str]:
-    data = pb._run_async(_fetch_async(limit))
+def refresh(limit: int = 0, pages: Optional[Dict[str, Tuple[str, float]]] = None) -> Dict[str, str]:
+    data = pb._run_async(_fetch_async(limit, pages))
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     CACHE_PATH.write_text(json.dumps({"by_passport": data}, indent=1), encoding="utf-8")
     return data
+
+
+def _supabase_on() -> bool:
+    try:
+        from src.cloud import sheet_hooks
+        return sheet_hooks.on()
+    except Exception:
+        return False
 
 
 def main() -> None:
@@ -111,10 +124,21 @@ def main() -> None:
     ap.add_argument("--refresh", action="store_true", help="re-read every student's edit page")
     ap.add_argument("--limit", type=int, default=0, help="only the first N students")
     args = ap.parse_args()
-    data = refresh(args.limit) if args.refresh else load()
+    # The edit pages read are kept (in memory) only while publishing to Supabase is on: their
+    # profiles are parsed after the cache file is written, so the refresh itself is not slowed.
+    pages: Optional[Dict[str, Tuple[str, float]]] = {} if args.refresh and _supabase_on() else None
+    data = refresh(args.limit, pages) if args.refresh else load()
     print(f"{len(data)} passport issue date(s) cached at {CACHE_PATH}")
     for k, v in list(data.items())[:10]:
         print(f"   {k}: {v}")
+    if args.refresh:
+        # The very last step: the file just written (complete only when every student was read)
+        # and each profile read, to the Supabase publisher (its own process, never waited for).
+        try:
+            from src.cloud import sheet_hooks
+            sheet_hooks.after_issue_refresh(data, pages, not args.limit)
+        except Exception as e:
+            logger.warning("Supabase publish failed (issue_refresh): %s", type(e).__name__)
 
 
 if __name__ == "__main__":
