@@ -6,8 +6,10 @@ questions with the same model (Supabase/gte-small, its ONNX export), so the vect
 from exactly this model. It is loaded once per process, lazily, and only in a process that was
 started to embed: the publisher process (python -m src.cloud.publish --from ...) and the backfill
 call prepare_process() before anything can import torch, so CUDA is hidden (CUDA_VISIBLE_DEVICES
-is "") and the 8 GB GPU stays with Ollama and the document OCR (R12). Measured on this PC:
-~14 ms a record, about 1 GB of RAM.
+is "-1": no device has that index, so the CUDA runtime sees none) and the 8 GB GPU stays with
+Ollama and the document OCR (R12). Not "": on Windows, CPython removes a variable set to an empty
+value from the process's real environment, so CUDA never saw it and torch still found the GPU.
+Measured on this PC: ~14 ms a record, about 1 GB of RAM.
 
 gte-small reads at most 512 tokens, so a long text is cut into chunks of at most MAX_WORDS words
 on paragraph or sentence boundaries (then checked against the tokenizer); a record whose text has
@@ -36,6 +38,11 @@ HEADING_WORDS = 40         # a first line this short is repeated on every chunk
 ENCODE_BATCH = 32
 
 
+# CUDA_VISIBLE_DEVICES for a process that must not use the GPU (the publisher, the backfill, the
+# full picture and the handoff's child all set this very value; "" does not survive on Windows).
+NO_GPU = "-1"
+
+
 class EmbedError(RuntimeError):
     """The model could not be loaded or used here (reason in the message, no text in it)."""
 
@@ -51,9 +58,9 @@ def prepare_process() -> None:
     torch (the publisher's and the backfill's entry points do): the GPU is hidden, the Hugging Face
     hub is offline (the pinned model must already be in the cache: nothing is downloaded), and no
     progress bars are drawn into the log."""
-    if "torch" in sys.modules and os.environ.get("CUDA_VISIBLE_DEVICES") != "":
+    if "torch" in sys.modules and os.environ.get("CUDA_VISIBLE_DEVICES") != NO_GPU:
         raise EmbedError("torch was imported before prepare_process(), so CUDA cannot be hidden")
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["CUDA_VISIBLE_DEVICES"] = NO_GPU
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     os.environ["TQDM_DISABLE"] = "1"
@@ -63,7 +70,7 @@ def prepare_process() -> None:
 
 def cpu_only_process() -> bool:
     """Whether this process may load the model: it hid CUDA (prepare_process) before torch."""
-    return os.environ.get("CUDA_VISIBLE_DEVICES") == ""
+    return os.environ.get("CUDA_VISIBLE_DEVICES") == NO_GPU
 
 
 # --------------------------------------------------------------------------- splitting text

@@ -8,7 +8,9 @@ state). It hides CUDA before anything can import torch, so gte-small runs on the
 
 publish(kind, scope, rows, complete) is the engine (the publisher process and the backfill run it):
   * rows are every record a read saw for that (kind, scope) (src.cloud.records); only those whose
-    content_hash differs from data/cloud_state.json are embedded and sent (D9), at most 200 a call;
+    content_hash differs from data/cloud_state.json are embedded and sent (D9), at most 200 a call
+    and at most MAX_BODY bytes of JSON a call (a record larger than that goes in a call of its
+    own, with one log line of its size);
   * complete=True only for a whole read (R2, R5): the last call of the (kind, scope) then carries
     p_all_keys, the full key list, and Supabase deletes that scope's other records (D10); a partial
     or failed read sends p_all_keys null and deletes nothing;
@@ -28,7 +30,8 @@ publish(kind, scope, rows, complete) is the engine (the publisher process and th
   * it never raises: a failure is one log line "Supabase publish failed (<kind>): <short reason>",
     the reason built from the HTTP status and Postgres code only (a server message can quote a key,
     and keys hold passport numbers), and the job carries on. Once Supabase has not answered, or
-    refused the key, the rest of the run is skipped without more lines;
+    refused the key, or gte-small could not be loaded or used (an EmbedError), the rest of the run
+    is skipped without more lines;
   * it does nothing unless SUPABASE_URL, SUPABASE_SECRET_KEY and CLOUD_PUBLISH_ENABLED are all set;
   * a dry run writes each request body, exactly as it would be sent, to data/cloud/dry_run/<run>/
     and leaves the hash state as it was.
@@ -55,7 +58,7 @@ import os
 import sys
 
 if __name__ == "__main__":          # the publisher process: no GPU, before torch can be imported
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"      # "" is dropped from a Windows environment (embed.NO_GPU)
 
 import argparse
 import hashlib
@@ -84,7 +87,8 @@ DRY_RUN_DIR = CLOUD_DIR / "dry_run"
 LOCK_PATH = CLOUD_DIR / "publish.lock"
 
 MAX_ROWS = 200              # hg_sync refuses more
-MAX_CHUNKS = 250            # chunks (384 numbers each) per call, so a call stays about 1 MB
+MAX_CHUNKS = 250            # chunks embedded at a time (384 numbers each, about 5 KB of JSON)
+MAX_BODY = 1_000_000        # bytes of one hg_sync body: a call is split to stay at or under it
 TIMEOUT = 30.0              # seconds per HTTP call
 LOCK_WAIT = 20 * 60         # how long a publisher waits for another to finish
 CHILD_TIMEOUT = 3600        # the publisher process stops itself after this long
@@ -546,7 +550,8 @@ def _normalise(kind: str, scope: str, rows: Iterable[Any]) -> Tuple[List[Dict[st
 
 
 def _groups(rows: List[Tuple[Dict[str, Any], List[str]]]) -> List[List[Tuple[Dict[str, Any], List[str]]]]:
-    """Rows with their chunk texts in calls of at most MAX_ROWS rows and MAX_CHUNKS chunks."""
+    """Rows with their chunk texts in groups of at most MAX_ROWS rows and MAX_CHUNKS chunks, each
+    embedded at once (and sent in one call or more: _by_size)."""
     groups: List[List[Tuple[Dict[str, Any], List[str]]]] = []
     n_chunks = 0
     for item in rows:
@@ -579,6 +584,51 @@ def _embedded(r: Run, group: List[Tuple[Dict[str, Any], List[str]]]) -> List[Dic
             i += 1
         out.append(dict(row, chunks=chunks))
     return out
+
+
+def _by_size(kind: str, head: Dict[str, Any], rows: List[Dict[str, Any]],
+             keys: Optional[List[str]]) -> List[List[Dict[str, Any]]]:
+    """One embedded group's payload rows as the calls that send them, in order, each call's body
+    at most MAX_BODY bytes. `head` is the body's other fields (p_run, p_kind, p_scope); `keys` is
+    the p_all_keys of the (kind, scope)'s last call, when this group ends a complete read (else
+    None): the last call leaves room for it. The sizes are the exact bytes _body writes: the body
+    with no rows, plus each row's own JSON and a comma between rows. A row larger than MAX_BODY
+    goes in a call of its own (one log line of its size, never its content), and so does a key
+    list that leaves no room for any row."""
+    base = len(_body(dict(head, p_rows=[], p_all_keys=None)))
+    sizes = [len(_body(row)) for row in rows]
+    calls: List[List[int]] = []                 # the row indexes of each call, in order
+    size, open_call = 0, False                  # the bytes of calls[-1], and whether rows may join it
+    for i, n in enumerate(sizes):
+        if base + n > MAX_BODY:
+            logger.warning("Supabase publish (%s): one record makes a body of %d bytes, over the %d-byte cap; "
+                           "it is sent in a call of its own.", kind, base + n, MAX_BODY)
+            calls.append([i])
+            open_call = False
+        elif open_call and size + 1 + n <= MAX_BODY:
+            calls[-1].append(i)
+            size += 1 + n
+        else:
+            calls.append([i])
+            size, open_call = base + n, True
+    calls = calls or [[]]
+    extra = len(_body(keys)) - len(b"null") if keys is not None else 0
+    last = calls[-1]
+    if keys is not None and base + sum(sizes[i] for i in last) + max(0, len(last) - 1) + extra > MAX_BODY:
+        # The key list does not fit beside the last call's rows: the last call keeps the rows at
+        # its end that fit with it (none, when the list alone is that large), the rest go before.
+        room, tail = MAX_BODY - base - extra, []
+        for i in reversed(last):
+            need = sizes[i] + (1 if tail else 0)
+            if need > room:
+                break
+            room -= need
+            tail.insert(0, i)
+        if base + extra > MAX_BODY:
+            logger.warning("Supabase publish (%s): the key list alone makes a body of %d bytes, over the %d-byte "
+                           "cap; it is sent in a call of its own.", kind, base + extra, MAX_BODY)
+        calls[-1:] = [last[:len(last) - len(tail)], tail] if tail else [last, []] if last else [[]]
+    return [[rows[i] for i in c] for c in calls]
 
 
 def _can_embed_here() -> bool:
@@ -704,56 +754,64 @@ def _publish(r: Run, res: Result, kind: str, scope: str, rows: List[Any], comple
         try:
             items = [(v, emb.chunks(v["content"])) for v in changed]
         except embed.EmbedError as e:
-            res.ok, res.error = False, str(e)
-            r.fail(kind, res.error)
-            return res
+            return _model_unavailable(r, res, kind, e)
         groups = _groups(items) or [[]]
+        head = {"p_run": r.id if r.posted else None, "p_kind": kind, "p_scope": scope}
         before, dropped = None, False
         for i, group in enumerate(groups):
-            last = i == len(groups) - 1
             try:
                 payload_rows = _embedded(r, group)
             except embed.EmbedError as e:
-                res.ok, res.error = False, str(e)
-                r.fail(kind, res.error)
-                return res
-            body = _body({"p_run": r.id if r.posted else None, "p_kind": kind, "p_scope": scope,
-                          "p_rows": payload_rows, "p_all_keys": keys if complete and last else None})
-            if r.dry:
-                r.write(f"rpc-hg_sync-{re.sub(r'[^A-Za-z0-9_]', '_', kind)}", body)
+                return _model_unavailable(r, res, kind, e)
+            parts = _by_size(kind, head, payload_rows, keys if complete and i == len(groups) - 1 else None)
+            for n, part in enumerate(parts):
+                last = i == len(groups) - 1 and n == len(parts) - 1     # the (kind, scope)'s last call
+                body = _body(dict(head, p_rows=part, p_all_keys=keys if complete and last else None))
+                if r.dry:
+                    r.write(f"rpc-hg_sync-{re.sub(r'[^A-Za-z0-9_]', '_', kind)}", body)
+                    res.calls += 1
+                    continue
+                if not dropped:
+                    # Until this (kind, scope) is sent whole, no key set may count as already applied:
+                    # a call Supabase took but did not answer must not let a later read look sent.
+                    before, dropped = scopes.pop(prefix + scope, None), True
+                    if before is not None:
+                        save_state(state)
+                ok, answer, reason = _request(r, "POST", "/rest/v1/rpc/hg_sync", body)
+                if not ok:
+                    res.ok, res.error = False, reason
+                    r.fail(kind, reason)
+                    return res
                 res.calls += 1
-                continue
-            if not dropped:
-                # Until this (kind, scope) is sent whole, no key set may count as already applied:
-                # a call Supabase took but did not answer must not let a later read look sent.
-                before, dropped = scopes.pop(prefix + scope, None), True
-                if before is not None:
-                    save_state(state)
-            ok, answer, reason = _request(r, "POST", "/rest/v1/rpc/hg_sync", body)
-            if not ok:
-                res.ok, res.error = False, reason
-                r.fail(kind, reason)
-                return res
-            res.calls += 1
-            answer = answer if isinstance(answer, dict) else {}
-            up, de, un = (int(answer.get(k) or 0) for k in ("upserted", "deleted", "unchanged"))
-            res.upserted, res.deleted, res.unchanged = res.upserted + up, res.deleted + de, res.unchanged + un
-            r.upserted, r.deleted, r.unchanged, r.sent = r.upserted + up, r.deleted + de, r.unchanged + un, \
-                r.sent + len(group)
-            tally[0], tally[1], tally[2] = tally[0] + up, tally[1] + de, tally[2] + un
-            for row, _ in group:           # accepted: the whole call is one transaction
-                recs[prefix + row["key"]] = {"h": row["content_hash"], "s": scope, "t": row["read_at"]}
-            if last and complete:
-                for k in gone:             # Supabase deleted them: forgotten only now it said so
-                    recs.pop(k, None)
-                scopes[prefix + scope] = digest
-                if read is not None:
-                    reads[prefix + scope] = read.isoformat(timespec="seconds")
-            elif last and before is not None:
-                scopes[prefix + scope] = before   # a partial read deletes nothing: the last complete stands
-            state["embed_model"] = emb.model_id
-            save_state(state)
+                answer = answer if isinstance(answer, dict) else {}
+                up, de, un = (int(answer.get(k) or 0) for k in ("upserted", "deleted", "unchanged"))
+                res.upserted, res.deleted, res.unchanged = res.upserted + up, res.deleted + de, res.unchanged + un
+                r.upserted, r.deleted, r.unchanged, r.sent = r.upserted + up, r.deleted + de, r.unchanged + un, \
+                    r.sent + len(part)
+                tally[0], tally[1], tally[2] = tally[0] + up, tally[1] + de, tally[2] + un
+                for row in part:               # accepted: the whole call is one transaction
+                    recs[prefix + row["key"]] = {"h": row["content_hash"], "s": scope, "t": row["read_at"]}
+                if last and complete:
+                    for k in gone:             # Supabase deleted them: forgotten only now it said so
+                        recs.pop(k, None)
+                    scopes[prefix + scope] = digest
+                    if read is not None:
+                        reads[prefix + scope] = read.isoformat(timespec="seconds")
+                elif last and before is not None:
+                    scopes[prefix + scope] = before   # a partial read deletes nothing: the last complete stands
+                state["embed_model"] = emb.model_id
+                save_state(state)
         return res
+
+
+def _model_unavailable(r: Run, res: Result, kind: str, e: Exception) -> Result:
+    """gte-small could not be loaded or used (an EmbedError): this publish fails, and so does the
+    rest of the run, which is skipped without more lines (D6: one line; the model would fail for
+    every other kind too). Nothing was sent for it, so the hash state is not advanced."""
+    res.ok, res.error = False, str(e)
+    r.down = r.down or res.error
+    r.fail(kind, res.error)
+    return res
 
 
 def publish_scopes(kind: str, rows: Sequence[Dict[str, Any]], complete: bool,

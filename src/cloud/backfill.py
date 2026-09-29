@@ -30,7 +30,7 @@ import os
 import sys
 
 if __name__ == "__main__":          # a CPU-only embedding process: before torch can be imported
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"      # "" is dropped from a Windows environment (embed.NO_GPU)
 
 import argparse
 import asyncio

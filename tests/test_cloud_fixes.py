@@ -535,7 +535,7 @@ def test_an_embedding_failure_logs_no_text(cloud, caplog, monkeypatch):
     gte = embed.GteSmall()
     gte._model = Model()
     embed.set_embedder(gte)
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "-1")
     res = publish.publish("student", "all", students_at(T0, 500, names={500: "TEST SECRET NAME"}), True)
     assert not res.ok and res.error == "gte-small could not embed (RuntimeError)"
     assert "TEST SECRET NAME" not in caplog.text

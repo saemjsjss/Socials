@@ -346,7 +346,7 @@ def test_the_sync_never_waits_for_the_publisher(sync, cloud, monkeypatch):
     assert lines and [e[0] for e in events] == ["telegram", "telegram", "publisher"]   # Telegram first
     args, kwargs = events[-1][1], events[-1][2]
     assert args[1:4] == ["-m", "src.cloud.publish", "--from"] and Path(args[4]).exists()
-    assert kwargs["env"]["CUDA_VISIBLE_DEVICES"] == "" and kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["env"]["CUDA_VISIBLE_DEVICES"] == "-1" and kwargs["stdin"] is subprocess.DEVNULL
     assert kwargs["stdout"] not in (None, subprocess.PIPE) and kwargs["stderr"] not in (None, subprocess.PIPE)
 
 

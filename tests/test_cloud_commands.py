@@ -204,7 +204,8 @@ def test_a_capped_day_is_partial_and_totals_not_read_are_a_failed_read(cloud, po
         "consult_requests.php?status=file_opened: consult_requests.php: the portal answered HTTP 404"]
     process(cloud)
     sync = [b for b in cloud.fake.syncs() if b["p_kind"] == "consultation"]
-    assert [b["p_all_keys"] for b in sync] == [None, None, None]                 # 500 rows, 3 calls, no deletes
+    assert {b["p_all_keys"] for b in sync} == {None}                              # 500 rows, no deletes
+    assert sum(len(b["p_rows"]) for b in sync) == 500 and max(len(b["p_rows"]) for b in sync) <= 200
     assert next(iter(cloud.fake.runs.values()))["status"] == "partial"
 
 

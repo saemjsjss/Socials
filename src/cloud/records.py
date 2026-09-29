@@ -12,8 +12,14 @@ A record is a JSON-safe dict:
 
 Nothing is re-parsed here and nothing is filled in: a value the reader did not give is left out
 of the text, never replaced by a stand-in, and the words a reader writes where the portal shows
-nothing ("Unassigned", "Event", "Dashboard", the portal's own "—", "N/A" and "PENDING" passport)
-are no value in data or text (R1). The student_*, day and source columns are derived only from
+nothing ("Unassigned", "Event", "Dashboard") are no value in data or text (R1). Nor are the words
+the portal itself (or a student filling in its form) types in a field that has no value ("N/A",
+"None", "--", "—", "PENDING", "TBD"...: is_filler), in every kind read from the portal's own
+fields: such a cell is "" in data, left out of the text, and its name is kept in
+data["blank_on_portal"] (sorted; "details.<label>" for a students.php details field; only when
+there is one), so Jeannie can say "not given on the portal" without a value being lost or made
+up. A status field's "Pending" (a payment, a stage, a visa step: is_status_field) is data, never a
+filler. The student_*, day and source columns are derived only from
 the hashed fields (key, scope, data, content), because Supabase rewrites a record only when its
 content_hash changes (hg_sync leaves a same-hash row as it is): the passport-keyed kinds put the
 student's uid and HNG id in data when they are known. The one exception is field_correction, an
@@ -185,11 +191,86 @@ def _passport_value(value: Any) -> str:
     return text if _passport(text) else ""
 
 
-def _dash(value: Any) -> Any:
-    """The portal's "no value" dash ("—", "-", "–") as "", any other value as it is (R1)."""
-    if isinstance(value, str) and value.strip() in ("—", "-", "–", "--"):
-        return ""
-    return value
+# --------------------------------------------------------------------------- the portal's "no value" words
+
+# What the portal (or a student filling in its form) types in a field that has no value, compared
+# whole-cell, case-insensitively, on the cell's letters and digits alone after trimming ("N/A",
+# "n.a." and "NA" are one word, "Not Available" is "notavailable"); a cell of marks only ("—",
+# "--", "–", "-", "...") is no value either. Every marker progress_builder.clean_value blanks is
+# here (na, n/a, n.a., none, null, not provided, not applicable, the dashes); unlike clean_value,
+# a text in another script (Bangla) is a value: clean_value compares ASCII letters only, so it
+# reads such a text as a mark. "NO", "NOT YET", "0" are answers, not fillers.
+FILLER_WORDS = frozenset({"na", "none", "null", "nil", "pending", "tbd", "notavailable", "notapplicable",
+                          "notprovided"})
+# Fields whose "Pending" is a real state, not a stand-in for a value: every field whose name says
+# status, stage, result or step (students.php's status = the stage, payment_status = the Payment
+# column, docs_status; its details' Payment Status, Passport Status, Study Status; the export's
+# Payment Status, Passport Status, Study Status, VIN Status, Visa Result, Current Stage, Current
+# Status, Next Step; progress.php's stage and status; a consultation's or window application's
+# status; student_edit.php's *_status fields), and these (a payment, a document or a VIN step).
+STATUS_FIELDS = frozenset({"payment", "bank certificate", "bank solvency", "vin app", "vin required"})
+_STATUS_NAME_RE = re.compile(r"\b(?:status|stage|result|step)\b")
+BLANK_ON_PORTAL = "blank_on_portal"
+
+
+def _filler_key(text: str) -> str:
+    return "".join(ch for ch in text.casefold() if ch.isalnum())
+
+
+def is_status_field(name: Any) -> bool:
+    """Whether a field holds a state ("Payment Status", "payment_status", "Visa Result"...): its
+    "Pending" is data (STATUS_FIELDS)."""
+    n = re.sub(r"[\s_]+", " ", str(name or "")).strip().lower()
+    return bool(_STATUS_NAME_RE.search(n)) or n in STATUS_FIELDS
+
+
+def is_filler(value: Any, field: Any = "") -> bool:
+    """Whether a cell holds one of the words the portal types for "no value" (FILLER_WORDS, or
+    marks only) instead of data (R1). The cell `field`'s own name decides "Pending": in a status
+    field it is data."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    key = _filler_key(value)
+    if not key:
+        return True
+    return key in FILLER_WORDS and not (key == "pending" and is_status_field(field))
+
+
+def _blank_cells(fields: Mapping[str, Any], prefix: str = "") -> Tuple[Dict[str, Any], List[str]]:
+    """`fields` with every filler cell (is_filler) as "" -> (the fields, the blanked cells' names,
+    each led by `prefix`). Other values, lists and objects are kept as they are."""
+    out: Dict[str, Any] = {}
+    blanked: List[str] = []
+    for k, v in fields.items():
+        if is_filler(v, k):
+            out[k] = ""
+            blanked.append(f"{prefix}{k}")
+        else:
+            out[k] = v
+    return out, blanked
+
+
+def _passport_cell(fields: Dict[str, Any], name: str, blanked: List[str], prefix: str = "") -> None:
+    """A passport number field as data (_passport_value); a value that is no passport number is
+    blanked and named in `blanked` like a filler."""
+    if name in fields:
+        value = fields[name]
+        fields[name] = _passport_value(value)
+        if not fields[name] and str(value or "").strip():
+            blanked.append(f"{prefix}{name}")
+
+
+def _mark_blank(data: Dict[str, Any], blanked: Iterable[str]) -> Dict[str, Any]:
+    """`data` with data["blank_on_portal"] = the sorted names in `blanked`, when there are any."""
+    names = sorted({str(b) for b in blanked})
+    if names:
+        data[BLANK_ON_PORTAL] = names
+    return data
+
+
+def _given(value: Any) -> Any:
+    """A value as it is, a filler as ""."""
+    return "" if is_filler(value) else value
 
 
 # Words the readers write where the portal shows nothing (they are not the portal's data: R1).
@@ -372,28 +453,35 @@ def student_text(s: Mapping[str, Any]) -> str:
     )
 
 
-def _student_fields(s: Mapping[str, Any]) -> Dict[str, Any]:
-    """A students.php record's fields as data: the volatile ones left out, and a placeholder
-    passport number ("PENDING") blanked, as no identity is no value either (R1, R11)."""
-    out = {k: v for k, v in s.items() if k not in STUDENT_VOLATILE and not str(k).startswith("_")}
+def _student_fields(s: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+    """A students.php record's fields as data -> (the fields, the cells blanked): the volatile ones
+    left out, every list cell and details field that holds a filler word blanked (is_filler), and
+    a placeholder passport number ("PENDING") blanked, as no identity is no value either (R1,
+    R11)."""
+    out, blanked = _blank_cells({k: v for k, v in s.items()
+                                 if k not in STUDENT_VOLATILE and not str(k).startswith("_")})
     d = out.get("details")
-    if isinstance(d, Mapping) and "Passport No" in d:
-        out["details"] = dict(d, **{"Passport No": _passport_value(d.get("Passport No"))})
-    return out
+    if isinstance(d, Mapping):
+        d, more = _blank_cells(d, "details.")
+        _passport_cell(d, "Passport No", more, "details.")
+        out["details"], blanked = d, blanked + more
+    return out, blanked
 
 
 def student(s: Mapping[str, Any], read_at: Any = None) -> Optional[Dict[str, Any]]:
     """kind student, key = the portal uid, scope all: one read_students record (every list column,
-    the ~50 details, the file names, the payment chips and stamp, the applications). None for a
-    row without a uid (its fallback key is not stable: R11)."""
+    the ~50 details, the file names, the payment chips and stamp, the applications), the portal's
+    fillers blanked and named in blank_on_portal. None for a row without a uid (its fallback key is
+    not stable: R11)."""
     uid = str(s.get("uid") or "").strip()
     if _uid(uid) is None:
         return None
-    d = s.get("details") or {}
-    return make("student", uid, "all", _student_fields(s), student_text(s), "students.php", read_at,
-                uid=uid, hng=s.get("student_id"), name=s.get("student_name") or d.get("Full Name"),
+    fields, blanked = _student_fields(s)
+    d = fields.get("details") or {}
+    return make("student", uid, "all", _mark_blank(dict(fields), blanked), student_text(fields), "students.php",
+                read_at, uid=uid, hng=fields.get("student_id"), name=fields.get("student_name") or d.get("Full Name"),
                 passport=_passport(d.get("Passport No")),
-                day=iso_day(s.get("applied_on")) or iso_day(s.get("applied_date")))
+                day=iso_day(fields.get("applied_on")) or iso_day(fields.get("applied_date")))
 
 
 def students(rows: Iterable[Mapping[str, Any]], read_at: Any = None) -> List[Dict[str, Any]]:
@@ -421,14 +509,15 @@ def pending_payments(rows: Iterable[Mapping[str, Any]], badge: Optional[int],
         if re.sub(r"[^a-z]", "", str(s.get("payment_status") or "").lower()) != "pending":
             continue
         seen.add(uid)
-        d = s.get("details") or {}
-        data = dict(_student_fields(s), badge=badge)
-        text = _paragraph("Pending payment (students.php?status=pending).", student_text(s),
+        fields, blanked = _student_fields(s)
+        d = fields.get("details") or {}
+        data = _mark_blank(dict(fields, badge=badge), blanked)
+        text = _paragraph("Pending payment (students.php?status=pending).", student_text(fields),
                           _sentence(f"The portal's Pending Payments badge shows {badge}") if badge is not None else "")
         out.append(make("pending_payment", uid, "all", data, text, "students.php?status=pending", read_at,
-                        uid=uid, hng=s.get("student_id"), name=s.get("student_name") or d.get("Full Name"),
+                        uid=uid, hng=fields.get("student_id"), name=fields.get("student_name") or d.get("Full Name"),
                         passport=_passport(d.get("Passport No")),
-                        day=iso_day(s.get("applied_on")) or iso_day(s.get("applied_date"))))
+                        day=iso_day(fields.get("applied_on")) or iso_day(fields.get("applied_date"))))
     return out
 
 
@@ -453,7 +542,8 @@ def verification(v: Mapping[str, Any], day: Any, read_at: Any = None) -> Optiona
     iso = iso_day(day)
     if _uid(uid) is None or not iso:
         return None
-    data = dict(v, day=iso)
+    v, blanked = _blank_cells(dict(v))
+    data = _mark_blank(dict(v, day=iso), blanked)
     pay = payment_text(v)
     name = v.get("name") or ""
     when = v.get("verified_time") or ""
@@ -524,11 +614,12 @@ def student_documents(rows: Iterable[Mapping[str, Any]], read_at: Any = None) ->
         if _uid(uid) is None or uid in seen:
             continue
         seen.add(uid)
-        files = [f for f in str(row.get("docs") or "").split("|") if f]
-        # The list's cells as data, the portal's "—" as "" and a placeholder passport as none (R1).
-        data = dict({k: _dash(v) for k, v in dict(row).items()}, files=files)
-        if "passport" in data:
-            data["passport"] = _passport_value(data["passport"])
+        # The list's cells as data, the portal's "—" and other fillers as "" and a placeholder
+        # passport as none (R1), each named in blank_on_portal.
+        data, blanked = _blank_cells(dict(row))
+        _passport_cell(data, "passport", blanked)
+        files = [f for f in str(data.get("docs") or "").split("|") if f]
+        data = _mark_blank(dict(data, files=files), blanked)
         name, passport, program = data.get("name") or "", data.get("passport") or "", data.get("program") or ""
         text = _paragraph(
             _sentence("Verified documents on the portal" + (f" of {name}" if name else "")
@@ -550,12 +641,13 @@ def student_exports(rows: Iterable[Mapping[str, str]], read_at: Any = None) -> L
     for row in rows:
         row = {str(k): ("" if v is None else v) for k, v in dict(row).items() if k is not None}
         key = _row_key(dict(row, Mobile=pb.normalize_phone(row.get("Mobile", ""))))
-        # Every column, each cell as the sheets show it: the export's "N/A", "—", "none"... are no
-        # value (progress_builder.clean_value), and a placeholder passport ("PENDING") is none (R1).
-        cells = {k: pb.clean_value(v) for k, v in row.items()}
-        if "Passport No" in cells:
-            cells["Passport No"] = _passport_value(cells["Passport No"])
-        data = dict(cells, stale_columns=list(STALE_EXPORT_COLUMNS))
+        # Every column, each cell trimmed: the export's "N/A", "—", "none", a "PENDING" date... are
+        # no value, the same words as in the student list (is_filler: every marker
+        # progress_builder.clean_value blanks, and a Bangla text kept), and a placeholder passport
+        # is none (R1); each is named in blank_on_portal.
+        cells, blanked = _blank_cells({k: str(v).strip() for k, v in row.items()})
+        _passport_cell(cells, "Passport No", blanked)
+        data = _mark_blank(dict(cells, stale_columns=list(STALE_EXPORT_COLUMNS)), blanked)
         name, hng = cells.get("Full Name", ""), cells.get("Student ID", "")
         fields = _pairs(cells, skip=set(STALE_EXPORT_COLUMNS) | {"Full Name", "Student ID"})
         text = _paragraph(_sentence("Student export row (students.php?export=csv)"
@@ -563,7 +655,7 @@ def student_exports(rows: Iterable[Mapping[str, str]], read_at: Any = None) -> L
                           _sentence(fields) if fields else "")
         out.append(make("student_export", key, "all", data, text, "students.php?export=csv", read_at,
                         hng=hng, name=name, passport=_passport(row.get("Passport No")),
-                        day=iso_day(row.get("Applied On"))))
+                        day=iso_day(cells.get("Applied On"))))
     return unique_keys(out)
 
 
@@ -584,19 +676,19 @@ def export_complete(rows: Sequence[Mapping[str, Any]], listed: Optional[int]) ->
 
 def student_profile(uid: Any, fields: Mapping[str, Any], read_at: Any = None) -> Optional[Dict[str, Any]]:
     """kind student_profile, key = scope = uid: student_edit.php's form as
-    HangeulAdminClient._profile_fields reads it (every filled field, by its form name). None when
-    it shows no profile (no name or full_name: the page was not the profile)."""
+    HangeulAdminClient._profile_fields reads it (every filled field, by its form name), the
+    portal's fillers blanked and named in blank_on_portal. None when it shows no profile (no name
+    or full_name: the page was not the profile)."""
     uid = str(uid or "").strip()
-    fields = {str(k): _dash(v) for k, v in dict(fields or {}).items()}
-    if "passport_number" in fields:
-        fields["passport_number"] = _passport_value(fields["passport_number"])
+    fields, blanked = _blank_cells({str(k): v for k, v in dict(fields or {}).items()})
+    _passport_cell(fields, "passport_number", blanked)
     name = fields.get("full_name") or fields.get("name") or ""
     if _uid(uid) is None or not name:
         return None
     pairs = _pairs({k.replace("_", " "): v for k, v in fields.items() if k not in ("id", "save")})
     text = _paragraph(_sentence(f"Student profile (student_edit.php) of {name}{_ids(f'portal uid {uid}')}"),
                       _sentence(pairs) if pairs else "")
-    return make("student_profile", uid, uid, fields, text, "student_edit.php", read_at,
+    return make("student_profile", uid, uid, _mark_blank(fields, blanked), text, "student_edit.php", read_at,
                 uid=uid, name=name, passport=_passport(fields.get("passport_number")))
 
 
@@ -605,16 +697,18 @@ def student_progress(progress: Mapping[str, Mapping[str, Any]],
                      read_at: Any = None) -> List[Dict[str, Any]]:
     """kind student_progress, key uid, scope all: stage_report.read_progress's pages
     ({uid: {"pct", "stage", "status"}}); an entry that could not be read ({"error"}) is left out.
-    `listed` ({uid: students.php record}) adds the student's HNG id and name."""
+    `listed` ({uid: students.php record}) adds the student's HNG id and name. A filler is blanked
+    and named in blank_on_portal (the stage's and status's "Pending" is a status, kept)."""
     out = []
     for uid, p in (progress or {}).items():
         uid = str(uid).strip()
         if _uid(uid) is None or not isinstance(p, Mapping) or p.get("error") or "pct" not in p:
             continue
         s = (listed or {}).get(uid) or {}
-        hng = s.get("student_id") or ""
-        name = s.get("student_name") or (s.get("details") or {}).get("Full Name") or ""
-        data = dict(p)
+        hng = _given(s.get("student_id")) or ""
+        name = _given(s.get("student_name")) or _given((s.get("details") or {}).get("Full Name")) or ""
+        p, blanked = _blank_cells(dict(p))
+        data = _mark_blank(dict(p), blanked)
         if hng:
             data["student_id"] = hng
         if name:
@@ -636,11 +730,13 @@ def consultation(row: Mapping[str, Any], day: Any, read_at: Any = None) -> Dict[
     forms, parsers._consultation_table_rows), else sha1 of name + contact + received (the key then
     changes when the name or contact is edited: a delete and a new record, not an edit); scope =
     the received ISO day. Every field of the row, except the reader's "Unassigned" for a request
-    with no consultant, which is no value (R1)."""
+    with no consultant, which is no value (R1), and a cell that holds only a filler word (blanked
+    and named in blank_on_portal; the words inside a longer text, such as the form's details, are
+    the text's own)."""
     iso = iso_day(day) or iso_day(row.get("received_date")) or ""
     rid = str(row.get("id") or "").strip()
     key = rid if rid.isdigit() else sha1(row.get("name", ""), row.get("contact", ""), row.get("received", ""))
-    row = dict(row)
+    row, blanked = _blank_cells(dict(row))
     if str(row.get("consultant") or "").strip() == FILLED_CONSULTANT:
         row["consultant"] = ""
     by = row.get("handled_by") or ""
@@ -655,7 +751,7 @@ def consultation(row: Mapping[str, Any], day: Any, read_at: Any = None) -> Dict[
                                         by and f"last updated by {by}") if x)),
         _sentence(f"Details: {row.get('details')}") if row.get("details") else "",
         _sentence(f"Remarks: {row.get('remarks')}") if row.get("remarks") else "")
-    return make("consultation", key, iso, row, text,
+    return make("consultation", key, iso, _mark_blank(row, blanked), text,
                 f"consult_requests.php?status=all&from={iso}&to={iso}", read_at, name=row.get("name"), day=iso)
 
 
@@ -699,17 +795,18 @@ def consultation_totals(totals: Mapping[str, Any], read_at: Any = None) -> Optio
 def window_applications(rows: Iterable[Mapping[str, Any]], read_at: Any = None) -> List[Dict[str, Any]]:
     """kind window_application, key student|window, scope all: the rows of
     window_applications.php?status=under_review whose own status is under review (parsers
-    count_under_review's rule)."""
+    count_under_review's rule). A filler cell is blanked and named in blank_on_portal."""
     from src.scraper.parsers import _label_key
     out = []
     for row in rows or []:
         if _label_key(str(row.get("status") or "")) != "under review":
             continue
         key = f"{row.get('student', '')}|{row.get('window', '')}"
+        row, blanked = _blank_cells(dict(row))
         text = _sentence("Window application" + (f" of {row.get('student')}" if row.get("student") else "")
                          + (f" for {row.get('window')}" if row.get("window") else "")
                          + f": {row.get('status')} (window_applications.php)")
-        out.append(make("window_application", key, "all", row, text,
+        out.append(make("window_application", key, "all", _mark_blank(row, blanked), text,
                         "window_applications.php?status=under_review", read_at, name=row.get("student")))
     return unique_keys(out)
 
@@ -766,15 +863,17 @@ def calendar_items(items: Iterable[Any], read_at: Any = None) -> List[Dict[str, 
     """kind calendar_item, key = the portal's event id (else sha1 of title, start and note), scope
     all: ask.calendar_items (the month's event list, today's reminders and the 45-day timeline,
     merged). calendar.php shows only this month and the next 45 days, so a read is never complete
-    for all items: publish them with complete=False (nothing deleted)."""
+    for all items: publish them with complete=False (nothing deleted). A filler cell (a title,
+    place or note that says only "N/A"...) is blanked and named in blank_on_portal."""
     out = []
     for it in items or []:
         it = it._asdict() if hasattr(it, "_asdict") else dict(it)
         if it.get("kind") == FILLED_CALENDAR_KIND:
             it["kind"] = ""           # ask.calendar_items' word for a kind the page does not show (R1)
-        data = jsonable(it)
         cid = str(it.get("id") or "").strip()
-        key = cid or "t:" + sha1(it.get("title", ""), "|", data.get("start") or "", "|", it.get("note", ""))
+        key = cid or "t:" + sha1(it.get("title", ""), "|", jsonable(it.get("start")) or "", "|", it.get("note", ""))
+        it, blanked = _blank_cells(it)
+        data = _mark_blank(jsonable(it), blanked)
         start, end = data.get("start"), data.get("end")
         when = (f"from {_long_day(start)} to {_long_day(end)}" if start and end and start != end
                 else f"on {_long_day(end or start)}" if (start or end) else "")

@@ -90,14 +90,26 @@ def _python() -> str:
     return exe
 
 
+def child_env() -> Dict[str, str]:
+    """The publisher process's environment: this one, UTF-8, the Hugging Face hub offline, and
+    CUDA hidden with CUDA_VISIBLE_DEVICES=-1 (embed.NO_GPU; an empty value would not reach it on
+    Windows, and torch would see the GPU)."""
+    from src.cloud.embed import NO_GPU
+    return {**os.environ, "PYTHONIOENCODING": "utf-8", "CUDA_VISIBLE_DEVICES": NO_GPU, "HF_HUB_OFFLINE": "1"}
+
+
+def start(args: Sequence[str], log) -> subprocess.Popen:
+    """`python <args>` as the publisher is started (scheduler._run_module's settings): the venv's
+    console python.exe, the bot folder, child_env(), stdin closed, output to `log`, no window."""
+    return subprocess.Popen([_python(), *args], cwd=str(BOT_ROOT), stdin=subprocess.DEVNULL, stdout=log,
+                            stderr=log, env=child_env(), close_fds=True,
+                            creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0)
+
+
 def spawn(path: Path, timeout: float = CHILD_TIMEOUT) -> subprocess.Popen:
-    """Start the publisher on `path`, not waiting for it (scheduler._run_module's settings)."""
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "CUDA_VISIBLE_DEVICES": "", "HF_HUB_OFFLINE": "1"}
+    """Start the publisher on `path`, not waiting for it."""
     with open(LOG_PATH, "a", encoding="utf-8") as log:
-        proc = subprocess.Popen(
-            [_python(), "-m", "src.cloud.publish", "--from", str(path), "--timeout", str(int(timeout))],
-            cwd=str(BOT_ROOT), stdin=subprocess.DEVNULL, stdout=log, stderr=log, env=env, close_fds=True,
-            creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0)
+        proc = start(["-m", "src.cloud.publish", "--from", str(path), "--timeout", str(int(timeout))], log)
     _children[:] = [p for p in _children if p.poll() is None]
     _children.append(proc)                           # a reference, so it is not reaped mid-run
     return proc

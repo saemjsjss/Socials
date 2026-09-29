@@ -657,7 +657,8 @@ def test_the_full_list_is_complete_and_its_verifications_per_day(cloud, portal):
     assert cloud.fake.keys("verification") == ["426"] and cloud.fake.keys("student") == ["426", "427"]
 
 
-def test_at_most_200_rows_a_call_and_the_key_list_on_the_last_call_only(cloud):
+def test_at_most_200_rows_a_call_and_the_key_list_on_the_last_call_only(cloud, monkeypatch):
+    monkeypatch.setattr(publish, "MAX_BODY", 10 ** 8)          # the row cap alone (the body cap: test_cloud_fixes)
     rows = student_rows(*[f"TEST {i}" for i in range(450)])
     res = publish.publish("student", "all", rows, True)
     syncs = cloud.fake.syncs()
@@ -855,7 +856,7 @@ def test_submit_writes_one_file_and_starts_the_publisher_without_waiting(cloud, 
     assert args[1:5] == ["-m", "src.cloud.publish", "--from", str(path)] and args[5] == "--timeout"
     assert kw["cwd"] == str(BOT_ROOT) and kw["stdin"] == subprocess.DEVNULL
     assert kw["stdout"] is kw["stderr"] and kw["stdout"] not in (subprocess.PIPE, None)
-    assert kw["env"]["CUDA_VISIBLE_DEVICES"] == "" and kw["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert kw["env"]["CUDA_VISIBLE_DEVICES"] == "-1" and kw["env"]["PYTHONIOENCODING"] == "utf-8"
     if os.name == "nt":
         assert kw["creationflags"] == handoff.CREATE_NO_WINDOW
 
