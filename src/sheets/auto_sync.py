@@ -32,7 +32,7 @@ import logging
 import os
 import re
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from src.config import settings
 from src.sheets import progress_builder as pb
@@ -272,12 +272,17 @@ def sync_sheets(state: Dict) -> List[str]:
 
 
 # --- 2) verified documents -------------------------------------------------------------
-def sync_docs() -> List[str]:
+def sync_docs(cloud: Optional[Dict] = None) -> List[str]:
+    """Download the newly verified students' documents -> the summary lines. `cloud` (when
+    publishing to Supabase is on) keeps the verified list that was read, for the end of the run."""
+    started = time.time()
     loop = asyncio.new_event_loop()
     try:
         result = loop.run_until_complete(vd.run_local(DOCS_ROOT))
     finally:
         loop.close()
+    if cloud is not None:
+        cloud["documents"], cloud["documents_at"] = result.get("students"), started
     return doc_lines(result)
 
 
@@ -307,28 +312,42 @@ def doc_lines(result: Dict[str, list]) -> List[str]:
 
 
 # --- 3) verification of what was downloaded ----------------------------------------------
-def verify_docs() -> List[str]:
+def verify_docs(cloud: Optional[Dict] = None) -> List[str]:
     """Check the documents of every student whose folder or portal record changed, and
     refresh DOCUMENT CHECK.xlsx / FIELD CHECK.xlsx. Slow (OCR), so each pass takes a few
-    students and the rest wait for the next pass."""
+    students and the rest wait for the next pass. `cloud` (when publishing to Supabase is on)
+    keeps the check's result, and whether results.json could be read before it."""
     from src.verify import auto_verify as av
-    return av.summary_lines(av.run(budget=av.DEFAULT_BUDGET))
+    if cloud is not None:
+        from src.cloud.sheet_hooks import store_readable
+        cloud["store_ok"] = store_readable(av.STORE_PATH)
+    result = av.run(budget=av.DEFAULT_BUDGET)
+    if cloud is not None:
+        cloud["verify"] = result
+    return av.summary_lines(result)
 
 
 # --- 4) Telegram review ----------------------------------------------------------------
-def notify(lines: List[str], title: str = "🔄 Portal sync — changes found") -> None:
+SYNC_TITLE = "🔄 Portal sync — changes found"
+CHECK_TITLE = "🔍 Document check"
+
+
+def notify(lines: List[str], title: str = SYNC_TITLE) -> bool:
     """Send `title` and the lines as plain text to every brief recipient, split between lines
-    under Telegram's limit (src.bot.replies.split_text)."""
+    under Telegram's limit (src.bot.replies.split_text). -> whether Telegram accepted every piece
+    for at least one recipient (the text was sent as it is)."""
     import httpx
     from src.bot.replies import split_text
     token = settings.TELEGRAM_BOT_TOKEN
     ids = settings.brief_recipient_ids()
     if not token or not ids:
         logger.warning("Telegram not configured — summary not sent")
-        return
+        return False
     chunks = split_text(f"{title}\n\n" + "\n".join(lines))
+    sent = False
     with httpx.Client(timeout=30) as http:
         for chat in ids:
+            accepted = 0
             for chunk in chunks:
                 try:
                     resp = http.post(f"https://api.telegram.org/bot{token}/sendMessage",
@@ -336,8 +355,12 @@ def notify(lines: List[str], title: str = "🔄 Portal sync — changes found") 
                     if resp.status_code >= 400:
                         logger.warning("Telegram refused the summary for %s: HTTP %s %s", chat,
                                        resp.status_code, resp.text[:200])
+                    else:
+                        accepted += 1
                 except Exception as e:
                     logger.warning("Telegram send to %s failed: %s", chat, e)
+            sent = sent or accepted == len(chunks)
+    return sent
 
 
 # --- run ---------------------------------------------------------------------------------
@@ -392,6 +415,16 @@ def run_once(send: bool = True, verify: bool = True) -> List[str]:
         print("Another sync is still running — skipped.")
         return []
     LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
+    # What this run read and sent, kept for the Supabase copy made at its very end (None while
+    # publishing is off: then nothing is kept and nothing is built).
+    cloud: Optional[Dict] = None
+    try:
+        from src.cloud import sheet_hooks
+        if sheet_hooks.on():
+            cloud = {"run_at": time.time(), "title": SYNC_TITLE, "sent": []}
+    except Exception as e:
+        logger.warning("Supabase publish failed (portal_sync): the publish layer could not load (%s)",
+                       type(e).__name__)
     try:
         state = json.loads(STATE_PATH.read_text(encoding="utf-8")) if STATE_PATH.exists() else {}
         lines: List[str] = []
@@ -400,33 +433,48 @@ def run_once(send: bool = True, verify: bool = True) -> List[str]:
             lines += _failure_cleared(state, "sheets", "Progress-sheet update")
         except Exception as e:
             lines += _failure_line(state, "sheets", "Progress-sheet update", e)
+            if cloud is not None:
+                cloud["sheets_error"] = e
         finally:
             STATE_PATH.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
         try:
-            lines += _with_retries(lambda: sync_docs(), "Document download")
+            lines += _with_retries(lambda: sync_docs(cloud), "Document download")
             lines += _failure_cleared(state, "docs", "Document download")
         except Exception as e:
             lines += _failure_line(state, "docs", "Document download", e)
+            if cloud is not None:
+                cloud["docs_error"] = e
         finally:
             STATE_PATH.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
         stamp = time.strftime("%Y-%m-%d %H:%M")
         print(f"[{stamp}] " + ("\n".join(lines) if lines else "no changes"))
+        if cloud is not None:
+            cloud["lines"] = list(lines)
         if lines and send:
-            notify(lines)
+            if notify(lines) and cloud is not None:
+                cloud["sent"].append((SYNC_TITLE, list(lines), time.time()))
 
         # Verification is slow, so it runs after the sync summary has already gone out
         # and reports separately. A problem here must never fail the sync.
         if verify:
             try:
-                vlines = verify_docs()
+                vlines = verify_docs(cloud)
             except Exception as e:
                 logger.warning("Document check could not run: %s", e)
                 vlines = []
+                if cloud is not None:
+                    cloud["verify_error"] = e
             if vlines:
                 print(chr(10).join(vlines))
                 if send:
-                    notify(vlines, title="🔍 Document check")
+                    if notify(vlines, title=CHECK_TITLE) and cloud is not None:
+                        cloud["sent"].append((CHECK_TITLE, list(vlines), time.time()))
                 lines += vlines
+        # Last of all, when the sheets, the documents and Telegram are done: hand what was read
+        # to the Supabase publisher (its own process; this run never waits for it).
+        if cloud is not None:
+            cloud["export"] = pb._ALL_STUDENTS_CACHE
+            sheet_hooks.after_sync(cloud)
         return lines
     finally:
         LOCK_PATH.unlink(missing_ok=True)

@@ -238,26 +238,32 @@ def write_excel(rows) -> "pb.Path":
     return path
 
 
-def send(lines: List[str], xlsx) -> None:
+def send(lines: List[str], xlsx) -> bool:
     """The report's lines (plain text, split under Telegram's limit) and, when `xlsx` is given, its
-    Excel file, to every brief recipient."""
+    Excel file, to every brief recipient. -> whether Telegram accepted every piece of the text for
+    at least one recipient."""
     import httpx
     from src.config import settings
     token, ids = settings.TELEGRAM_BOT_TOKEN, settings.brief_recipient_ids()
     if not token or not ids:
         logger.warning("Telegram not configured — report not sent")
-        return
+        return False
     from src.bot.replies import split_text
     chunks = split_text("\n".join(lines))   # between lines, under Telegram's limit
+    sent = False
     with httpx.Client(timeout=60) as http:
         for chat in ids:
             try:
+                accepted = 0
                 for c in chunks:
                     resp = http.post(f"https://api.telegram.org/bot{token}/sendMessage",
                                      data={"chat_id": chat, "text": c, "disable_web_page_preview": True})
                     if resp.status_code >= 400:
                         logger.warning("Telegram refused the report for %s: HTTP %s %s", chat,
                                        resp.status_code, resp.text[:200])
+                    else:
+                        accepted += 1
+                sent = sent or accepted == len(chunks)
                 if xlsx is None:
                     continue
                 with open(xlsx, "rb") as f:
@@ -268,6 +274,18 @@ def send(lines: List[str], xlsx) -> None:
                         logger.warning("Telegram refused the Excel file for %s: HTTP %s", chat, resp.status_code)
             except Exception as e:
                 logger.warning("Telegram send to %s failed: %s", chat, e)
+    return sent
+
+
+def _supabase(call) -> None:
+    """The very last step: this report's records to the Supabase publisher (call(sheet_hooks);
+    src.cloud.sheet_hooks hands them to a process of their own, never waited for). Never raises,
+    never prints (the /missing button's reply is this process's output)."""
+    try:
+        from src.cloud import sheet_hooks
+        call(sheet_hooks)
+    except Exception as e:
+        logger.warning("Supabase publish failed (missing_report): %s", type(e).__name__)
 
 
 def main() -> None:
@@ -282,13 +300,18 @@ def main() -> None:
         if key not in pb.PROGRAMS:
             raise SystemExit(f"Unknown program {key!r}. Choose one of: {', '.join(pb.PROGRAMS)}")
         try:
-            print(program_report(key))
+            data = read_sheets()                   # the same reads, in the same order, as
+            index = portal_index()                 # program_report(key) makes by itself
+            text = program_report(key, data, index)
+            print(text)
         except Exception as e:
             from src.scraper.client import portal_error_reason
             logger.error("missing-information report for %s failed: %s", key, e)
             print(f"❌ Couldn't read the progress sheets or the portal: {portal_error_reason(e)}.\n"
                   f"Missing information — {pb.PROGRAMS[key]['name']}: not available right now. "
                   "Please try again in a minute.")
+            return
+        _supabase(lambda h: h.after_missing_program(key, text, data, index))
         return
     if args.student:
         data = read_sheets()
@@ -318,13 +341,17 @@ def main() -> None:
         notice = (f"❌ Couldn't build today's missing-information report: {portal_error_reason(e)}. "
                   "It will run again tomorrow at 09:05 (or send /missing).")
         print(notice)
+        sent_at = None
         if not args.no_notify:
-            send([notice], None)
+            sent_at = time.time() if send([notice], None) else None
+        _supabase(lambda h: h.after_missing_failed(notice, sent_at, e))
         raise SystemExit(1)
     print("\n".join(lines))
     print(f"\nExcel: {xlsx}")
+    sent_at = None
     if not args.no_notify:
-        send(lines, xlsx)
+        sent_at = time.time() if send(lines, xlsx) else None
+    _supabase(lambda h: h.after_missing_daily(lines, rows, sent_at))
 
 
 if __name__ == "__main__":

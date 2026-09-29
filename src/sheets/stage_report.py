@@ -176,11 +176,15 @@ def _progress_words(page: Optional[Dict[str, Any]], stage: str) -> str:
 
 
 def stage_report(program_key: str, intake: str, listed: Optional[List[Dict[str, Any]]] = None,
-                 progress: Optional[Dict[str, Dict[str, Any]]] = None) -> str:
+                 progress: Optional[Dict[str, Dict[str, Any]]] = None,
+                 reads: Optional[Dict[str, Any]] = None) -> str:
     """The stage report of one program + intake. `listed` is the student list (students.php, every
     page) and `progress` each listed student's progress page by uid (read_progress); each is read
     live when not given. Raises PortalUnavailable when the student list cannot be read; a progress
-    page that cannot be read leaves its line without a status (and the report says how many)."""
+    page that cannot be read leaves its line without a status (and the report says how many).
+    `reads`, when given, is filled with what the report was built from (for the Supabase copy):
+    "matched" (each CSV row's list record or None), "pages" (the progress pages by uid) and
+    "by_stage" ({stage: [(CSV row, list record)]})."""
     cfg = pb.PROGRAMS[program_key]
     want = "" if intake == NO_INTAKE else pb.normalize_intake(intake)
     rows = [s for s in program_students(program_key) if pb.normalize_intake(s.get("Intake", "")) == want]
@@ -197,6 +201,8 @@ def stage_report(program_key: str, intake: str, listed: Optional[List[Dict[str, 
     by_stage: Dict[str, List[Tuple[Dict[str, str], Optional[Dict[str, Any]]]]] = {}
     for r, s in zip(rows, matched):
         by_stage.setdefault(_stage_of(s) or NOT_FOUND, []).append((r, s))
+    if reads is not None:
+        reads.update(matched=matched, pages=pages, by_stage=by_stage)
     order = sorted(by_stage, key=lambda st: STAGE_ORDER.index(st) if st in STAGE_ORDER else
                    (100 if st == NOT_FOUND else 99))
 
@@ -234,13 +240,25 @@ def main() -> None:
     from src.scraper.client import portal_error_reason
     if args.intake:
         intake = args.intake.strip().upper()
+        reads: Dict[str, Any] = {}
         try:
-            print(stage_report(key, intake))
+            text = stage_report(key, intake, reads=reads)
+            print(text)
         except Exception as e:
             label = "(no intake set)" if intake == NO_INTAKE else pb.normalize_intake(intake)
             print(f"❌ Couldn't read the portal: {portal_error_reason(e)}.\n"
                   f"Stages for {pb.PROGRAMS[key]['name']} {label}: not available right now. "
                   "Please try again in a minute.")
+            return
+        # The very last step: the pages read, and the report, to the Supabase publisher (a process
+        # of its own, never waited for: this process's output is the button's reply). Never
+        # raises, never prints.
+        try:
+            from src.cloud import sheet_hooks
+            sheet_hooks.after_stage(key, intake if intake == NO_INTAKE else pb.normalize_intake(intake), text, reads)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Supabase publish failed (stage_report): %s", type(e).__name__)
     else:
         try:
             print(json.dumps(intakes_for(key)))

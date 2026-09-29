@@ -331,11 +331,13 @@ async def run_local(root: Path, limit: int = 0, skip_drive_done: bool = True) ->
     <root>/<PROGRAM>/<FULL NAME> (<PASSPORT NO>)/<files>.  Files over 2 MB are shrunk.
     Returns {"saved": [(program, name, n_files, shrink_report)] for first downloads,
     "redownloaded": [the same] for students fetched again because their portal files changed
-    (n_files = the files that were new), "failed": [(name, error)]}."""
+    (n_files = the files that were new), "failed": [(name, error)], "students": every verified
+    student the list showed (fetch_verified_students: the whole list, whatever `limit` is)}."""
     from src.scraper.client import admin_client as client
     try:
         await client.login()
         students = await fetch_verified_students(client)
+        listed = list(students)
         print(f"{len(students)} verified student(s) on the portal.")
         if limit:
             students = students[:limit]
@@ -344,7 +346,7 @@ async def run_local(root: Path, limit: int = 0, skip_drive_done: bool = True) ->
             print(f"{len(in_drive)} already complete in Google Drive - not downloaded again.")
         print(f"Saving to: {root}")
 
-        result: Dict[str, list] = {"saved": [], "redownloaded": [], "failed": []}
+        result: Dict[str, list] = {"saved": [], "redownloaded": [], "failed": [], "students": listed}
         done = skipped = drive_skipped = failed = 0
         for n, s in enumerate(students, 1):
             name = folder_name(s)
