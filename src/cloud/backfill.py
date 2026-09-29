@@ -285,7 +285,7 @@ def _mtime(path: Path) -> str:
     return records.as_read_at(datetime.fromtimestamp(path.stat().st_mtime))
 
 
-ALL_SCOPES = ("", "￿")          # every scope: the store holds every passport there is
+ALL_SCOPES = ("", chr(0xFFFF))      # every scope: the store holds every passport there is
 
 
 def collect_results(verification_dir: Path) -> Tuple[Batches, List[str], Dict[str, Any]]:

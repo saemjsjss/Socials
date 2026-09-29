@@ -929,7 +929,7 @@ def test_progress_is_complete_only_when_every_page_was_read(monkeypatch):
 
 
 def test_the_export_is_complete_when_it_came_whole(portal):
-    csv_text = "﻿Source,Student ID,Full Name,Mobile,Passport No\nDirect,HNG-2026-905,TEST A,01711000001,A1234567\n"
+    csv_text = chr(0xFEFF) + "Source,Student ID,Full Name,Mobile,Passport No\nDirect,HNG-2026-905,TEST A,01711000001,A1234567\n"
     portal.pages["students.php?export=csv"] = csv_text
     b, f = asyncio.run(backfill.collect_export(admin_client, total=1))
     assert f == [] and b[0]["complete"] and b[0]["rows"][0]["key"] == "Student ID:HNG-2026-905"
