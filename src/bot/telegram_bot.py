@@ -63,7 +63,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "7️⃣ `/crosscheck_range` — Total crosscheck verified live (ask start date → end date)\n"
         "8️⃣ `/sendmail` — Email a student: ask ID → subject → brief; AI writes it; you approve\n"
         "9️⃣ `/missing` — Progress sheet missing information (KLP / EAP / Bachelor's / Master's)\n"
-        "🔟 `/stage` — Student stages: choose program → intake\n\n"
+        "🔟 `/stage` — Student stages: choose program → intake\n"
+        "1️⃣1️⃣ `/performance_today` — Whole team's performance today: consultations & payments verified, per person\n"
+        "1️⃣2️⃣ `/performance_month` — Whole team's performance this month (1st → today), per person\n\n"
         "💡 *Natural Language Assistant:*\n"
         "You can also ask directly or specify dates:\n"
         "• _'Total consultancy inquires and how many were done today'_\n"
@@ -267,7 +269,7 @@ async def students_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply_long(update.message, "\n".join(lines).strip())
 
 def get_commands_cheatsheet_text() -> str:
-    """Return the pinned cheatsheet markdown containing the 6 official menu commands and usage."""
+    """Return the pinned cheatsheet markdown containing the official menu commands and usage."""
     return (
         "📌 *HANGEUL ADMIN AI BOT — TELEGRAM MENU (PP PIN)*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -296,7 +298,11 @@ def get_commands_cheatsheet_text() -> str:
         "9️⃣ `/missing`\n"
         "└ *Progress sheet missing information — tap KLP / EAP / Bachelor's / Master's*\n\n"
         "🔟 `/stage`\n"
-        "└ *Student stages — tap a program, then an intake*\n"
+        "└ *Student stages — tap a program, then an intake*\n\n"
+        "1️⃣1️⃣ `/performance_today`\n"
+        "└ *Whole team's performance today — consultations & payments verified, per person*\n\n"
+        "1️⃣2️⃣ `/performance_month`\n"
+        "└ *Whole team's performance this month (1st → today), per person*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "💡 *Interactive Date Asking:*\n"
         "Whenever clicking a date command from the menu without arguments, the bot will ask you for the date and automatically process your reply!\n\n"
@@ -684,6 +690,62 @@ async def crosscheck_date_command(update: Update, context: ContextTypes.DEFAULT_
     context.user_data["override_text"] = raw_input
     context.user_data["crosscheck_date_only"] = True
     await crosscheck_command(update, context)
+
+async def _send_performance_report(update: Update, kind: str) -> None:
+    """The whole team's performance for `kind` ("today", or "month": this month's 1st to today),
+    read live (src.bot.performance), as a reply split under Telegram's limit: the "⏳" message
+    becomes its first piece (src.bot.replies.reply_long)."""
+    from src.bot import performance
+    from src.bot.brief import esc
+    from src.bot.replies import reply_long
+    from src.dates import local_today
+    from src.scraper.client import portal_error_reason
+    today = local_today()
+    first, last = performance.window(kind, today)
+    status_msg = await update.message.reply_text(performance.waiting_text(kind, first, last), parse_mode="Markdown")
+    try:
+        report = await performance.build_performance_report(kind, today)
+    except Exception as e:
+        logger.error(f"Error building the {kind} performance report: {type(e).__name__}: {e}")
+        report = f"❌ Error building the performance report: {esc(portal_error_reason(e))}"
+    await reply_long(update.message, report, edit=status_msg)
+
+
+async def performance_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menu 12: the whole team's performance today: the consultation requests received today and
+    what became of them, the payments verified, and each staff member's share."""
+    if not is_authorized(update):
+        await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{update.effective_chat.id}`",
+                                        parse_mode="Markdown")
+        return
+    await _send_performance_report(update, "today")
+
+
+async def performance_month_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Menu 13: the whole team's performance this month, from its 1st to today (both included)."""
+    if not is_authorized(update):
+        await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{update.effective_chat.id}`",
+                                        parse_mode="Markdown")
+        return
+    await _send_performance_report(update, "month")
+
+
+async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/performance [today | month]: today's report, or this month's when the words say so
+    (src.bot.ask.performance_route, the free-text rule). Any other day or span is said to be
+    unavailable, with the commands that can answer: never a stand-in window."""
+    if not is_authorized(update):
+        await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{update.effective_chat.id}`",
+                                        parse_mode="Markdown")
+        return
+    from src.bot import ask
+    from src.dates import local_today
+    route = ask.performance_route(" ".join(context.args or []), local_today())
+    if route.topic in ("today", "month"):
+        await _send_performance_report(update, route.topic)
+    else:
+        await update.message.reply_text(ask.performance_other_reply(route), parse_mode="Markdown")
+
 
 async def consultations_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /consultations [date] or /inquiries command."""
@@ -1916,6 +1978,15 @@ async def handle_natural_language_message(update: Update, context: ContextTypes.
     if kind == "pin":
         await pin_command(update, context)
         return
+    # The whole team's performance: today, or this month; another day or span says what can be read.
+    if kind == "performance":
+        if route.topic == "month":
+            await performance_month_command(update, context)
+        elif route.topic == "today":
+            await performance_today_command(update, context)
+        else:
+            await update.message.reply_text(ask.performance_other_reply(route), parse_mode="Markdown")
+        return
 
     # A span of days asked of an answer given one day at a time: which day (a passport check can
     # be a range: the range cross-check).
@@ -2187,7 +2258,7 @@ async def stage_intake_button(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def post_init(application: Application):
-    """Register exclusively the 6 requested Telegram Bot menu commands and pin cheat-sheet on startup."""
+    """Set the Telegram Bot menu commands (set_my_commands) and pin the cheat-sheet on startup."""
     commands = [
         BotCommand("inquiries_today", "Total consultancy inquiries & how many done today"),
         BotCommand("inquiries_date", "Total inquiries & how many done (ask specific date)"),
@@ -2200,10 +2271,12 @@ async def post_init(application: Application):
         BotCommand("brief", "Run today's full 6:05 PM operational brief now"),
         BotCommand("missing", "Progress sheet missing information (KLP / EAP / Bachelor's / Master's)"),
         BotCommand("stage", "Student stages — choose program → intake"),
+        BotCommand("performance_today", "Whole team's performance today: consultations & payments verified, per person"),
+        BotCommand("performance_month", "Whole team's performance this month (1st → today), per person"),
     ]
     try:
         await application.bot.set_my_commands(commands)
-        logger.info("Successfully set 7 exclusive bot menu commands (set_my_commands).")
+        logger.info(f"Successfully set {len(commands)} bot menu commands (set_my_commands).")
     except Exception as e:
         logger.error(f"Failed to set bot menu commands: {e}")
 
@@ -2265,6 +2338,11 @@ def build_telegram_application():
     app.add_handler(CommandHandler("mail", sendmail_command))
     app.add_handler(CommandHandler("crosscheck_between", crosscheck_range_command))
     app.add_handler(CommandHandler("crosscheck_period", crosscheck_range_command))
+    app.add_handler(CommandHandler("performance_today", performance_today_command))
+    app.add_handler(CommandHandler("perf_today", performance_today_command))
+    app.add_handler(CommandHandler("performance_month", performance_month_command))
+    app.add_handler(CommandHandler("perf_month", performance_month_command))
+    app.add_handler(CommandHandler("performance", performance_command))
 
     # Also register aliases and standard commands
     app.add_handler(CommandHandler("start", start_command))

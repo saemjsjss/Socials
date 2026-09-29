@@ -95,6 +95,15 @@ _STATS_RE = _re(r"stats|statistics|dashboard|figures|kpis?|metrics|numbers")
 _REJECT_RE = _re(r"reject\w*")
 _APPROVE_RE = _re(r"approv\w*")
 _MOST_RE = _re(r"most|top|biggest|largest|popular|highest|leading|best")
+# The whole team's performance (/performance_today, /performance_month): "performance today",
+# "today's performance", "how did the team do today", "monthly performance", "team activity".
+_PERFORMANCE_RE = _re(r"performance|productivity|leaderboard"
+                      r"|how\s+(?:did|does|do|has|have|is|are|was|were)\s+(?:the\s+|our\s+|my\s+)?(?:whole\s+)?"
+                      r"(?:team|staff|everyone|everybody|counsell?ors?|consultants?)\s+"
+                      r"(?:do|done|doing|did|perform(?:ed|ing)?|go|going|gone)"
+                      r"|(?:team|staff)(?:'s)?\s+(?:activity|stats|statistics|report|summary|scores?|results?)")
+_OTHER_MONTH_RE = _re(r"(?:last|previous|past|next|coming|following)\s+(?:\w+\s+)?months?(?:'s)?|months")
+_THIS_MONTH_RE = _re(r"monthly|month(?:'s)?|mtd")
 
 # The words any question may have around what it asks about.
 _FILLER = set("""
@@ -331,12 +340,59 @@ def _when(low: str, today: date) -> Tuple[Optional[date], Optional[Window], Opti
     return None, window, problem
 
 
+def performance_route(text: str, today: Optional[date] = None) -> Route:
+    """Which team-performance report the words ask for: topic "today" (no day named, or today) or
+    "month" (this month, from its 1st to today: "this month", "monthly", "month's", the month's
+    own name). Anything else, another day or span or month, has no topic, with the `day`,
+    `window` or `words` it named, or the `problem` of a date that cannot be read: it is answered
+    with performance_other_reply, never with a stand-in window."""
+    today = today or local_today()
+    low = re.sub(r"\s+", " ", (text or "").lower().replace("’", "'")).strip()
+    if _OTHER_MONTH_RE.search(low):
+        window, _ = date_window(low, today, forward=False)
+        return Route("performance", window=window, words="" if window else "another month")
+    window, problem = date_window(low, today, forward=False)
+    if window is not None and window.first == window.last:
+        return Route("performance", day=window.first, topic="today" if window.first == today else "")
+    if window is not None:
+        month = window.first == today.replace(day=1) and window.last is not None and window.last >= today
+        return Route("performance", window=window, topic="month" if month else "")
+    # "month's performance", "month to date": the word "month" is the only date-like part.
+    named_date = problem and (":" in problem or problem.startswith("it names"))
+    if _THIS_MONTH_RE.search(low) and not named_date:
+        return Route("performance", topic="month")
+    if problem:
+        return Route("performance", problem=problem)
+    return Route("performance", topic="today")
+
+
+def performance_other_reply(route: Route) -> str:
+    """For a performance question about another day, span or month (Telegram Markdown): what can
+    be read, and how."""
+    from src.bot.brief import esc
+    if route.problem:
+        asked = f" (I couldn't read the date there: {esc(route.problem)})"
+    elif route.window is not None:
+        asked = f", and you asked about {esc(route.window.title())}"
+    elif route.day is not None:
+        asked = f", and you asked about {route.day:%a %d %b %Y}"
+    elif route.words:
+        asked = f", and you asked about {esc(route.words)}"
+    else:
+        asked = ""
+    return ("📈 Team performance is read for *today* (/performance\\_today) or for *this month*, from its 1st "
+            f"to today (/performance\\_month){asked}.\n"
+            "For one day's consultations or payments, use /inquiries\\_date or /verified\\_date.")
+
+
 def classify(text: str, today: Optional[date] = None) -> Route:
     """Which answer a typed (or spoken, in English) question asks for, on whole words and real
     dates. The kinds, in the order they are tried:
 
       hello          a greeting or thanks
       pin            the command cheat-sheet ("pin", "menu", "commands")
+      performance    the whole team's performance today or this month (performance_route: topic
+                     "today" or "month"; another day or span has no topic)
       crosscheck     a cross-check: a day, a student, a range (window: "cross-check last week")
       passports      passport problems: the live passport cross-check for the day named
       pending        pending payments
@@ -365,6 +421,8 @@ def classify(text: str, today: Optional[date] = None) -> Route:
         return Route("report")
     if _PIN_RE.search(low):
         return Route("pin")
+    if _PERFORMANCE_RE.search(low):
+        return performance_route(low, today)
 
     if _CROSS_RE.search(low) or _CROSS_FIELD_RE.search(low) or (_CHECK_RE.search(low) and _VERIFY_RE.search(low)):
         window = None
@@ -532,6 +590,7 @@ CANT_ANSWER = (
     "• Deadlines and DHL: /calendar, or “any deadlines this week”\n"
     "• Admitted students: /admitted · Stages: /stage · Missing information: /missing\n"
     "• Passport and document cross-checks: /crosscheck\\_today · /crosscheck\\_date\n"
+    "• The whole team's performance: /performance\\_today · /performance\\_month\n"
     "• The day's brief: /brief"
 )
 

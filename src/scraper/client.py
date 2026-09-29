@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 from collections import Counter
+from datetime import timedelta
 from typing import Optional, Dict, Any, List
 from urllib.parse import parse_qs, urlsplit
 import httpx
@@ -28,6 +29,7 @@ from src.scraper.parsers import (
     student_matches,
     student_pager,
     student_uids,
+    verified_between,
     verified_on_day,
     target_day,
 )
@@ -47,6 +49,9 @@ CONNECT_TIMEOUT = 10.0
 # a status tab opened without a date filter (a handful of rows instead of the ~2 MB full list).
 CONSULT_LIST_LIMIT = 500
 CONSULT_TOTALS_VIEW = {"status": "file_opened"}
+# A window of days longer than the list shows is read again in parts (read_consultation_range);
+# a cap so a list that keeps changing can never loop for long.
+CONSULT_RANGE_MAX_READS = 16
 
 
 def _error_text(e: Exception) -> str:
@@ -84,6 +89,29 @@ def portal_error_reason(e: Exception) -> str:
 def _ended_on_login(resp: httpx.Response) -> bool:
     """Whether a response ended on the login page (a redirect there: the session expired)."""
     return resp.url.path.rstrip("/").endswith("login.php")
+
+
+def _span(first, last) -> str:
+    """'28 Sep 2026' for one day, '01 Sep 2026 – 29 Sep 2026' for a window of days."""
+    return f"{first:%d %b %Y}" if first == last else f"{first:%d %b %Y} – {last:%d %b %Y}"
+
+
+class _ListChanged(PortalUnavailable):
+    """consult_requests.php read in parts did not add up: the list changed between the reads."""
+
+
+def _stamp_guard(students: List[Dict[str, Any]]) -> None:
+    """Raise PortalUnavailable when the list's payment-verification stamps cannot be read: student
+    rows but no "Payment verified by" line on any of them (the line's wording changed), or a line
+    whose date the bot cannot read. Then no day's verifications can be told, not even "none"."""
+    lines = [s for s in students if s.get("verified_line")]
+    if students and not lines:
+        raise PortalUnavailable(f"students.php: {len(students)} student rows but no 'Payment verified by' "
+                                "line on any of them (layout not recognised)")
+    unreadable = [s for s in lines if parse_stamp(s.get("verified_stamp", "")) is None]
+    if unreadable:
+        raise PortalUnavailable(f"students.php: {len(unreadable)} verification line(s) with a date the bot "
+                                "cannot read (layout not recognised)")
 
 class HangeulAdminClient:
     """HTTP Client for Hangeul Admin with session persistence, CSRF handling & mock support."""
@@ -288,6 +316,11 @@ class HangeulAdminClient:
             raise PortalUnavailable(f"couldn't log in to the portal: {result.get('error') or 'no reason given'}",
                                     unreachable=bool(result.get("unreachable")))
 
+    async def ensure_session(self) -> None:
+        """Log in now when there is no session (raises PortalUnavailable when that fails), so reads
+        that then run side by side share one session instead of each logging in."""
+        await self._ensure_session()
+
     async def _get_once(self, path: str, params, limits) -> httpx.Response:
         url = f"{self.base_url}/{path.lstrip('/')}"
         try:
@@ -410,6 +443,96 @@ class HangeulAdminClient:
                                         "do not match its own status counts (layout not recognised)")
         return {"day": day, "counts": counts, "rows": rows, "complete": complete}
 
+    async def read_consultation_range(self, first, last) -> Dict[str, Any]:
+        """The consultation requests received from `first` to `last` (dates, or text such as "1 Sep
+        2026"; both days included), from the portal's own date filter,
+        consult_requests.php?status=all&from=FIRST&to=LAST (a GET, as its search form sends it).
+
+        The status tabs under the filter count every request of the window, while the list under
+        them shows only the newest CONSULT_LIST_LIMIT (a month holds more). When the list stops at
+        its limit, its rows are newest first, so every day after the oldest one it reached is whole:
+        those rows are kept, and the days from `first` to that oldest one are read again as a window
+        of their own, until every request is listed. The parts must add up to the window's own
+        count, and the rows' statuses to its status tabs (a list that changed between the reads is
+        read once more). Each read gets the checks read_consultation_day makes: the filter echoed,
+        every row from inside the window, the caption and the tabs agreeing with the rows.
+
+        -> {"first", "last": the window,
+            "counts": the window's own status-tab counts ("All" is how many were received),
+            "rows": every request of the window (consultation_rows' records), newest first,
+            "complete": whether every one is listed (False only when one day holds more requests
+                        than the list shows),
+            "reads": how many pages were read}
+        Raises ValueError for a day that is not a date or a window that ends before it starts, and
+        PortalUnavailable when a page cannot be read or does not add up."""
+        first, last = target_day(first), target_day(last)
+        if last < first:
+            raise ValueError(f"the window ends ({last:%d %b %Y}) before it starts ({first:%d %b %Y})")
+        for attempt in range(2):
+            try:
+                return await self._consultation_window_read(first, last)
+            except _ListChanged as e:
+                if attempt:
+                    raise PortalUnavailable(e.reason) from e
+                logger.info(f"Consultations {_span(first, last)} read again: {e.reason}")
+
+    async def _consultation_window_read(self, first, last) -> Dict[str, Any]:
+        reads: List[tuple] = []
+
+        async def window(a, b):
+            if len(reads) >= CONSULT_RANGE_MAX_READS:
+                raise PortalUnavailable(f"consult_requests.php: reading {_span(first, last)} took more than "
+                                        f"{CONSULT_RANGE_MAX_READS} pages (the list kept changing)")
+            reads.append((a, b))
+            view = await self.read_consultation_view({"status": "all", "from": a.isoformat(), "to": b.isoformat()})
+            shown = _span(a, b)
+            if view["from"] != a.isoformat() or view["to"] != b.isoformat() or view["status"] != "all":
+                raise PortalUnavailable(f"consult_requests.php did not apply the date filter for {shown} "
+                                        "(layout not recognised)")
+            rows, counts, listed = view["rows"], view["tabs"], view["listed"]
+            days = [parse_portal_date(r.get("received_date") or "") for r in rows]
+            outside = sum(1 for d in days if d is None or not a <= d <= b)
+            if outside:
+                raise PortalUnavailable(f"consult_requests.php's filter for {shown} listed {outside} request(s) "
+                                        "from outside it or with a date the bot cannot read")
+            if listed is not None and listed != len(rows):
+                raise PortalUnavailable(f"consult_requests.php says it lists {listed} requests for {shown} but "
+                                        f"{len(rows)} could be read (layout not recognised)")
+            if len(rows) > counts["All"] or (len(rows) < counts["All"] and listed is None
+                                             and len(rows) < CONSULT_LIST_LIMIT):
+                raise PortalUnavailable(f"consult_requests.php counts {counts['All']} requests for {shown} but "
+                                        f"{len(rows)} could be read (layout not recognised)")
+            if len(rows) == counts["All"]:
+                return rows, counts, True
+            # The list stopped at its limit (newest first): the days after the oldest one it reached
+            # are whole; that oldest day and the ones before it are read again on their own.
+            oldest = min(days)
+            if oldest == b:                     # the window's last day alone holds more than the list
+                if a == b:
+                    return rows, counts, False
+                rest, _, _ = await window(a, b - timedelta(days=1))
+                return rows + rest, counts, False
+            kept = [r for r, d in zip(rows, days) if d > oldest]
+            rest, rest_counts, rest_complete = await window(a, oldest)
+            if len(kept) + rest_counts["All"] != counts["All"]:
+                raise _ListChanged(f"consult_requests.php counts {counts['All']} requests for {shown}, but read "
+                                   f"in parts they are {len(kept) + rest_counts['All']} (the list changed while "
+                                   "it was read)")
+            return kept + rest, counts, rest_complete
+
+        rows, counts, complete = await window(first, last)
+        if complete:
+            got = Counter(r.get("status", "") for r in rows)
+            want = Counter({k: v for k, v in counts.items() if k != "All" and v})
+            if got != want:
+                why = (f"consult_requests.php: the statuses of the {len(rows)} requests for {_span(first, last)} "
+                       "do not match its own status counts")
+                if len(reads) > 1:
+                    raise _ListChanged(why + " (the list changed while it was read)")
+                raise PortalUnavailable(why + " (layout not recognised)")
+        return {"first": first, "last": last, "counts": counts, "rows": rows, "complete": complete,
+                "reads": len(reads)}
+
     async def read_student_pages(self, params: Optional[Dict[str, Any]] = None, *,
                                  all_pages: bool = True) -> List[str]:
         """The HTML of every page of students.php for `params` (e.g. {"q": "Kim"} or
@@ -493,15 +616,30 @@ class HangeulAdminClient:
         verification line whose date cannot be read."""
         day = target_day(target_date)
         students = await self.read_students(all_pages=all_pages)
-        lines = [s for s in students if s.get("verified_line")]
-        if students and not lines:
-            raise PortalUnavailable(f"students.php: {len(students)} student rows but no 'Payment verified by' "
-                                    "line on any of them (layout not recognised)")
-        unreadable = [s for s in lines if parse_stamp(s.get("verified_stamp", "")) is None]
-        if unreadable:
-            raise PortalUnavailable(f"students.php: {len(unreadable)} verification line(s) with a date the bot "
-                                    "cannot read (layout not recognised)")
+        _stamp_guard(students)
         return verified_on_day(students, day)
+
+    async def read_verified_window(self, first, last) -> Dict[str, Any]:
+        """The payment verifications from `first` to `last` (dates, or text such as "1 Sep 2026";
+        both days included), from ONE read of every page of students.php for the whole window, not
+        one per day. Each student counts once, on the day of the row's own "Payment verified by
+        NAME · 27 Sep, 17:19" stamp (parsers.verified_between: whole day and month tokens, a stamp's
+        own year when it has one, never before the student applied). The stamps have no year, so the
+        caller first rejects a window reaching a year or more back, or past today
+        (src.dates.yearless_day_problem on both ends).
+
+        -> {"verified": parsers.verification's dicts, each with its "day", in list order,
+            "students": how many students the list holds (every one was read)}
+        Raises ValueError for a day that is not a date or a window that ends before it starts, and
+        PortalUnavailable as read_verified_students does."""
+        if self.mock_mode:
+            raise PortalUnavailable("the bot is in mock mode, so there is no live portal to read")
+        first, last = target_day(first), target_day(last)
+        if last < first:
+            raise ValueError(f"the window ends ({last:%d %b %Y}) before it starts ({first:%d %b %Y})")
+        students = await self.read_students()
+        _stamp_guard(students)
+        return {"verified": verified_between(students, first, last), "students": len(students)}
 
     async def get_verified_students(self, target_date="today") -> List[Dict[str, Any]]:
         """The /verified commands' read: read_verified_students over every page of students.php.

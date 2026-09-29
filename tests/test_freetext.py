@@ -24,7 +24,7 @@ from datetime import date
 import pytest
 
 from test_foundation import (  # noqa: F401  (the portal fixture is used by name)
-    ADMIN_ID, BACHELOR, KLP, TODAY, page, portal, report_of, row, run,
+    ADMIN_ID, BACHELOR, KLP, TODAY, page, pin_today, portal, report_of, row, run,
 )
 from src.bot import ask, replies, telegram_bot, voice
 from src.llm.ollama_client import ollama_client
@@ -338,7 +338,8 @@ def test_a_span_of_days_for_a_one_day_answer_asks_which_day(portal, commands):
     assert commands[-1] == ("crosscheck_command", "cross-check student 412 last week", None)
 
 
-def test_the_report_route_fires_only_for_real_report_requests():
+def test_the_report_route_fires_only_for_real_report_requests(monkeypatch):
+    pin_today(monkeypatch)
     for text in ("how many students today", "how many were done", "who came yesterday", "8 Sep",
                  "what happened in march", "how many consultations today"):
         assert telegram_bot.parse_user_report_intent(text) == (False, "", ""), text

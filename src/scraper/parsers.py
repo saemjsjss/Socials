@@ -778,6 +778,33 @@ def verified_on_day(students: List[Dict[str, Any]], day) -> List[Dict[str, Any]]
     return [v for v in (verification(s, day) for s in students) if v is not None]
 
 
+def verified_between(students: List[Dict[str, Any]], first, last) -> List[Dict[str, Any]]:
+    """The payment verifications of `students` (parse_students_page records) on a day from `first`
+    to `last` (dates, both included): verification's dict plus the "day" it was on, in list order.
+    Each student counts once, on the day of the row's own stamp, with verification's rules (whole
+    day and month tokens, a stamp's own year when it has one, never before the student applied).
+    The portal writes no year, so the caller must first reject a window reaching a year or more
+    back (src.dates.yearless_day_problem), as for one day."""
+    from datetime import timedelta
+    from src.dates import parse_stamp
+    days: Dict[tuple, List[Any]] = {}
+    day = first
+    while day <= last:
+        days.setdefault((day.day, day.month), []).append(day)
+        day += timedelta(days=1)
+    found = []
+    for s in students:
+        stamp = parse_stamp(s.get("verified_stamp", ""))
+        if stamp is None:
+            continue
+        for candidate in days.get((stamp.day, stamp.month), ()):
+            v = verification(s, candidate)
+            if v is not None:
+                found.append({**v, "day": candidate})
+                break
+    return found
+
+
 def scan_verified_students(html: str, target_date="today") -> Dict[str, Any]:
     """One students.php page -> {"verified": the students verified on target_date (as
     parse_verified_students), "students": how many student rows the page has, "markers": how many
