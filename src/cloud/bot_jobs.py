@@ -173,11 +173,10 @@ def brief_reads(reads: Optional[Mapping[str, Any]], read_at: Any) -> Batches:
             out.append(records.batch("consultation_totals", "all", [rec], True))
     dash = reads.get("dashboard")
     if isinstance(dash, Mapping) and "error" not in dash and dash.get("tiles"):
-        # The tiles as ask.dashboard_facts makes them (Fact: group, label, value, text, note), so a
+        # The tiles as ask.dashboard_facts makes them (records.tile_facts, shared with /stats), so a
         # tile is the same record whichever job read it. Tiles only (no cards): never complete.
-        facts = [{"group": t.get("group") or "Dashboard", "label": t["label"], "value": t.get("value"),
-                  "text": t.get("text") or "", "note": ""} for t in dash["tiles"] if t.get("label")]
-        out.append(records.batch("dashboard_fact", "all", records.dashboard_facts(facts, read_at), False))
+        out.append(records.batch("dashboard_fact", "all",
+                                 records.dashboard_facts(records.tile_facts(dash["tiles"]), read_at), False))
     return out
 
 
@@ -200,6 +199,42 @@ def brief_batches(composed: Any) -> Tuple[Batches, List[str]]:
 
 # --------------------------------------------------------------------------- the passport watcher
 
+def profile_now(uid: Any) -> Optional[Dict[str, Any]]:
+    """The student_edit.php profile the portal client holds for `uid` now (the one its last audit
+    read: src.cloud.command_hooks.profile_of), or None; None too while publishing is off, so
+    nothing is kept then. Never raises."""
+    try:
+        if not handoff.enabled():
+            return None
+        from src.cloud.command_hooks import profile_of
+        return profile_of(uid)
+    except Exception:
+        return None
+
+
+def keep_profile(profiles: List[Tuple[Any, Dict[str, Any], Any]], uid: Any,
+                 before: Optional[Dict[str, Any]]) -> None:
+    """After one watcher audit: keep (uid, profile, time) of the profile that audit read, i.e. the
+    one the client holds now when it is another than `before` (an audit whose profile read failed
+    leaves the old one, which is not this read). Never raises."""
+    try:
+        after = profile_now(uid)
+        if after is not None and after is not before:
+            profiles.append((uid, after, now()))
+    except Exception:
+        pass
+
+
+def note_sent(accepted: Optional[List[Tuple[str, Any]]], text: str) -> None:
+    """Keep (text, time) of an alert message Telegram accepted, for its notification record.
+    Does nothing without a list or while publishing is off. Never raises."""
+    try:
+        if accepted is not None and handoff.enabled():
+            accepted.append((text, now()))
+    except Exception:
+        pass
+
+
 def listed_scans(students: Iterable[Mapping[str, Any]]) -> List[str]:
     """Every passport scan the student list shows now, as "uid|file" (the watcher audits each
     student's newest; an older scan still listed keeps its audit, e.g. from a cross-check)."""
@@ -209,16 +244,32 @@ def listed_scans(students: Iterable[Mapping[str, Any]]) -> List[str]:
 
 def watcher_batches(students: Sequence[Mapping[str, Any]], read_at: Any,
                     audits: Sequence[Tuple[Mapping[str, Any], str, Mapping[str, Any], Mapping[str, Any], Any]],
-                    memory: Mapping[str, Any], unchecked: int = 0) -> Tuple[Batches, List[str]]:
+                    memory: Mapping[str, Any], unchecked: int = 0,
+                    sent: Sequence[Tuple[str, Any]] = (),
+                    profiles: Sequence[Tuple[Any, Mapping[str, Any], Any]] = ()) -> Tuple[Batches, List[str]]:
     """One watcher run -> (its batches, the reads that failed). `students` is its whole list
     (read_students: every page), `audits` this run's (student, scan, form, result, when) of the
     scans it checked and remembered, `memory` the watcher's memory as saved, `unchecked` how many
-    scans could not be checked (tried again next run)."""
+    scans could not be checked (tried again next run), `sent` the (text, time) of each alert
+    message Telegram accepted (notification, as sent) and `profiles` the (uid, profile, time) of
+    each student_edit.php profile the audits read (student_profile, its uid its own complete scope;
+    never the legacy full-page read, which carries the form's _csrf)."""
     rows = [records.passport_audit(s.get("uid"), scan, result, at, student=s, form=form)
             for s, scan, form, result, at in audits]
     out = [records.batch("student", "all", records.students(students, read_at), True),
            records.batch("passport_audit", "all", [r for r in rows if r], True, all_keys=listed_scans(students)),
            records.batch("passport_alert", "all", records.passport_alerts(memory), True)]
+    latest: Dict[str, Any] = {}
+    for uid, profile, at in profiles or ():
+        if isinstance(profile, Mapping) and "_csrf" not in profile:
+            rec = records.student_profile(uid, profile, at)
+            if rec is not None:
+                latest[rec["scope"]] = rec                       # the last read of a uid wins
+    out += [records.batch("student_profile", scope, [rec], True) for scope, rec in latest.items()]
+    for text, at in sent or ():
+        if str(text or "").strip():
+            rec = records.notification(text, at, "passport_watcher")
+            out.append(records.batch("notification", rec["scope"], [rec], False))
     failed = ([f"student_edit.php / view_doc.php: {unchecked} passport scan(s) could not be checked "
                "(tried again next run)"] if unchecked else [])
     return out, failed

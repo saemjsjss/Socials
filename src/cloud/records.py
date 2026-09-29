@@ -627,6 +627,16 @@ def dashboard_facts(facts: Iterable[Any], read_at: Any = None) -> List[Dict[str,
     return unique_keys(out)
 
 
+def tile_facts(tiles: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """client.get_dashboard()'s tiles (group, label, value, text) as the facts ask.dashboard_facts
+    makes of the same tiles (note ""), so a tile is one record, with one hash, whichever read it
+    came from (the brief, /stats, the hourly full picture). Tiles only, no cards: publish them
+    with complete=False."""
+    return [{"group": t.get("group") or "Dashboard", "label": t["label"], "value": t.get("value"),
+             "text": t.get("text") or "", "note": ""}
+            for t in tiles or [] if isinstance(t, Mapping) and t.get("label")]
+
+
 # The dashboard's groups a whole read shows: its two tile sections and the five cards ask reads.
 DASHBOARD_GROUPS = ("Admissions flow", "Direct / legacy pipeline", "At a glance", "Needs attention",
                     "Application pipeline", "Applications by program", "Top universities")

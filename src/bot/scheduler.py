@@ -128,10 +128,12 @@ def _alert_messages(blocks: List[Tuple[str, str]], limit: int = CHUNK_CHARS) -> 
     return out
 
 
-async def _send_alerts(bot, chat_id, cache: Dict[str, Any], keys: List[str]) -> Tuple[int, int]:
+async def _send_alerts(bot, chat_id, cache: Dict[str, Any], keys: List[str],
+                       accepted: Optional[List[Tuple[str, Any]]] = None) -> Tuple[int, int]:
     """Send the pending alerts of `keys`, grouped (_alert_messages). Each alert is marked sent, and
     the memory saved, right after Telegram accepted its message; a message Telegram refuses stops
-    the sending, and it and the rest stay pending for the next run. -> (alerts sent, messages sent)."""
+    the sending, and it and the rest stay pending for the next run. -> (alerts sent, messages sent).
+    `accepted`, when given, gets (text, time) of each message Telegram accepted (the Supabase copy)."""
     scans = cache["scans"]
     sent = messages = 0
     for group, text in _alert_messages([(k, scans[k]["alert"]) for k in keys]):
@@ -149,6 +151,7 @@ async def _send_alerts(bot, chat_id, cache: Dict[str, Any], keys: List[str]) -> 
         save_watcher_cache(cache)
         sent += len(group)
         messages += 1
+        bot_jobs.note_sent(accepted, text)
     return sent, messages
 
 
@@ -170,6 +173,8 @@ async def check_new_passport_uploads(bot_application):
         return
     listed_at = bot_jobs.now()                 # when the list was read (for the Supabase copy)
     checked: List[Tuple[Dict[str, Any], str, Dict[str, Any], Dict[str, Any], Any]] = []
+    profiles: List[Tuple[Any, Dict[str, Any], Any]] = []     # the profiles the audits read (Supabase)
+    accepted: List[Tuple[str, Any]] = []                     # the alert messages Telegram accepted
 
     try:
         cache = load_watcher_cache()
@@ -196,6 +201,7 @@ async def check_new_passport_uploads(bot_application):
                     "dob": details.get("DOB", ""),
                     "passport_no": details.get("Passport No", ""),
                     "passport_expiry": details.get("Passport Expiry", "")}
+            profile_before = bot_jobs.profile_now(s["uid"])
             try:
                 result = await admin_client.audit_student_passport(s["uid"], form, scan)
             except Exception as e:
@@ -203,6 +209,7 @@ async def check_new_passport_uploads(bot_application):
                 logger.error(f"Passport audit of uid {s['uid']} failed ({type(e).__name__}: {e}); "
                              "it is tried again next run.")
                 continue
+            bot_jobs.keep_profile(profiles, s["uid"], profile_before)
             if result.get("status") in UNCHECKED_STATUSES:
                 # The portal lists this scan, so it was not downloaded; or the profile or the scan
                 # could not be read (ocr_validator.unchecked_result); or the OCR engine did not
@@ -223,16 +230,18 @@ async def check_new_passport_uploads(bot_application):
 
         pending = sorted((k for k in current if scans.get(k, {}).get("alert") and not scans[k].get("sent")),
                          key=lambda k: -_upload_time(current[k][1]))
-        sent, messages = await _send_alerts(bot_application.bot, chat_id, cache, pending) if pending else (0, 0)
+        sent, messages = (await _send_alerts(bot_application.bot, chat_id, cache, pending, accepted)
+                          if pending else (0, 0))
         save_watcher_cache(cache)
         waiting = len(todo) - audited - failed
         logger.info(f"Passport audit check: {len(current)} scans on the portal, {audited} audited this run "
                     f"({found} with issues), {failed} could not be checked, {waiting} waiting for the next run; "
                     f"{sent} alert(s) sent in {messages} message(s), {len(pending) - sent} not sent yet.")
-        # The Supabase copy, last: the list, this run's audits and the memory as saved. Built in a
-        # worker thread and handed to the publisher process; it never raises or delays the above.
+        # The Supabase copy, last: the list, this run's audits, the profiles they read, the memory
+        # as saved and the alert messages as sent. Built in a worker thread and handed to the
+        # publisher process; it never raises or delays the above.
         await bot_jobs.hand_over("passport_watcher", bot_jobs.watcher_batches, students, listed_at,
-                                 checked, cache, failed)
+                                 checked, cache, failed, accepted, profiles)
     except Exception as e:
         logger.error(f"Error in check_new_passport_uploads: {e}")
 

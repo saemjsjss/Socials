@@ -115,7 +115,10 @@ def test_the_watcher_hands_over_its_list_its_audits_and_its_memory(cloud, watche
     assert len(bot.sent) == 1 and "`ID 502`" in bot.sent[0]["text"]          # the watcher's own work, as ever
 
     path, doc = handed(cloud, "passport_watcher")
-    assert shape(doc) == [("student", "all", True), ("passport_audit", "all", True), ("passport_alert", "all", True)]
+    (note,) = kind(doc, "notification")["rows"]                  # the alert message, as Telegram accepted it
+    assert shape(doc) == [("student", "all", True), ("passport_audit", "all", True), ("passport_alert", "all", True),
+                          ("notification", note["scope"], False)]
+    assert note["content"] == bot.sent[0]["text"] and note["data"]["source"] == "passport_watcher"
     assert doc["failed_reads"] == []
     students, audits, alerts = (kind(doc, k) for k in ("student", "passport_audit", "passport_alert"))
     assert [r["key"] for r in students["rows"]] == ["501", "502"]
@@ -146,6 +149,54 @@ def test_the_watcher_hands_over_its_list_its_audits_and_its_memory(cloud, watche
     assert [len(b["rows"]) for b in doc["batches"]] == [2, 0, 2]
     publish.process_file(path)
     assert len(cloud.fake.syncs()) == calls
+
+
+def test_an_alert_message_telegram_refused_is_no_notification(cloud, watcher):
+    from telegram.error import NetworkError
+    watcher.portal.pages["students.php"] = page(scan_row(501, 1, "TEST KARIM"), scan_row(502, 2, "TEST NADIA"))
+    watcher.results["502"] = bad(502)
+    memory = run_watcher(Bot(refuse={1}, error=NetworkError("Telegram is down")))
+    assert memory["502|passport_502_1790000000.jpg"]["sent"] is False          # the watcher's own rule, as ever
+    _, doc = handed(cloud, "passport_watcher")
+    assert "notification" not in {b["kind"] for b in doc["batches"]}
+
+
+def test_the_profiles_the_watchers_audits_read_are_published(cloud, watcher, monkeypatch):
+    """audit_student_passport keeps the student_edit.php profile it read in admin_client._profile_cache:
+    the watcher publishes that one (student_profile, its uid its own complete scope), never an older
+    one an audit that could not read the profile left there, and never the legacy _csrf read."""
+    cache = {"503": {"name": "TEST OLD", "father_name": "TEST OLDER"}}     # read by someone else, earlier
+    monkeypatch.setattr(admin_client, "_profile_cache", cache, raising=False)
+
+    async def audit(uid, form, doc_filename=None, force_live=True):
+        watcher.audits.append((uid, doc_filename, dict(form)))
+        if uid == "501":
+            cache[uid] = {"name": "TEST KARIM", "father_name": "TEST FATHER", "passport_number": "A00000501"}
+        elif uid == "502":
+            cache[uid] = {"name": "TEST NADIA", "_csrf": "x"}            # the legacy full-page shape
+        else:                                                              # the profile could not be read
+            return {"status": "PORTAL_UNREADABLE", "is_valid": False, "discrepancies": [], "verdict": "timed out"}
+        return {"status": "MATCH", "is_valid": True, "discrepancies": []}
+    monkeypatch.setattr(admin_client, "audit_student_passport", audit)
+    watcher.portal.pages["students.php"] = page(scan_row(501, 1, "TEST KARIM"), scan_row(502, 2, "TEST NADIA"),
+                                                scan_row(503, 3, "TEST OMAR"))
+    run_watcher(Bot())
+    path, doc = handed(cloud, "passport_watcher")
+    profiles = [b for b in doc["batches"] if b["kind"] == "student_profile"]
+    assert [(b["scope"], b["complete"], [r["key"] for r in b["rows"]]) for b in profiles] == [("501", True, ["501"])]
+    rec = profiles[0]["rows"][0]
+    assert rec["data"]["father_name"] == "TEST FATHER" and rec["passport_no"] == "A00000501"
+    publish.process_file(path)
+    assert cloud.fake.keys("student_profile", "501") == ["501"]
+
+
+def test_nothing_of_a_profile_or_a_message_is_kept_while_publishing_is_off(monkeypatch):
+    monkeypatch.setattr(admin_client, "_profile_cache", {"501": {"name": "TEST KARIM"}}, raising=False)
+    assert bot_jobs.profile_now("501") is None
+    profiles, sent = [], []
+    bot_jobs.keep_profile(profiles, "501", None)
+    bot_jobs.note_sent(sent, "an alert")
+    assert profiles == [] and sent == []
 
 
 def test_a_replaced_scan_loses_its_audit_and_its_alert(cloud, watcher):

@@ -306,10 +306,10 @@ def inquiries_report(on_day: Mapping[str, Any], text: str, totals: Optional[Mapp
 
 def tile_facts(tiles: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """get_dashboard()'s tiles as the facts ask.dashboard_facts makes of them (group, label, value,
-    text, note ""), so a tile has one record whichever read it came from."""
-    return [{"group": t.get("group") or "Dashboard", "label": t["label"], "value": t.get("value"),
-             "text": t.get("text") or "", "note": ""}
-            for t in tiles or [] if isinstance(t, Mapping) and t.get("label")]
+    text, note ""), so a tile has one record whichever read it came from: records.tile_facts, the
+    one conversion the brief (src.cloud.bot_jobs) uses too."""
+    from src.cloud import records
+    return records.tile_facts(tiles)
 
 
 def audit_batches(cards: Sequence[Mapping[str, Any]], students: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
