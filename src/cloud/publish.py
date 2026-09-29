@@ -13,7 +13,18 @@ publish(kind, scope, rows, complete) is the engine (the publisher process and th
     p_all_keys, the full key list, and Supabase deletes that scope's other records (D10); a partial
     or failed read sends p_all_keys null and deletes nothing;
   * the hash state advances only for rows Supabase accepted (an HTTP 2xx: hg_sync is one
-    transaction), so a row that failed goes again next run; it is written with .part + os.replace;
+    transaction), so a row that failed goes again next run; it is written with .part + os.replace.
+    The keys a complete read no longer shows are forgotten only once the call that deleted them
+    was accepted, and a scope's key digest (the "nothing changed" shortcut) is dropped before its
+    first call and set again only after its last: a call Supabase took but never answered can
+    never make a later read look already sent;
+  * reads are published in the order they were made, whatever order the publishers get the lock
+    in: a complete read older than the last complete read of its (kind, scope) deletes nothing, a
+    record older than the version last sent is not sent, and a complete read never deletes a record
+    that a newer read showed (the state keeps each record's read_at and each scope's last complete
+    read time);
+  * every chunk in Supabase has one embed_model: once the state records one, a process with
+    another model publishes nothing (one log line) until the chunks are re-embedded;
   * it never raises: a failure is one log line "Supabase publish failed (<kind>): <short reason>",
     the reason built from the HTTP status and Postgres code only (a server message can quote a key,
     and keys hold passport numbers), and the job carries on. Once Supabase has not answered, or
@@ -27,9 +38,16 @@ end with finished_at, status ok / partial / failed, the counts and a short note)
 publishes at a time (data/cloud/publish.lock), so the hash state is never written by two.
 
 The local state is {"version", "embed_model", "records": {"<kind>|<key>": {"h": content_hash,
-"s": scope}}, "scopes": {"<kind>|<scope>": digest of the keys of its last complete publish}}: the
-scope is kept beside each hash so a complete read can forget the keys Supabase just deleted
-(otherwise an identical record coming back later would never be sent again).
+"s": scope, "t": read_at}}, "scopes": {"<kind>|<scope>": digest of the keys of its last complete
+publish}, "reads": {"<kind>|<scope>": read time of its last complete publish}}: the scope is kept
+beside each hash so a complete read can forget the keys Supabase just deleted (otherwise an
+identical record coming back later would never be sent again), and the read times order reads that
+reach the publisher out of order (the watcher hands its list over up to 20 minutes after reading it).
+
+hg_runs.counts: "upserted", "deleted" (Supabase's answers), "unchanged" (records the hash state
+already had, plus those Supabase answered unchanged), "older" (records not sent because a newer
+read of them was already sent), "sent", "failed_reads", "failed", "by_kind" ({kind: [upserted,
+deleted, unchanged]}), "embedded", "chunks".
 """
 from __future__ import annotations
 
@@ -103,10 +121,12 @@ class Result:
     rows: int = 0            # records given
     changed: int = 0         # records whose hash differed (embedded and sent)
     upserted: int = 0
-    unchanged: int = 0
+    unchanged: int = 0       # the hash state already had them, or Supabase answered "unchanged"
     deleted: int = 0
     calls: int = 0           # hg_sync calls made (or written, in a dry run)
     left_out: int = 0        # records refused before sending (no key, wrong scope...)
+    older: int = 0           # records not sent: a newer read of them was sent already
+    older_read: bool = False  # a complete read older than the last complete one: nothing deleted
     ok: bool = True
     skipped: str = ""        # why nothing was sent, when nothing was
     error: str = ""
@@ -116,7 +136,7 @@ class Result:
 # --------------------------------------------------------------------------- hash state
 
 def _empty_state() -> Dict[str, Any]:
-    return {"version": STATE_VERSION, "embed_model": "", "records": {}, "scopes": {}}
+    return {"version": STATE_VERSION, "embed_model": "", "records": {}, "scopes": {}, "reads": {}}
 
 
 def load_state() -> Dict[str, Any]:
@@ -132,6 +152,8 @@ def load_state() -> Dict[str, Any]:
     if not isinstance(state, dict) or state.get("version") != STATE_VERSION \
             or not isinstance(state.get("records"), dict) or not isinstance(state.get("scopes"), dict):
         return _empty_state()
+    if not isinstance(state.get("reads"), dict):
+        state["reads"] = {}
     return state
 
 
@@ -165,6 +187,18 @@ def known_keys(kind: str, scope: Optional[str] = None) -> set:
 
 def _keys_digest(keys: Iterable[str]) -> str:
     return hashlib.sha256("\n".join(sorted(set(keys))).encode("utf-8")).hexdigest()
+
+
+def _when(value: Any) -> Optional[datetime]:
+    """A read time as the records write it (ISO with its offset) -> an aware datetime; None for
+    none, or for a text that is no such time (then it orders nothing)."""
+    if not value:
+        return None
+    try:
+        t = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo is not None else None
 
 
 # --------------------------------------------------------------------------- one publisher at a time
@@ -256,6 +290,7 @@ class Run:
     upserted: int = 0
     deleted: int = 0
     unchanged: int = 0
+    older: int = 0
     sent: int = 0
     by_kind: Dict[str, List[int]] = field(default_factory=dict)
     embedded: int = 0
@@ -385,9 +420,9 @@ def _finish(r: Run) -> None:
     status = _status(r)
     note = "; ".join(x for x in (f"{len(r.failed_reads)} read(s) failed" if r.failed_reads else "",
                                  f"{len(r.failed)} publish(es) failed" if r.failed else "") if x) or None
-    counts = {"upserted": r.upserted, "deleted": r.deleted, "unchanged": r.unchanged, "sent": r.sent,
-              "failed_reads": list(r.failed_reads), "failed": list(r.failed), "by_kind": r.by_kind,
-              "embedded": r.embedded, "chunks": r.chunks}
+    counts = {"upserted": r.upserted, "deleted": r.deleted, "unchanged": r.unchanged, "older": r.older,
+              "sent": r.sent, "failed_reads": list(r.failed_reads), "failed": list(r.failed),
+              "by_kind": r.by_kind, "embedded": r.embedded, "chunks": r.chunks}
     body = _body({"finished_at": _now_iso(), "status": status, "counts": counts, "note": note})
     seconds = time.perf_counter() - r.started
     if r.dry:
@@ -396,7 +431,10 @@ def _finish(r: Run) -> None:
                     "%d chunk(s), %.1f s embedding%s).", r.job, r.requests, r.dry_dir, seconds, r.embedded,
                     r.chunks, r.embed_seconds, _memory_note())
         return
-    if r.posted and not r.down:
+    # The row is closed even when Supabase was given up on mid-run (a 5xx, a timeout, a refused
+    # call, a model mismatch): one PATCH, so a run that failed never looks like one still going.
+    # Once one failure was logged, this one's failing is not logged again (Run.fail).
+    if r.posted:
         ok, _, reason = _request(r, "PATCH", f"/rest/v1/hg_runs?id=eq.{r.id}", body, prefer="return=minimal")
         if not ok:
             r.fail("hg_runs", reason)
@@ -549,12 +587,14 @@ def _can_embed_here() -> bool:
 
 
 def publish(kind: str, scope: str, rows: Sequence[Dict[str, Any]], complete: bool, *,
-            all_keys: Optional[Iterable[str]] = None, dry_run: Optional[bool] = None,
+            all_keys: Optional[Iterable[str]] = None, read_at: Any = None, dry_run: Optional[bool] = None,
             job: Optional[str] = None) -> Result:
     """Publish every record a read saw for one (kind, scope): see the module docstring. Never raises.
     `all_keys` (complete reads only): the whole key list when `rows` hold only some records
-    (records.batch). In a process that may not load the model (the bot, a job with torch on the
-    GPU) the batch is handed to the publisher process instead (src.cloud.handoff.submit)."""
+    (records.batch). `read_at`: when the read was made (what orders it against other reads of the
+    scope); by default the earliest read_at of its rows. In a process that may not load the model
+    (the bot, a job with torch on the GPU) the batch is handed to the publisher process instead
+    (src.cloud.handoff.submit)."""
     res = Result(kind=str(kind), scope=str(scope))
     try:
         rows = list(rows or [])
@@ -571,14 +611,14 @@ def publish(kind: str, scope: str, rows: Sequence[Dict[str, Any]], complete: boo
         if not dry and not _can_embed_here():
             from src.cloud import handoff
             from src.cloud.records import batch
-            path = handoff.submit(job or current_job(), [batch(kind, scope, rows, complete, extra)])
+            path = handoff.submit(job or current_job(), [batch(kind, scope, rows, complete, extra, read_at)])
             res.delegated, res.skipped = path is not None, "handed to the publisher process"
             return res
         with run(job or DEFAULT_JOB, dry_run=dry) as r:
             if r is None:
                 res.skipped = "publishing is off"
                 return res
-            return _publish(r, res, kind, scope, rows, bool(complete), extra)
+            return _publish(r, res, kind, scope, rows, bool(complete), extra, read_at)
     except Exception as e:
         res.ok, res.error = False, f"internal error ({type(e).__name__})"
         logger.warning("Supabase publish failed (%s): %s", kind, res.error)
@@ -586,32 +626,63 @@ def publish(kind: str, scope: str, rows: Sequence[Dict[str, Any]], complete: boo
 
 
 def _publish(r: Run, res: Result, kind: str, scope: str, rows: List[Any], complete: bool,
-             all_keys: Optional[List[str]] = None) -> Result:
+             all_keys: Optional[List[str]] = None, read_at: Any = None) -> Result:
     from src.cloud import embed
-    from src.cloud.records import clean_text
+    from src.cloud.records import as_read_at, clean_text
     r.publishes += 1
     valid, res.left_out = _normalise(kind, scope, rows)
     if res.left_out:
         complete = False               # a record could not be sent: its absence proves nothing
         logger.warning("Supabase publish (%s): %d record(s) left out (no key, another scope or no data); "
                        "nothing is deleted this time.", kind, res.left_out)
-    keys = sorted({v["key"] for v in valid} | {clean_text(k).strip() for k in all_keys or [] if str(k).strip()})
-    digest = _keys_digest(keys)
+    listed = {v["key"] for v in valid} | {clean_text(k).strip() for k in all_keys or [] if str(k).strip()}
+    times = [t for t in (_when(v["read_at"]) for v in valid) if t is not None]
+    read = _when(as_read_at(read_at)) if read_at not in (None, "") else (min(times) if times else None)
     with publisher_lock() as got:
         if not got:
             res.ok, res.error = False, f"another publisher held the lock for over {LOCK_WAIT // 60} minutes"
             r.fail(kind, res.error)
             return res
         state = load_state()
-        recs, scopes = state["records"], state["scopes"]
+        recs, scopes, reads = state["records"], state["scopes"], state["reads"]
         prefix = f"{kind}|"
-        changed = [v for v in valid if recs.get(prefix + v["key"]) != {"h": v["content_hash"], "s": scope}]
+        last_read = _when(reads.get(prefix + scope))
+        if complete and read is not None and last_read is not None and read < last_read:
+            # Handed over after a newer complete read of this scope was sent (the watcher hands
+            # its list over up to 20 minutes after reading it): what it lacks proves nothing.
+            complete, res.older_read = False, True
+            logger.info("Supabase publish (%s): this read is older than the last complete one sent; "
+                        "nothing is deleted this time.", kind)
+        changed: List[Dict[str, Any]] = []
+        for v in valid:
+            e = recs.get(prefix + v["key"])
+            e = e if isinstance(e, dict) else {}
+            if (e.get("h"), e.get("s")) == (v["content_hash"], scope):
+                continue
+            sent_at, this = _when(e.get("t")), _when(v["read_at"])
+            if sent_at is not None and this is not None and this < sent_at:
+                res.older += 1         # a newer read of this record was sent: it is not rolled back
+                continue
+            changed.append(v)
         res.changed = len(changed)
-        gone = []
+        gone: List[str] = []
+        keep = set()
         if complete:
-            present = set(keys)
-            gone = [k for k, v in recs.items() if k.startswith(prefix) and isinstance(v, dict)
-                    and v.get("s") == scope and k[len(prefix):] not in present]
+            for k, e in recs.items():
+                if not (k.startswith(prefix) and isinstance(e, dict) and e.get("s") == scope) \
+                        or k[len(prefix):] in listed:
+                    continue
+                sent_at = _when(e.get("t"))
+                if read is not None and sent_at is not None and sent_at > read:
+                    keep.add(k[len(prefix):])     # a newer read showed it: this one cannot say it is gone
+                else:
+                    gone.append(k)
+        keys = sorted(listed | keep)
+        digest = _keys_digest(keys)
+        same = len(valid) - res.changed - res.older
+        tally = r.by_kind.setdefault(kind, [0, 0, 0])
+        res.unchanged, r.unchanged, r.older, tally[2] = res.unchanged + same, r.unchanged + same, \
+            r.older + res.older, tally[2] + same
         if not changed and not gone and (not complete or scopes.get(prefix + scope) == digest):
             res.skipped = "no changes"
             return res
@@ -619,12 +690,17 @@ def _publish(r: Run, res: Result, kind: str, scope: str, rows: List[Any], comple
             res.ok, res.error = False, f"skipped ({r.down})"
             r.fail(kind, res.error)
             return res
-        if not r.dry:
-            for k in gone:                 # the portal no longer shows them: forgetting is always safe
-                recs.pop(k, None)
-            if gone:
-                save_state(state)
         emb = embed.get_embedder()
+        model = str(state.get("embed_model") or "")
+        if model and model != emb.model_id:
+            # hg_sync replaces a record's chunks only when its content_hash changes, so records that
+            # did not change would keep the old model's vectors: nothing is sent at all.
+            r.down = (f"Supabase holds chunks embedded with {model}, but this process embeds with "
+                      f"{emb.model_id}: nothing is published until the chunks are re-embedded "
+                      "(clear hg_records on the Jeannie side, then delete data/cloud_state.json)")
+            res.ok, res.error = False, r.down
+            r.fail(kind, res.error)
+            return res
         try:
             items = [(v, emb.chunks(v["content"])) for v in changed]
         except embed.EmbedError as e:
@@ -632,7 +708,7 @@ def _publish(r: Run, res: Result, kind: str, scope: str, rows: List[Any], comple
             r.fail(kind, res.error)
             return res
         groups = _groups(items) or [[]]
-        tally = r.by_kind.setdefault(kind, [0, 0, 0])
+        before, dropped = None, False
         for i, group in enumerate(groups):
             last = i == len(groups) - 1
             try:
@@ -647,6 +723,12 @@ def _publish(r: Run, res: Result, kind: str, scope: str, rows: List[Any], comple
                 r.write(f"rpc-hg_sync-{re.sub(r'[^A-Za-z0-9_]', '_', kind)}", body)
                 res.calls += 1
                 continue
+            if not dropped:
+                # Until this (kind, scope) is sent whole, no key set may count as already applied:
+                # a call Supabase took but did not answer must not let a later read look sent.
+                before, dropped = scopes.pop(prefix + scope, None), True
+                if before is not None:
+                    save_state(state)
             ok, answer, reason = _request(r, "POST", "/rest/v1/rpc/hg_sync", body)
             if not ok:
                 res.ok, res.error = False, reason
@@ -660,20 +742,27 @@ def _publish(r: Run, res: Result, kind: str, scope: str, rows: List[Any], comple
                 r.sent + len(group)
             tally[0], tally[1], tally[2] = tally[0] + up, tally[1] + de, tally[2] + un
             for row, _ in group:           # accepted: the whole call is one transaction
-                recs[prefix + row["key"]] = {"h": row["content_hash"], "s": scope}
-            if complete and last:
+                recs[prefix + row["key"]] = {"h": row["content_hash"], "s": scope, "t": row["read_at"]}
+            if last and complete:
+                for k in gone:             # Supabase deleted them: forgotten only now it said so
+                    recs.pop(k, None)
                 scopes[prefix + scope] = digest
+                if read is not None:
+                    reads[prefix + scope] = read.isoformat(timespec="seconds")
+            elif last and before is not None:
+                scopes[prefix + scope] = before   # a partial read deletes nothing: the last complete stands
             state["embed_model"] = emb.model_id
             save_state(state)
         return res
 
 
 def publish_scopes(kind: str, rows: Sequence[Dict[str, Any]], complete: bool,
-                   scope_range: Optional[Sequence[str]] = None, *,
+                   scope_range: Optional[Sequence[str]] = None, *, read_at: Any = None,
                    dry_run: Optional[bool] = None, job: Optional[str] = None) -> List[Result]:
     """Records of one kind in several scopes (each record's own "scope"), one publish per scope.
     With complete and scope_range (lo, hi): every scope the hash state knows in lo..hi that has no
-    record now is published empty and complete (Supabase deletes what it holds there)."""
+    record now is published empty and complete (Supabase deletes what it holds there). `read_at`,
+    when given, is the read time of every scope (an emptied scope has no row to take it from)."""
     groups: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows or []:
         if isinstance(row, dict) and isinstance(row.get("scope"), str) and row["scope"]:
@@ -683,7 +772,7 @@ def publish_scopes(kind: str, rows: Sequence[Dict[str, Any]], complete: bool,
         for s in sorted(known_scopes(kind)):
             if lo <= s <= hi and s not in groups:
                 groups[s] = []
-    return [publish(kind, s, rs, complete, dry_run=dry_run, job=job) for s, rs in groups.items()]
+    return [publish(kind, s, rs, complete, read_at=read_at, dry_run=dry_run, job=job) for s, rs in groups.items()]
 
 
 def publish_batches(job: str, batches: Sequence[Dict[str, Any]], failed_reads: Sequence[str] = (), *,
@@ -709,10 +798,11 @@ def publish_batches(job: str, batches: Sequence[Dict[str, Any]], failed_reads: S
                     kind, complete = str(b["kind"]), bool(b.get("complete"))
                     if b.get("scope") is None:
                         results += publish_scopes(kind, b.get("rows") or [], complete, b.get("scope_range"),
-                                                  dry_run=dry_run, job=job)
+                                                  read_at=b.get("read_at"), dry_run=dry_run, job=job)
                     else:
                         results.append(publish(kind, str(b["scope"]), b.get("rows") or [], complete,
-                                               all_keys=b.get("all_keys"), dry_run=dry_run, job=job))
+                                               all_keys=b.get("all_keys"), read_at=b.get("read_at"),
+                                               dry_run=dry_run, job=job))
     except Exception as e:
         logger.warning("Supabase publish failed (%s): internal error (%s)", job, type(e).__name__)
     return results

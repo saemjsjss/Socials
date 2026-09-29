@@ -45,7 +45,7 @@ from test_foundation import KLP, TODAY, page, portal, row, verified  # noqa: E40
 from test_consultations import _row as consult_row  # noqa: E402
 from test_inquiries import TOTALS, TOTALS_KEY, day_key, day_page, totals_page  # noqa: E402
 
-from src.cloud import backfill, embed, handoff, publish, records  # noqa: E402
+from src.cloud import backfill, embed, handoff, publish, records, student_index  # noqa: E402
 from src.config import settings  # noqa: E402
 from src.scraper import parsers  # noqa: E402
 from src.scraper.client import admin_client  # noqa: E402
@@ -55,7 +55,10 @@ URL = "https://example.supabase.co"
 KEY = "sb_secret_" + "Fak3KeyForTests0nly" * 2
 DHAKA = ZoneInfo("Asia/Dhaka")
 READ_AT = "2026-09-28T18:21:04+06:00"
-PLACEHOLDERS = ("None", "N/A", "n/a", "null", "undefined", "Unknown", "PENDING", ": —", "(—", "Admin", "20,000.00 BDT")
+PLACEHOLDERS = ("None", "N/A", "n/a", "null", "undefined", "Unknown", "PENDING", ": —", "(—", "Admin", "20,000.00 BDT",
+                # the stand-ins a text form once wrote for a value that is not there (R1)
+                "a student", "someone", "no name", "(no ID)", "an item", "no status", "no verdict", "blank",
+                "Unassigned", "— Event", "passport —", "()")
 
 
 # --------------------------------------------------------------------------- the fake Supabase
@@ -209,6 +212,7 @@ def cloud(monkeypatch, tmp_path):
     monkeypatch.setattr(publish, "_DRY_RUN", False)
     monkeypatch.setattr(handoff, "PENDING_DIR", tmp_path / "cloud" / "pending")
     monkeypatch.setattr(handoff, "LOG_PATH", tmp_path / "hangeul_sync.log")
+    monkeypatch.setattr(student_index, "INDEX_PATH", tmp_path / "cloud" / "student_index.json")
     spawned = []
     monkeypatch.setattr(handoff, "spawn", lambda path, timeout=0: spawned.append(Path(path)))
     stub = embed.StubEmbedder()
@@ -228,10 +232,24 @@ def cloud_warnings(caplog):
 
 
 def no_placeholder(record):
-    """R1: the text form holds no stand-in value and no "None"."""
+    """R1: the text form holds no stand-in value and no "None", and data holds none of the
+    readers' filled-in words or the portal's "no value" markers."""
     for word in PLACEHOLDERS:
-        assert word not in record["content"], (word, record["kind"])
-    assert "  " not in record["content"] and ". ." not in record["content"] and ", ," not in record["content"]
+        assert word not in record["content"], (word, record["kind"], record["content"])
+    for bad in ("  ", ". .", ", ,", ": :", ": .", " — ."):
+        assert bad not in record["content"], (bad, record["kind"], record["content"])
+
+    def values(v):
+        if isinstance(v, dict):
+            for x in v.values():
+                yield from values(x)
+        elif isinstance(v, list):
+            for x in v:
+                yield from values(x)
+        else:
+            yield v
+    for v in values(record["data"]):
+        assert v not in ("—", "N/A", "n/a", "PENDING", "Unassigned", "Event", "Dashboard"), (v, record["kind"])
     return True
 
 
@@ -385,8 +403,11 @@ def test_a_consultation_is_keyed_by_its_portal_id_else_by_what_it_is():
     assert rows[0]["key"] == "9001" and rows[1]["key"] == hashlib.sha1(
         "TEST LEAD TWO0170000000128 Sep 2026 11:00".encode()).hexdigest()
     assert {r["scope"] for r in rows} == {"2026-09-28"} and rows[0]["day"] == "2026-09-28"
+    # The reader's "Unassigned" (the portal shows "—") is no consultant: no value in data or text (R1).
     assert rows[0]["content"] == ("Consultation request from TEST LEAD (01700000000), received 28 Sep 2026 10:15. "
-                                  "City Dhaka. Consultant Unassigned. Status: New.")
+                                  "City Dhaka. Status: New.")
+    assert rows[0]["data"]["consultant"] == "" and rows[1]["data"]["consultant"] == "Staff One"
+    assert "Consultant Staff One." in rows[1]["content"]
     assert "Status: Consulted, last updated by Staff One. Details: DOB 2000-01-01. Remarks: called twice." \
         in rows[1]["content"]
     day = records.consultation_day(on_day, READ_AT)
@@ -664,15 +685,17 @@ def test_a_long_record_gets_several_chunks_each_led_by_its_heading(cloud):
      "HTTP 401 42501 (the key was refused)"),
 ])
 def test_a_failure_is_one_log_line_the_job_goes_on_and_the_state_stays(cloud, caplog, failure, reason):
+    """Every request fails here (the hg_runs POST first): the publish returns, never raises. That
+    the jobs' own Drive, Sheets and Telegram work still happens is pinned with the real jobs:
+    test_cloud_jobs (the sync, the daily report), test_cloud_bot_jobs (the watcher, the brief) and
+    test_cloud_commands (a command's reply); an hg_sync call that alone fails: test_cloud_fixes."""
     caplog.set_level(logging.INFO)
     cloud.fake.fail = failure
-    telegram = []
     results = publish.publish_batches("portal_sync", [
         records.batch("student", "all", student_rows("TEST A", "TEST B"), True),
         records.batch("student_documents", "all", records.student_documents(
             [{"uid": "500", "name": "TEST A", "passport": "", "program": KLP, "docs": "a.pdf"}]), True)])
-    telegram.append("the sync summary")                        # the job's own work still happens
-    assert telegram == ["the sync summary"] and not any(r.ok for r in results)
+    assert not any(r.ok for r in results)
     lines = cloud_warnings(caplog)
     assert [line.getMessage() for line in lines] == [f"Supabase publish failed (hg_runs): {reason}"]
     assert "A1234567" not in caplog.text and "row 425" not in caplog.text          # never the server's words
@@ -692,7 +715,10 @@ def test_supabase_failing_mid_run_is_one_line_and_the_rest_of_the_run_is_skipped
     assert [r.ok for r in results] == [False, False, False]
     assert [line.getMessage() for line in cloud_warnings(caplog)] == \
         ["Supabase publish failed (student): HTTP 500 (Supabase server error)"]
-    assert len(cloud.fake.syncs()) == 1 and [m for m, _, _ in cloud.fake.calls] == ["POST", "POST"]   # no PATCH
+    # The run's row is still closed, as failed: a run that failed never looks like one still going.
+    assert len(cloud.fake.syncs()) == 1 and [m for m, _, _ in cloud.fake.calls] == ["POST", "POST", "PATCH"]
+    run = next(iter(cloud.fake.runs.values()))
+    assert run["status"] == "failed" and run["finished_at"] and run["note"] == "3 publish(es) failed"
     assert state() is None
 
 

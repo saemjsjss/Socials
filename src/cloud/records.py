@@ -11,9 +11,13 @@ A record is a JSON-safe dict:
    "read_at"}     when the bot read it, ISO with the +06:00 offset
 
 Nothing is re-parsed here and nothing is filled in: a value the reader did not give is left out
-of the text, never replaced by a stand-in. The student_*, day and source columns are derived only
-from the hashed fields (key, scope, data, content), because Supabase rewrites a record only when
-its content_hash changes (hg_sync leaves a same-hash row as it is).
+of the text, never replaced by a stand-in, and the words a reader writes where the portal shows
+nothing ("Unassigned", "Event", "Dashboard", the portal's own "—", "N/A" and "PENDING" passport)
+are no value in data or text (R1). The student_*, day and source columns are derived only from
+the hashed fields (key, scope, data, content), because Supabase rewrites a record only when its
+content_hash changes (hg_sync leaves a same-hash row as it is): the passport-keyed kinds put the
+student's uid and HNG id in data when they are known. The one exception is field_correction, an
+append-only record keyed by its own data, whose student columns are set when it is first sent.
 
 Records are grouped for publishing with batch() (one kind and one scope) or batches() (one kind,
 each record in its own scope: per day, per passport, per report).
@@ -41,6 +45,9 @@ CLOUD_KINDS = (
 STUDENT_VOLATILE = ("sl", "details_text", "id")
 # The CSV export's columns that are not trusted (04 §3.3): kept in data, marked, left out of the text.
 STALE_EXPORT_COLUMNS = ["Current Stage", "Current Status", "Progress %"]
+# The export has no pager and states no total: it counts as a whole read only when it has at least
+# this share of the students the list (students.php, every page, pager checked) counts (R2).
+EXPORT_SHARE = 0.9
 # Passport audits that checked nothing (scheduler.UNCHECKED_STATUSES) and the cross-check's own
 # "ERROR": publishing them would overwrite a real audit of the same scan.
 UNCHECKED_AUDITS = ("MISSING_DOCUMENT", "PORTAL_UNREADABLE", "OCR_UNAVAILABLE", "ERROR")
@@ -171,6 +178,38 @@ def _passport(value: Any) -> str:
     return passport_key(str(value or ""))
 
 
+def _passport_value(value: Any) -> str:
+    """A passport number field as data: the value as the portal prints it, or "" when it is no
+    passport number at all (blank, "—", a placeholder such as PENDING: R1, R11)."""
+    text = "" if value is None else str(value).strip()
+    return text if _passport(text) else ""
+
+
+def _dash(value: Any) -> Any:
+    """The portal's "no value" dash ("—", "-", "–") as "", any other value as it is (R1)."""
+    if isinstance(value, str) and value.strip() in ("—", "-", "–", "--"):
+        return ""
+    return value
+
+
+# Words the readers write where the portal shows nothing (they are not the portal's data: R1).
+FILLED_CONSULTANT = "Unassigned"      # parsers._consultation_table_rows, for a blank or "—" consultant
+FILLED_CALENDAR_KIND = "Event"        # ask.calendar_items, for an item whose kind the page does not show
+FILLED_TILE_GROUP = "Dashboard"       # ask.dashboard_facts, for a tile outside every tile group
+
+
+def _ids_of(ids: Any) -> Tuple[str, str]:
+    """(portal uid, HNG id) of a student, from (uid, hng) or {"uid", "hng"}; "" for each not known."""
+    if isinstance(ids, Mapping):
+        uid, hng = ids.get("uid"), ids.get("hng")
+    elif isinstance(ids, (tuple, list)) and len(ids) == 2:
+        uid, hng = ids
+    else:
+        uid = hng = None
+    uid = str(uid or "").strip()
+    return (uid if _uid(uid) is not None else ""), str(hng or "").strip()
+
+
 def make(kind: str, key: Any, scope: Any, data: Mapping[str, Any], content: str, source: str,
          read_at: Any = None, *, uid: Any = None, hng: Any = None, name: Any = None,
          passport: Any = None, day: Any = None) -> Dict[str, Any]:
@@ -213,7 +252,7 @@ def unique_keys(records: Iterable[Optional[Dict[str, Any]]]) -> List[Dict[str, A
 
 
 def batch(kind: str, scope: str, rows: Sequence[Dict[str, Any]], complete: bool,
-          all_keys: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+          all_keys: Optional[Iterable[str]] = None, read_at: Any = None) -> Dict[str, Any]:
     """One (kind, scope) to publish: `rows` are every record the read saw (not only the changed
     ones: publishing sends only those whose hash changed); `complete` only when the read was whole
     (every page, pager total matched, no error): Supabase then deletes the (kind, scope)'s other
@@ -222,22 +261,31 @@ def batch(kind: str, scope: str, rows: Sequence[Dict[str, Any]], complete: bool,
     `all_keys`, with complete=True, is the whole key list when `rows` hold only some of the
     records (the passport watcher audits only new scans, but its complete list read names every
     scan there is: all_keys = every "uid|file" listed now). The records to keep are then those
-    keys and the rows' own."""
+    keys and the rows' own.
+
+    `read_at`: when the read that makes the batch whole was made, when that is not its rows' own
+    read_at (the watcher's audits come after its list read; a store's records carry the time each
+    was checked). Publishing orders reads of one scope by it: by default the rows' earliest."""
     out = {"kind": kind, "scope": scope, "complete": bool(complete), "rows": list(rows)}
     if all_keys is not None:
         out["all_keys"] = sorted({str(k) for k in all_keys if k not in (None, "")})
+    if read_at not in (None, ""):
+        out["read_at"] = as_read_at(read_at)
     return out
 
 
 def batches(kind: str, rows: Sequence[Dict[str, Any]], complete: bool,
-            scope_range: Optional[Tuple[str, str]] = None) -> Dict[str, Any]:
+            scope_range: Optional[Tuple[str, str]] = None, read_at: Any = None) -> Dict[str, Any]:
     """Records of one kind in several scopes (each record's own: a day, a passport, a report and
     day): published one scope at a time. With complete=True every scope that has records is
     complete; with `scope_range` (lo, hi), also every scope the bot published before that lies in
-    lo..hi (text order: ISO days) and has no record now is emptied (its records are gone)."""
+    lo..hi (text order: ISO days) and has no record now is emptied (its records are gone).
+    `read_at` (see batch): the one read time of every scope, the emptied ones included."""
     out = {"kind": kind, "scope": None, "complete": bool(complete), "rows": list(rows)}
     if scope_range:
         out["scope_range"] = [str(scope_range[0]), str(scope_range[1])]
+    if read_at not in (None, ""):
+        out["read_at"] = as_read_at(read_at)
     return out
 
 
@@ -295,7 +343,7 @@ def student_text(s: Mapping[str, Any]) -> str:
     by, stamp = s.get("verified_by") or "", s.get("verified_stamp") or ""
     verified = (f"verified by {by} on {stamp}" if by and stamp else f"verified by {by}" if by
                 else f"verified on {stamp}" if stamp else "")
-    passport = d.get("Passport No") or ""
+    passport = _passport_value(d.get("Passport No"))
     address = ", ".join(x for x in (d.get("Address"), d.get("District") and f"district {d.get('District')}") if x)
     others = _pairs({k: v for k, v in d.items() if k not in _STUDENT_TEXT_LABELS})
     return _paragraph(
@@ -325,7 +373,13 @@ def student_text(s: Mapping[str, Any]) -> str:
 
 
 def _student_fields(s: Mapping[str, Any]) -> Dict[str, Any]:
-    return {k: v for k, v in s.items() if k not in STUDENT_VOLATILE and not str(k).startswith("_")}
+    """A students.php record's fields as data: the volatile ones left out, and a placeholder
+    passport number ("PENDING") blanked, as no identity is no value either (R1, R11)."""
+    out = {k: v for k, v in s.items() if k not in STUDENT_VOLATILE and not str(k).startswith("_")}
+    d = out.get("details")
+    if isinstance(d, Mapping) and "Passport No" in d:
+        out["details"] = dict(d, **{"Passport No": _passport_value(d.get("Passport No"))})
+    return out
 
 
 def student(s: Mapping[str, Any], read_at: Any = None) -> Optional[Dict[str, Any]]:
@@ -378,6 +432,19 @@ def pending_payments(rows: Iterable[Mapping[str, Any]], badge: Optional[int],
     return out
 
 
+def pending_complete(pending: Sequence[Any], badge: Optional[int], empty_page: bool = False) -> bool:
+    """Whether a whole read of students.php?status=pending (every page, each page's layout known)
+    may delete the pending payments it no longer shows: only when its rows can be checked against
+    the page itself (R5, R8). With the portal's Pending Payments badge, the rows whose own Payment
+    says Pending must be exactly that many; without one, some row must say Pending, or the list
+    must show its own empty state ("No students found"). The Payment column is not one the list
+    must have, so rows none of which say Pending mean it was not read (a renamed header), and an
+    empty filtered list is not by itself "nobody"."""
+    if badge is not None:
+        return len(pending) == badge
+    return bool(pending) or bool(empty_page)
+
+
 def verification(v: Mapping[str, Any], day: Any, read_at: Any = None) -> Optional[Dict[str, Any]]:
     """kind verification, key uid, scope the stamp's ISO day: one parsers.verification() result
     (verifier, time, amount, method, paid and verified income) for `day`."""
@@ -389,12 +456,13 @@ def verification(v: Mapping[str, Any], day: Any, read_at: Any = None) -> Optiona
     data = dict(v, day=iso)
     pay = payment_text(v)
     name = v.get("name") or ""
+    when = v.get("verified_time") or ""
     text = _paragraph(
-        _sentence(f"Payment verification of {name or 'a student'}"
-                  f"{_ids(v.get('student_id') or '', f'portal uid {uid}')}"
+        _sentence("Payment verification" + (f" of {name}" if name else "")
+                  + f"{_ids(v.get('student_id') or '', f'portal uid {uid}')}"
                   + (f", {v.get('program')}" if v.get("program") else "")),
-        _sentence(", ".join(x for x in (v.get("verified_by") and f"Verified by {v.get('verified_by')}",
-                                        f"on {v.get('verified_time') or _long_day(iso)} ({_long_day(iso)})") if x)),
+        _sentence((f"Verified by {v.get('verified_by')}, on " if v.get("verified_by") else "Verified on ")
+                  + (f"{when} ({_long_day(iso)})" if when else _long_day(iso))),
         _sentence(f"Amount {pay}") if pay else "")
     return make("verification", uid, iso, data, text, "students.php", read_at,
                 uid=uid, hng=v.get("student_id"), name=name, day=iso)
@@ -457,14 +525,18 @@ def student_documents(rows: Iterable[Mapping[str, Any]], read_at: Any = None) ->
             continue
         seen.add(uid)
         files = [f for f in str(row.get("docs") or "").split("|") if f]
-        data = dict(row, files=files)
+        # The list's cells as data, the portal's "—" as "" and a placeholder passport as none (R1).
+        data = dict({k: _dash(v) for k, v in dict(row).items()}, files=files)
+        if "passport" in data:
+            data["passport"] = _passport_value(data["passport"])
+        name, passport, program = data.get("name") or "", data.get("passport") or "", data.get("program") or ""
         text = _paragraph(
-            _sentence(f"Verified documents on the portal of {row.get('name') or 'a student'}"
-                      f"{_ids(row.get('passport') and 'passport ' + row.get('passport'), row.get('program') or '', f'portal uid {uid}')}"),
+            _sentence("Verified documents on the portal" + (f" of {name}" if name else "")
+                      + _ids(passport and f"passport {passport}", program, f"portal uid {uid}")),
             _sentence(f"{len(files)} files: " + ", ".join(files)) if files else "")
         out.append(make("student_documents", uid, "all", data, text,
                         "students.php?source=direct&filter_docs=verified", read_at,
-                        uid=uid, name=row.get("name"), passport=_passport(row.get("passport"))))
+                        uid=uid, name=name, passport=_passport(passport)))
     return out
 
 
@@ -478,12 +550,16 @@ def student_exports(rows: Iterable[Mapping[str, str]], read_at: Any = None) -> L
     for row in rows:
         row = {str(k): ("" if v is None else v) for k, v in dict(row).items() if k is not None}
         key = _row_key(dict(row, Mobile=pb.normalize_phone(row.get("Mobile", ""))))
-        data = dict(row, stale_columns=list(STALE_EXPORT_COLUMNS))
-        name, hng = pb.clean_value(row.get("Full Name", "")), pb.clean_value(row.get("Student ID", ""))
-        fields = _pairs({k: pb.clean_value(v) for k, v in row.items()},
-                        skip=set(STALE_EXPORT_COLUMNS) | {"Full Name", "Student ID"})
-        text = _paragraph(_sentence(f"Student export row (students.php?export=csv): {name or 'no name'}"
-                                    f"{_ids(hng)}"),
+        # Every column, each cell as the sheets show it: the export's "N/A", "—", "none"... are no
+        # value (progress_builder.clean_value), and a placeholder passport ("PENDING") is none (R1).
+        cells = {k: pb.clean_value(v) for k, v in row.items()}
+        if "Passport No" in cells:
+            cells["Passport No"] = _passport_value(cells["Passport No"])
+        data = dict(cells, stale_columns=list(STALE_EXPORT_COLUMNS))
+        name, hng = cells.get("Full Name", ""), cells.get("Student ID", "")
+        fields = _pairs(cells, skip=set(STALE_EXPORT_COLUMNS) | {"Full Name", "Student ID"})
+        text = _paragraph(_sentence("Student export row (students.php?export=csv)"
+                                    + (f": {name}" if name else "") + _ids(hng)),
                           _sentence(fields) if fields else "")
         out.append(make("student_export", key, "all", data, text, "students.php?export=csv", read_at,
                         hng=hng, name=name, passport=_passport(row.get("Passport No")),
@@ -491,12 +567,29 @@ def student_exports(rows: Iterable[Mapping[str, str]], read_at: Any = None) -> L
     return unique_keys(out)
 
 
+def export_complete(rows: Sequence[Mapping[str, Any]], listed: Optional[int]) -> Tuple[bool, str]:
+    """Whether a students.php?export=csv read is whole -> (complete, why not). It must have its
+    header (Student ID and Full Name) and at least EXPORT_SHARE of `listed`, the students a whole
+    read of the list counts; with no such count known it cannot be proven whole (a stream cut
+    short after its header still parses)."""
+    if not rows or not {"Student ID", "Full Name"} <= set(rows[0]):
+        return False, "students.php?export=csv: no Student ID and Full Name header"
+    if not listed:
+        return False, "students.php?export=csv: no whole student list to check its row count by"
+    if len(rows) < EXPORT_SHARE * listed:
+        return False, (f"students.php?export=csv: {len(rows)} rows, fewer than {EXPORT_SHARE:.0%} of the "
+                       f"{listed} students the list shows")
+    return True, ""
+
+
 def student_profile(uid: Any, fields: Mapping[str, Any], read_at: Any = None) -> Optional[Dict[str, Any]]:
     """kind student_profile, key = scope = uid: student_edit.php's form as
     HangeulAdminClient._profile_fields reads it (every filled field, by its form name). None when
     it shows no profile (no name or full_name: the page was not the profile)."""
     uid = str(uid or "").strip()
-    fields = {str(k): v for k, v in dict(fields or {}).items()}
+    fields = {str(k): _dash(v) for k, v in dict(fields or {}).items()}
+    if "passport_number" in fields:
+        fields["passport_number"] = _passport_value(fields["passport_number"])
     name = fields.get("full_name") or fields.get("name") or ""
     if _uid(uid) is None or not name:
         return None
@@ -526,8 +619,9 @@ def student_progress(progress: Mapping[str, Mapping[str, Any]],
             data["student_id"] = hng
         if name:
             data["student_name"] = name
-        text = _sentence(f"Progress of {name or 'a student'}{_ids(hng, f'portal uid {uid}')} on progress.php: "
-                         + ", ".join(x for x in (f"{p.get('pct')}% overall",
+        text = _sentence("Progress" + (f" of {name}" if name else "") + f"{_ids(hng, f'portal uid {uid}')} on "
+                         "progress.php: "
+                         + ", ".join(x for x in (p.get("pct") not in (None, "") and f"{p.get('pct')}% overall",
                                                  p.get("stage") and f"current stage {p.get('stage')}",
                                                  p.get("status") and f"status {p.get('status')}") if x))
         out.append(make("student_progress", uid, "all", data, text, "progress.php", read_at,
@@ -538,14 +632,20 @@ def student_progress(progress: Mapping[str, Mapping[str, Any]],
 # --------------------------------------------------------------------------- consult_requests.php
 
 def consultation(row: Mapping[str, Any], day: Any, read_at: Any = None) -> Dict[str, Any]:
-    """kind consultation, key = the request's portal id (the row's "id"), else sha1 of name +
-    contact + received; scope = the received ISO day. Every field of the row."""
+    """kind consultation, key = the request's portal id (the row's "id": the hidden id of its own
+    forms, parsers._consultation_table_rows), else sha1 of name + contact + received (the key then
+    changes when the name or contact is edited: a delete and a new record, not an edit); scope =
+    the received ISO day. Every field of the row, except the reader's "Unassigned" for a request
+    with no consultant, which is no value (R1)."""
     iso = iso_day(day) or iso_day(row.get("received_date")) or ""
     rid = str(row.get("id") or "").strip()
     key = rid if rid.isdigit() else sha1(row.get("name", ""), row.get("contact", ""), row.get("received", ""))
+    row = dict(row)
+    if str(row.get("consultant") or "").strip() == FILLED_CONSULTANT:
+        row["consultant"] = ""
     by = row.get("handled_by") or ""
     text = _paragraph(
-        _sentence(f"Consultation request from {row.get('name') or 'someone'}"
+        _sentence("Consultation request" + (f" from {row.get('name')}" if row.get("name") else "")
                   + (f" ({row.get('contact')})" if row.get("contact") else "")
                   + (f", received {row.get('received')}" if row.get("received") else "")),
         _sentence(f"City {row.get('city')}") if row.get("city") else "",
@@ -606,12 +706,20 @@ def window_applications(rows: Iterable[Mapping[str, Any]], read_at: Any = None) 
         if _label_key(str(row.get("status") or "")) != "under review":
             continue
         key = f"{row.get('student', '')}|{row.get('window', '')}"
-        text = _sentence(f"Window application of {row.get('student') or 'a student'}"
+        text = _sentence("Window application" + (f" of {row.get('student')}" if row.get("student") else "")
                          + (f" for {row.get('window')}" if row.get("window") else "")
                          + f": {row.get('status')} (window_applications.php)")
         out.append(make("window_application", key, "all", row, text,
                         "window_applications.php?status=under_review", read_at, name=row.get("student")))
     return unique_keys(out)
+
+
+def window_complete(rows: Sequence[Any], records_: Sequence[Any], paged: bool) -> bool:
+    """Whether a read of window_applications.php?status=under_review may delete the applications
+    it no longer shows (R5, R8): the page has no pager (it states no total to prove more pages
+    by), and it is either its own empty table or has a row whose own status is under review. Rows
+    none of which say so mean the status wording was not recognised, not that nobody is waiting."""
+    return not paged and (not rows or bool(records_))
 
 
 def dashboard_facts(facts: Iterable[Any], read_at: Any = None) -> List[Dict[str, Any]]:
@@ -620,9 +728,14 @@ def dashboard_facts(facts: Iterable[Any], read_at: Any = None) -> List[Dict[str,
     out = []
     for f in facts or []:
         f = f._asdict() if hasattr(f, "_asdict") else dict(f)
-        what = f"{f.get('label')} — {f.get('note')}" if f.get("note") else f.get("label")
-        text = _sentence(f"Dashboard (index.php), {f.get('group')}: {what}: {f.get('text')}")
-        out.append(make("dashboard_fact", f"{f.get('group', '')}|{f.get('label', '')}", "all", f, text,
+        if f.get("group") == FILLED_TILE_GROUP:
+            f["group"] = ""           # ask.dashboard_facts' word for a tile outside every group (R1)
+        label, value = f.get("label") or "", f.get("text")
+        what = " — ".join(x for x in (label, f.get("note") or "") if x)
+        text = _sentence(f"Dashboard (index.php)" + (f", {f.get('group')}" if f.get("group") else "")
+                         + (f": {what}" if what else "")
+                         + (f": {value}" if value not in (None, "") else ""))
+        out.append(make("dashboard_fact", f"{f.get('group') or ''}|{label}", "all", f, text,
                         "index.php", read_at))
     return unique_keys(out)
 
@@ -631,8 +744,8 @@ def tile_facts(tiles: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """client.get_dashboard()'s tiles (group, label, value, text) as the facts ask.dashboard_facts
     makes of the same tiles (note ""), so a tile is one record, with one hash, whichever read it
     came from (the brief, /stats, the hourly full picture). Tiles only, no cards: publish them
-    with complete=False."""
-    return [{"group": t.get("group") or "Dashboard", "label": t["label"], "value": t.get("value"),
+    with complete=False. A tile outside every group has no group ("", never a stand-in)."""
+    return [{"group": t.get("group") or "", "label": t["label"], "value": t.get("value"),
              "text": t.get("text") or "", "note": ""}
             for t in tiles or [] if isinstance(t, Mapping) and t.get("label")]
 
@@ -657,6 +770,8 @@ def calendar_items(items: Iterable[Any], read_at: Any = None) -> List[Dict[str, 
     out = []
     for it in items or []:
         it = it._asdict() if hasattr(it, "_asdict") else dict(it)
+        if it.get("kind") == FILLED_CALENDAR_KIND:
+            it["kind"] = ""           # ask.calendar_items' word for a kind the page does not show (R1)
         data = jsonable(it)
         cid = str(it.get("id") or "").strip()
         key = cid or "t:" + sha1(it.get("title", ""), "|", data.get("start") or "", "|", it.get("note", ""))
@@ -664,7 +779,7 @@ def calendar_items(items: Iterable[Any], read_at: Any = None) -> List[Dict[str, 
         when = (f"from {_long_day(start)} to {_long_day(end)}" if start and end and start != end
                 else f"on {_long_day(end or start)}" if (start or end) else "")
         text = _paragraph(
-            _sentence(f"Calendar (calendar.php): {it.get('title') or 'an item'}"
+            _sentence("Calendar (calendar.php)" + (f": {it.get('title')}" if it.get("title") else "")
                       + (f" — {it.get('kind')}" if it.get("kind") else "")
                       + (f" at {it.get('where')}" if it.get("where") else "")
                       + (f", {when}" if when else "")
@@ -708,8 +823,8 @@ def passport_audit(uid: Any, scan: str, result: Mapping[str, Any], read_at: Any 
                 compared.append(f"{field.replace('_', ' ')}: {bits}")
     passport = (fields.get("passport_no") or {}).get("portal") if isinstance(fields.get("passport_no"), Mapping) else ""
     text = _paragraph(
-        _sentence(f"Passport audit of {name or 'a student'}{_ids(hng, f'portal uid {uid}')}, scan {scan}: "
-                  f"{result.get('status') or 'no status'}"),
+        _sentence("Passport audit" + (f" of {name}" if name else "") + f"{_ids(hng, f'portal uid {uid}')}, scan {scan}"
+                  + (f": {result.get('status')}" if result.get("status") else "")),
         _sentence(str(result.get("verdict"))) if result.get("verdict") else "",
         _sentence("Discrepancies: " + "; ".join(str(x) for x in result.get("discrepancies"))) if result.get("discrepancies") else "",
         _sentence("Check by eye: " + "; ".join(str(x) for x in result.get("uncertain"))) if result.get("uncertain") else "",
@@ -720,8 +835,10 @@ def passport_audit(uid: Any, scan: str, result: Mapping[str, Any], read_at: Any 
 
 def passport_alerts(memory: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """kind passport_alert, key uid|file, scope all: every entry of the passport watcher's memory
-    (data/alerted_passport_issues.json v2: status, checked, the alert text, sent, sent_at). The
-    memory is the whole truth after every save, so a publish of all of it is complete."""
+    (data/alerted_passport_issues.json v2: status, checked, the alert text, sent, sent_at). A
+    publish of it is complete over the scans the student list shows (bot_jobs.watched_scans as
+    all_keys): a memory that was lost restarts empty, and the alerts about scans it has not audited
+    again are kept until it has."""
     out = []
     for key, e in ((memory or {}).get("scans") or {}).items():
         if not isinstance(e, Mapping) or "|" not in str(key):
@@ -759,30 +876,56 @@ def passport_issues(by_passport: Mapping[str, Any], read_at: Any = None) -> List
 
 # --------------------------------------------------------------------------- the document check
 
-def doc_verdicts(passport: str, entry: Mapping[str, Any]) -> List[Dict[str, Any]]:
+def _joined(*parts: Any, sep: str = " ") -> str:
+    """The parts that have a value, joined (a missing one is left out, never written as a word)."""
+    return sep.join(str(p).strip() for p in parts if p is not None and p is not False and str(p).strip())
+
+
+def _with_ids(data: Dict[str, Any], ids: Any) -> Tuple[Dict[str, Any], str, str]:
+    """A passport-keyed record's data with the student's portal uid and HNG id when they are known
+    (so the record's hash, and with it Supabase's student_uid column, follows them) -> (data, uid,
+    hng)."""
+    uid, hng = _ids_of(ids)
+    if uid:
+        data["uid"] = uid
+    if hng:
+        data["student_id"] = hng
+    return data, uid, hng
+
+
+def _uid_text(uid: str) -> str:
+    return f"portal uid {uid}" if uid else ""
+
+
+def doc_verdicts(passport: str, entry: Mapping[str, Any], ids: Any = None) -> List[Dict[str, Any]]:
     """kind doc_verdict, key passport|document ("#2" for a document checked twice, e.g. two NIDs or
     the three CROSS-CHECK name rows), scope = the passport: results.json documents[passport]'s rows
-    (document, file, verdict, the failing rules and flags in its detail)."""
+    (document, file, verdict, the failing rules and flags in its detail). `ids`: the student's
+    (portal uid, HNG id) when known (src.cloud.student_index), for student_uid."""
     pas = _passport(passport) or str(passport)
     out = []
     for row in entry.get("rows") or []:
-        data = dict(row, student=entry.get("student", ""), program=entry.get("program", ""))
+        data, uid, hng = _with_ids(dict(row, student=entry.get("student", ""), program=entry.get("program", "")), ids)
+        what = _joined(row.get("doc"), row.get("file") and f"file {row.get('file')}", sep=", ")
         text = _paragraph(
-            _sentence(f"Document check of {entry.get('student') or 'a student'}"
-                      f"{_ids(pas, entry.get('program') or '')}: {row.get('doc')}"
-                      + (f", file {row.get('file')}" if row.get("file") else "")
-                      + f" — {row.get('verdict')}"),
+            _sentence("Document check" + (f" of {entry.get('student')}" if entry.get("student") else "")
+                      + _ids(pas, entry.get("program") or "", hng, _uid_text(uid))
+                      + (f": {what}" if what else "")
+                      + (f" — {row.get('verdict')}" if row.get("verdict") else "")),
             _sentence(str(row.get("detail"))) if row.get("detail") else "")
         out.append(make("doc_verdict", f"{pas}|{row.get('doc', '')}", pas, data, text, "results.json",
-                        entry.get("checked"), name=entry.get("student"), passport=pas,
+                        entry.get("checked"), uid=uid, hng=hng, name=entry.get("student"), passport=pas,
                         day=iso_day(entry.get("checked"))))
     return unique_keys(out)
 
 
-def doc_checks(documents: Mapping[str, Any], fields: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
+def doc_checks(documents: Mapping[str, Any], fields: Optional[Mapping[str, Any]] = None,
+               ids: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
     """kind doc_check (added: the student-level result, which no document row carries), key = the
     passport, scope all: results.json documents[P] (student, program, verdict, when checked) with
-    its rows' verdict counts and the field check's result counts."""
+    its rows' verdict counts and the field check's result counts. `ids`: {passport: (uid, HNG id)}
+    of the students known (src.cloud.student_index). Publish it with read_at = when the store was
+    read (each record's own read_at is the time it was checked)."""
     out = []
     for passport, entry in (documents or {}).items():
         if not isinstance(entry, Mapping):
@@ -796,56 +939,78 @@ def doc_checks(documents: Mapping[str, Any], fields: Optional[Mapping[str, Any]]
         for row in ((fields or {}).get(passport) or {}).get("rows") or []:
             v = str(row.get("result") or "")
             fcounts[v] = fcounts.get(v, 0) + 1
-        data = {"student": entry.get("student", ""), "program": entry.get("program", ""),
-                "verdict": entry.get("verdict", ""), "checked": entry.get("checked", ""),
-                "document_rows": counts, "field_rows": fcounts}
+        data, uid, hng = _with_ids({"student": entry.get("student", ""), "program": entry.get("program", ""),
+                                    "verdict": entry.get("verdict", ""), "checked": entry.get("checked", ""),
+                                    "document_rows": counts, "field_rows": fcounts}, (ids or {}).get(pas))
         text = _paragraph(
-            _sentence(f"Document check result of {entry.get('student') or 'a student'}"
-                      f"{_ids(pas, entry.get('program') or '')}: {entry.get('verdict') or 'no verdict'}"
+            _sentence("Document check result" + (f" of {entry.get('student')}" if entry.get("student") else "")
+                      + _ids(pas, entry.get("program") or "", hng, _uid_text(uid))
+                      + (f": {entry.get('verdict')}" if entry.get("verdict") else "")
                       + (f", checked {entry.get('checked')}" if entry.get("checked") else "")),
-            _sentence("Documents: " + ", ".join(f"{k} {v}" for k, v in counts.items())) if counts else "",
-            _sentence("Fields: " + ", ".join(f"{k} {v}" for k, v in fcounts.items())) if fcounts else "")
+            _sentence("Documents: " + ", ".join(f"{k} {v}" for k, v in counts.items() if k)) if any(counts) else "",
+            _sentence("Fields: " + ", ".join(f"{k} {v}" for k, v in fcounts.items() if k)) if any(fcounts) else "")
         out.append(make("doc_check", pas, "all", data, text, "results.json", entry.get("checked"),
-                        name=entry.get("student"), passport=pas, day=iso_day(entry.get("checked"))))
+                        uid=uid, hng=hng, name=entry.get("student"), passport=pas,
+                        day=iso_day(entry.get("checked"))))
     return out
 
 
-def field_checks(passport: str, entry: Mapping[str, Any]) -> List[Dict[str, Any]]:
+def field_checks(passport: str, entry: Mapping[str, Any], ids: Any = None) -> List[Dict[str, Any]]:
     """kind field_check, key passport|field, scope = the passport: results.json fields[passport]'s
-    rows (FIELD CHECK: the portal value, MATCH / DIFFERS / UNREADABLE / NO DOCUMENT / BLANK, why)."""
+    rows (FIELD CHECK: the portal value, MATCH / DIFFERS / UNREADABLE / NO DOCUMENT / BLANK, why).
+    `ids`: the student's (portal uid, HNG id) when known."""
     pas = _passport(passport) or str(passport)
     out = []
     for row in entry.get("rows") or []:
-        data = dict(row, student=entry.get("student", ""), program=entry.get("program", ""))
+        data, uid, hng = _with_ids(dict(row, student=entry.get("student", ""), program=entry.get("program", "")), ids)
+        what = _joined(row.get("field"), row.get("portal") and f"portal value {row.get('portal')}", sep=", ")
         text = _paragraph(
-            _sentence(f"Field check of {entry.get('student') or 'a student'}{_ids(pas, entry.get('program') or '')}: "
-                      f"{row.get('field')}"
-                      + (f", portal value {row.get('portal')}" if row.get("portal") else "")
-                      + f" — {row.get('result')}"),
+            _sentence("Field check" + (f" of {entry.get('student')}" if entry.get("student") else "")
+                      + _ids(pas, entry.get("program") or "", hng, _uid_text(uid))
+                      + (f": {what}" if what else "")
+                      + (f" — {row.get('result')}" if row.get("result") else "")),
             _sentence(str(row.get("detail"))) if row.get("detail") else "")
         out.append(make("field_check", f"{pas}|{row.get('field', '')}", pas, data, text, "results.json",
-                        entry.get("checked"), name=entry.get("student"), passport=pas,
+                        entry.get("checked"), uid=uid, hng=hng, name=entry.get("student"), passport=pas,
                         day=iso_day(entry.get("checked"))))
     return unique_keys(out)
 
 
-def field_corrections(corrections: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+def _arrow(before: Any, after: Any) -> str:
+    """"a -> b", "-> b" or "a ->" from the two values that exist ("" when neither does)."""
+    before, after = _joined(before), _joined(after)
+    return f"{before} -> {after}" if before and after else f"-> {after}" if after else f"{before} ->" if before else ""
+
+
+def _was_now(label: str, value: Any, result: Any) -> str:
+    """"was 2000-01-02 (DIFFERS)" / "now (BLANK)": the value and its check result that exist."""
+    shown = _joined(value, result and f"({result})")
+    return f"{label} {shown}" if shown else ""
+
+
+def field_corrections(corrections: Iterable[Mapping[str, Any]],
+                      ids: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
     """kind field_correction, key = sha1 of the entry's canonical JSON, scope all (append-only on
     the Supabase side, never deleted): results.json corrections[] (a portal field that changed
-    after a check, and whether that settled it)."""
+    after a check, and whether that settled it). `ids` ({passport: (uid, HNG id)}) fills the
+    student_uid column only: the key is the entry itself, so nothing is added to its data."""
     out = []
     for c in corrections or []:
         if not isinstance(c, Mapping):
             continue
         data = jsonable(dict(c))
+        pas = _passport(c.get("passport"))
+        uid, hng = _ids_of((ids or {}).get(pas)) if pas else ("", "")
+        change = _joined(_was_now("was", c.get("was"), c.get("was_result")),
+                         _was_now("now", c.get("now"), c.get("now_result")), sep=", ")
         text = _paragraph(
-            _sentence(f"Portal correction noticed {c.get('noticed')} for {c.get('student') or 'a student'}"
-                      f"{_ids(c.get('passport') or '', c.get('program') or '')}: {c.get('field')} was "
-                      f"{c.get('was') or 'blank'} ({c.get('was_result')}), now {c.get('now') or 'blank'} "
-                      f"({c.get('now_result')})"),
+            _sentence("Portal correction" + (f" noticed {c.get('noticed')}" if c.get("noticed") else "")
+                      + (f" for {c.get('student')}" if c.get("student") else "")
+                      + _ids(c.get("passport") or "", c.get("program") or "")
+                      + (f": {_joined(c.get('field'), change)}" if _joined(c.get("field"), change) else "")),
             _sentence(str(c.get("detail"))) if c.get("detail") else "")
         out.append(make("field_correction", sha1(canonical(data)), "all", data, text, "results.json",
-                        c.get("noticed"), name=c.get("student"), passport=_passport(c.get("passport")),
+                        c.get("noticed"), uid=uid, hng=hng, name=c.get("student"), passport=pas,
                         day=iso_day(c.get("noticed"))))
     return unique_keys(out)
 
@@ -867,13 +1032,14 @@ def _cache_entry(key: str) -> Optional[Tuple[bool, str, int, int, int]]:
 
 def doc_page_texts(passport: str, cache: Mapping[str, Any], name: str = "",
                    current: Optional[Mapping[str, Tuple[int, int]]] = None,
-                   read_at: Any = None) -> List[Dict[str, Any]]:
+                   read_at: Any = None, ids: Any = None) -> List[Dict[str, Any]]:
     """kind doc_page_text, key passport|file|p<page>, scope = the passport: the OCR text cache
     data/verification/text/<PASSPORT>.json, one record per page. A file's per-page entry
     ("PAGES:...") gives its pages; a file read only whole gives p1 when it has one page, else one
     record keyed passport|file|all (its pages cannot be told apart). The version used is the one
     whose size and mtime match the file now in the student's folder (`current`: {file: (size,
-    mtime)}), else the newest. Pages that could not be read ("[unreadable: ...]") are left out."""
+    mtime)}), else the newest. Pages that could not be read ("[unreadable: ...]") are left out.
+    `ids`: the student's (portal uid, HNG id) when known."""
     pas = _passport(passport) or str(passport)
     versions: Dict[str, Dict[Tuple[int, int], Dict[str, Any]]] = {}
     for key, value in (cache or {}).items():
@@ -905,11 +1071,12 @@ def doc_page_texts(passport: str, cache: Mapping[str, Any], name: str = "",
             if not text.strip() or _UNREADABLE_RE.match(text):
                 continue
             page = int(tag[1:]) if tag.startswith("p") else None
-            data = {"file": file, "page": page, "pages": tag == "all", "size": size, "mtime": mtime,
-                    "sideways": page in sideways, "words": len(text.split())}
+            data, uid, hng = _with_ids({"file": file, "page": page, "pages": tag == "all", "size": size,
+                                        "mtime": mtime, "sideways": page in sideways,
+                                        "words": len(text.split())}, ids)
             head = f"Document {file} of {name} ({pas}), {label}:" if name else f"Document {file} ({pas}), {label}:"
             out.append(make("doc_page_text", f"{pas}|{file}|{tag}", pas, data, f"{head}\n{text}",
-                            f"verification/text/{pas}.json", read_at, name=name, passport=pas))
+                            f"verification/text/{pas}.json", read_at, uid=uid, hng=hng, name=name, passport=pas))
     return unique_keys(out)
 
 
@@ -985,8 +1152,10 @@ def missing_report(day: Any, rows: Sequence[Sequence[Any]], text: str = "", read
     cols = ("program", "intake", "student_id", "full_name", "mobile", "missing_count", "missing_fields")
     items = [dict(zip(cols, [("" if v is None else v) for v in r])) for r in rows or []]
     incomplete = [i for i in items if str(i["missing_count"]).isdigit() and int(i["missing_count"]) > 0]
-    lines = [f"{i['program']} {i['intake']} — {i['student_id'] or '(no ID)'} {i['full_name']} — "
-             f"{i['missing_count']} missing: {i['missing_fields']}" for i in incomplete]
+    lines = [_joined(_joined(i["program"], i["intake"]), _joined(i["student_id"], i["full_name"]),
+                     f"{i['missing_count']} missing" + (f": {i['missing_fields']}" if i["missing_fields"] else ""),
+                     sep=" — ")
+             for i in incomplete]
     body = text or "\n".join([f"Missing-information report — {_long_day(iso)}",
                               f"{len(incomplete)} students have missing information."] + lines)
     whole = report("missing_report", iso, body, {"rows": items}, source, read_at, iso)
@@ -1012,10 +1181,14 @@ def document_check_report(store: Mapping[str, Any]) -> Tuple[Optional[Dict[str, 
     verdicts: Dict[str, int] = {}
     for pas, e in sorted(docs.items(), key=lambda kv: (str(kv[1].get("program")), str(kv[1].get("student")))):
         counts = {k: sum(1 for r in e.get("rows") or [] if r.get("verdict") == k) for k in ("MISSING", "FAIL", "FLAG", "PASS")}
-        verdicts[str(e.get("verdict"))] = verdicts.get(str(e.get("verdict")), 0) + 1
-        sections.append((f"{e.get('student')} ({pas}, {e.get('program')}): {e.get('verdict')}",
-                         [", ".join(f"{k} {v}" for k, v in counts.items()) + f"; checked {e.get('checked')}"]))
-    head = f"DOCUMENT CHECK — {len(docs)} students: " + ", ".join(f"{k} {v}" for k, v in sorted(verdicts.items()))
+        if e.get("verdict"):
+            verdicts[str(e["verdict"])] = verdicts.get(str(e["verdict"]), 0) + 1
+        who = _joined(e.get("student"), f"({_joined(pas, e.get('program'), sep=', ')})")
+        sections.append((who + (f": {e.get('verdict')}" if e.get("verdict") else ""),
+                         [", ".join(f"{k} {v}" for k, v in counts.items())
+                          + (f"; checked {e.get('checked')}" if e.get("checked") else "")]))
+    head = f"DOCUMENT CHECK — {len(docs)} students" + (
+        ": " + ", ".join(f"{k} {v}" for k, v in sorted(verdicts.items())) if verdicts else "")
     text = "\n".join([head] + [h for h, _ in sections])
     whole = report("document_check", when, text, {"students": len(docs), "verdicts": verdicts},
                    "results.json", None, when)
@@ -1035,15 +1208,19 @@ def field_check_report(store: Mapping[str, Any]) -> Tuple[Optional[Dict[str, Any
         rows = e.get("rows") or []
         counts = {k: sum(1 for r in rows if r.get("result") == k)
                   for k in ("MATCH", "DIFFERS", "UNREADABLE", "NO DOCUMENT", "BLANK")}
-        differ = [f"{r.get('field')}: portal {r.get('portal')} — {r.get('detail')}" for r in rows
-                  if r.get("result") == "DIFFERS"]
-        sections.append((f"{e.get('student')} ({pas}, {e.get('program')}): "
-                         + ", ".join(f"{k} {v}" for k, v in counts.items()), differ))
-    corrections = store.get("corrections") or []
+        differ = [_joined(r.get("field") and f"{r.get('field')}:", r.get("portal") and f"portal {r.get('portal')}",
+                          r.get("detail") and f"— {r.get('detail')}")
+                  for r in rows if r.get("result") == "DIFFERS"]
+        who = _joined(e.get("student"), f"({_joined(pas, e.get('program'), sep=', ')})")
+        sections.append((f"{who}: " + ", ".join(f"{k} {v}" for k, v in counts.items()), [d for d in differ if d]))
+    corrections = [c for c in store.get("corrections") or [] if isinstance(c, Mapping)]
     if corrections:
         sections.append((f"Corrections ({len(corrections)})",
-                         [f"{c.get('noticed')} {c.get('student')} {c.get('field')}: {c.get('was')} -> {c.get('now')} "
-                          f"({c.get('was_result')} -> {c.get('now_result')})" for c in corrections]))
+                         [_joined(c.get("noticed"), c.get("student"),
+                                  _joined(c.get("field") and f"{c.get('field')}:", _arrow(c.get("was"), c.get("now"))),
+                                  _arrow(c.get("was_result"), c.get("now_result"))
+                                  and f"({_arrow(c.get('was_result'), c.get('now_result'))})")
+                          for c in corrections]))
     text = "\n".join([f"FIELD CHECK — {len(fields)} students"] + [h for h, _ in sections])
     whole = report("field_check", when, text, {"students": len(fields), "corrections": len(corrections)},
                    "results.json", None, when)

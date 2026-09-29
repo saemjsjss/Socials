@@ -175,10 +175,12 @@ def sync_batches(cloud: Mapping[str, Any]) -> Built:
 
     rows = cloud.get("export")
     if rows:
-        whole = {"Student ID", "Full Name"} <= set(rows[0])
+        # The export has no pager and no total: it is whole only with most of the students the
+        # last whole read of the list counted (a stream cut short after its header still parses).
+        whole, why = records.export_complete(rows, listed_students())
         out.append(records.batch("student_export", "all", records.student_exports(rows, run_at), whole))
         if not whole:
-            failed.append("students.php?export=csv: no Student ID and Full Name header")
+            failed.append(why)
     else:
         failed.append(reason("students.php?export=csv", cloud.get("sheets_error")) if rows is None
                       else "students.php?export=csv: no rows")
@@ -199,7 +201,8 @@ def sync_batches(cloud: Mapping[str, Any]) -> Built:
         out += _report("sync_summary", run_at, text, {"lines": lines}, "auto_sync", run_at, line_sections(lines))
 
     if cloud.get("verify") is not None:
-        b, f = verify_batches(cloud["verify"], bool(cloud.get("store_ok", True)))
+        ids = student_ids(docs or [], rows or [])
+        b, f = verify_batches(cloud["verify"], bool(cloud.get("store_ok", True)), ids=ids)
         out += b
         failed += f
     elif cloud.get("verify_error") is not None:
@@ -208,6 +211,24 @@ def sync_batches(cloud: Mapping[str, Any]) -> Built:
     for sent_title, sent_lines, at in cloud.get("sent") or []:
         out.append(_notification("\n".join(sent_lines), at, "auto_sync", sent_title))
     return out, failed
+
+
+def listed_students() -> int:
+    """How many students the last whole read of students.php counted, as the hash state holds them
+    (the watcher and the hourly full picture publish that list complete); 0 when not known."""
+    try:
+        from src.cloud import publish
+        return len(publish.known_keys("student", "all"))
+    except Exception:
+        return 0
+
+
+def student_ids(documents: Sequence[Mapping[str, Any]], export: Sequence[Mapping[str, Any]]) -> Dict[str, Tuple[str, str]]:
+    """{passport: (portal uid, HNG id)} for the document check's records: what this run's
+    verified-documents list and CSV export show, merged into what earlier lists showed
+    (src.cloud.student_index, so a run whose list could not be read keeps the ids)."""
+    from src.cloud import student_index
+    return student_index.remember(student_index.from_export(export), student_index.from_documents(documents))
 
 
 def _folder_files(folder: Optional[Path]) -> Dict[str, Tuple[int, int]]:
@@ -222,7 +243,8 @@ def _folder_files(folder: Optional[Path]) -> Dict[str, Tuple[int, int]]:
     return out
 
 
-def _page_texts(passport: str, name: str, folders: Mapping[str, Any], failed: List[str]) -> List[Dict[str, Any]]:
+def _page_texts(passport: str, name: str, folders: Mapping[str, Any], failed: List[str],
+                ids: Any = None) -> List[Dict[str, Any]]:
     """The doc_page_text records of one passport's OCR text cache (data/verification/text/<P>.json)."""
     from src.cloud import records
     from src.verify import auto_verify as av
@@ -238,18 +260,24 @@ def _page_texts(passport: str, name: str, folders: Mapping[str, Any], failed: Li
         return []
     folder = (folders.get(passport) or (None,))[0]
     read_at = _at(path.stat().st_mtime)
-    return records.doc_page_texts(passport, cache, name, _folder_files(folder), read_at)
+    return records.doc_page_texts(passport, cache, name, _folder_files(folder), read_at, ids)
 
 
-def verify_batches(result: Mapping[str, Any], store_ok: bool = True, folders: Optional[Mapping[str, Any]] = None) -> Built:
+def verify_batches(result: Mapping[str, Any], store_ok: bool = True, folders: Optional[Mapping[str, Any]] = None,
+                   ids: Optional[Mapping[str, Tuple[str, str]]] = None) -> Built:
     """auto_verify.run's result -> the document check's batches: doc_verdict, field_check and
     doc_page_text of the passports it just checked (and a few that Supabase never accepted), each
     passport its own complete scope; then, from the whole store (results.json, the whole truth of
     the check), doc_check (complete), field_correction (append-only) and the DOCUMENT CHECK and
     FIELD CHECK reports. `store_ok` False (results.json was unreadable, so auto_verify started from
-    an empty store): the store-wide kinds are not sent."""
+    an empty store): the store-wide kinds are not sent. `ids` ({passport: (uid, HNG id)}, by
+    default the student index as kept) gives each record its student."""
     from src.cloud import records
     from src.sheets.passport_issue import passport_key
+    if ids is None:
+        from src.cloud import student_index
+        ids = student_index.load()
+    read_at = records.as_read_at(None)            # when the store was read: what dates doc_check
     store = result.get("store") or {}
     docs = {p: e for p, e in (store.get("documents") or {}).items() if isinstance(e, Mapping)}
     fields = {p: e for p, e in (store.get("fields") or {}).items() if isinstance(e, Mapping)}
@@ -278,12 +306,13 @@ def verify_batches(result: Mapping[str, Any], store_ok: bool = True, folders: Op
             folders = {}
     verdicts, checks, texts = [], [], []
     for p in passports:
+        who = ids.get(passport_key(p) or p)
         if p in docs:
-            verdicts += records.doc_verdicts(p, docs[p])
+            verdicts += records.doc_verdicts(p, docs[p], who)
         if p in fields:
-            checks += records.field_checks(p, fields[p])
+            checks += records.field_checks(p, fields[p], who)
         name = (docs.get(p) or fields.get(p) or {}).get("student") or ""
-        texts += _page_texts(p, name, folders or {}, failed)
+        texts += _page_texts(p, name, folders or {}, failed, who)
     # Each passport's details before the store-wide kinds: a run cut short never leaves doc_check
     # newer than the rows it counts.
     out += [records.batches("doc_verdict", verdicts, True), records.batches("field_check", checks, True),
@@ -293,8 +322,9 @@ def verify_batches(result: Mapping[str, Any], store_ok: bool = True, folders: Op
         failed.append("results.json: unreadable before the document check (it started from an empty store)")
         return out, failed
     if docs:
-        out.append(records.batch("doc_check", "all", records.doc_checks(docs, fields), True))
-    out.append(records.batch("field_correction", "all", records.field_corrections(store.get("corrections") or []), False))
+        out.append(records.batch("doc_check", "all", records.doc_checks(docs, fields, ids), True, read_at=read_at))
+    out.append(records.batch("field_correction", "all",
+                             records.field_corrections(store.get("corrections") or [], ids), False))
     for maker in (records.document_check_report, records.field_check_report):
         whole, sections = maker(store)
         if whole is not None:

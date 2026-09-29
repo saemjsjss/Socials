@@ -136,6 +136,10 @@ def sync(monkeypatch, tmp_path):
     world.documents = [{"uid": "425", "name": NAME, "passport": PASSPORT, "program": KLP,
                         "docs": f"photo_425_1790000000.jpg|{SCAN}"}]
     world.result = {"checked": CHECKED, "waiting": 0, "skipped": [], "store": STORE}
+    # How many students the last whole students.php list counted (the hash state's, as the watcher
+    # and the full picture publish it): what proves the export whole (records.export_complete).
+    world.listed = 2
+    monkeypatch.setattr(sheet_hooks, "listed_students", lambda: world.listed)
     data = tmp_path / "data"
     data.mkdir()
     monkeypatch.setattr(auto_sync, "DATA_DIR", data)
@@ -253,6 +257,7 @@ def test_a_read_that_failed_sends_no_batch_and_its_reason_goes_to_the_run(sync, 
 
     cloud.spawned.clear()
     sync.export = csv_rows(("Direct", "HNG-2026-012", NAME, "01711111111", KLP, "MARCH 2027", "", "", "", PASSPORT))
+    sync.listed = 1                                                      # the list counts one student now
     sync.documents = RuntimeError(f"a Drive error about {NAME}")      # its text never reaches the run
     auto_sync.STATE_PATH.unlink()
     with telegram():
@@ -465,7 +470,7 @@ def test_the_daily_missing_report_hands_over_the_report_its_sections_and_the_tex
     assert (sections["scope"], sections["complete"]) == ("missing_report|2026-09-29", True)
     assert [r["content"] for r in sections["rows"]] == [
         f"{pb.PROGRAMS['KLP']['name']} MARCH 2027 — HNG-2026-012 {NAME} — 1 missing: Email",
-        f"{KLP} (no intake) — (no ID) NO INTAKE STUDENT — 1 missing: Intake"]
+        f"{KLP} (no intake) — NO INTAKE STUDENT — 1 missing: Intake"]
     notice, = kinds["notification"]
     assert (notice["scope"], notice["rows"][0]["content"]) == ("2026-09-29", posts[0]["data"]["text"])
     publish.process_file(cloud.spawned[0])

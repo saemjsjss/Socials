@@ -37,7 +37,9 @@ What seen() keeps, and what it becomes (one handoff per command, job "command"):
   dashboard      client.get_dashboard(): its tiles as dashboard_fact (partial: tiles only, no
                  cards); its "error" is a failed read
   pending        (every student parsed from every page of students.php?status=pending, the
-                 badge): pending_payment (complete: the reader raises unless every page was read)
+                 badge): pending_payment (the reader raises unless every page was read; complete
+                 only when the rows whose own Payment says Pending are as many as the badge says,
+                 records.pending_complete: a renamed Payment header reads as nobody pending)
   calendar       ask.calendar_items of calendar.php (layout recognised): calendar_item (never
                  complete: the page shows only this month and the next 45 days)
   cards          cross-check cards audited by telegram_bot._audit_cards (audited() adds each
@@ -217,8 +219,15 @@ def build(reads: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
             failed.append(_failed("index.php", dash["error"]))
     if reads.get("pending") is not None:
         rows, badge = reads["pending"]
-        out.append(records.batch("pending_payment", "all", records.pending_payments(rows, badge, at.get("pending")),
-                                 True))
+        pending = records.pending_payments(rows, badge, at.get("pending"))
+        # Complete only when the rows agree with the portal's own badge (the list's empty state is
+        # not kept here: without a badge, only rows that say Pending prove the column was read).
+        complete = records.pending_complete(pending, badge)
+        out.append(records.batch("pending_payment", "all", pending, complete))
+        if not complete:
+            failed.append(f"students.php?status=pending: {len(pending)} row(s) say Pending but the portal's "
+                          f"badge says {badge}" if badge is not None else
+                          "students.php?status=pending: no row says Pending and there is no badge to check by")
     if reads.get("calendar") is not None:
         out.append(records.batch("calendar_item", "all", records.calendar_items(reads["calendar"], at.get("calendar")),
                                  False))
@@ -250,7 +259,7 @@ def student_list(students: Sequence[Mapping[str, Any]], today: Optional[date],
     ok = stamps_readable(students)
     if today is not None:
         out.append(records.batches("verification", records.verifications(students, today, read_at), ok,
-                                   records.verification_window(today) if ok else None))
+                                   records.verification_window(today) if ok else None, read_at=read_at))
     return out, ([] if ok else [STAMP_PROBLEM])
 
 

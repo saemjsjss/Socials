@@ -97,7 +97,7 @@ async def collect_students(client, today: date) -> Tuple[Batches, List[str], Opt
     from src.dates import parse_stamp
     stamps_ok = (not students or bool(lines)) and all(parse_stamp(s.get("verified_stamp") or "") for s in lines)
     out.append(records.batches("verification", records.verifications(students, today, at), stamps_ok,
-                               records.verification_window(today) if stamps_ok else None))
+                               records.verification_window(today) if stamps_ok else None, read_at=at))
     failed = [] if stamps_ok else ["students.php: a verification stamp could not be read (layout not recognised)"]
     return out, failed, students
 
@@ -105,7 +105,8 @@ async def collect_students(client, today: date) -> Tuple[Batches, List[str], Opt
 async def collect_export(client, total: Optional[int] = None) -> Tuple[Batches, List[str]]:
     """students.php?export=csv (every column, B2B and Direct) -> the student_export batch. Complete
     when the export came whole (its header has Student ID and Full Name) and holds at least 90 % of
-    the list's own total (`total`, when known): the export has no pager to prove it by."""
+    the list's own count (`total`, from a whole read of students.php; without it, never): the
+    export has no pager to prove it by (records.export_complete)."""
     try:
         resp = await client.portal_get("students.php", params={"export": "csv"}, timeout=60.0)
         text = resp.content.decode("utf-8-sig", errors="replace")
@@ -114,10 +115,9 @@ async def collect_export(client, total: Optional[int] = None) -> Tuple[Batches, 
         rows = [dict(r) for r in csv.DictReader(io.StringIO(text))]
     except Exception as e:
         return [], [f"students.php?export=csv: {_why(e)}"]
-    header_ok = bool(rows) and {"Student ID", "Full Name"} <= set(rows[0])
-    complete = header_ok and (total is None or len(rows) >= 0.9 * total)
+    complete, why = records.export_complete(rows, total)
     return [records.batch("student_export", "all", records.student_exports(rows), complete)], \
-        ([] if complete else ["students.php?export=csv: fewer rows than the student list, or no header"])
+        ([] if complete else [why])
 
 
 async def collect_documents(client) -> Tuple[Batches, List[str]]:
@@ -212,20 +212,29 @@ async def collect_totals(client) -> Tuple[Batches, List[str]]:
 
 async def collect_pending(client) -> Tuple[Batches, List[str]]:
     """Every page of students.php?status=pending -> pending_payment (rows whose own Payment is
-    Pending, with the badge), complete."""
+    Pending, with the badge), complete only when those rows agree with the page itself
+    (records.pending_complete: the badge's count, or the list's own empty state)."""
     from src.scraper.parsers import StudentListLayoutError, parse_pending_payments, parse_students_page
     try:
         pages = await client.read_student_pages({"status": "pending"})
         badge = (await asyncio.to_thread(parse_pending_payments, pages[0]) or {}).get("badge") if pages else None
-        rows = []
+        rows, empty = [], bool(pages)
         for html in pages:
             try:
-                rows += (await asyncio.to_thread(parse_students_page, html))["students"]
+                parsed = await asyncio.to_thread(parse_students_page, html)
             except StudentListLayoutError as e:
                 return [], [f"students.php?status=pending: {e}"]
+            rows += parsed["students"]
+            empty = empty and bool(parsed.get("empty"))
     except Exception as e:
         return [], [f"students.php?status=pending: {_why(e)}"]
-    return [records.batch("pending_payment", "all", records.pending_payments(rows, badge), True)], []
+    pending = records.pending_payments(rows, badge)
+    complete = records.pending_complete(pending, badge, empty)
+    failed = [] if complete else [
+        f"students.php?status=pending: {len(pending)} row(s) say Pending but the portal's badge says {badge}"
+        if badge is not None else
+        "students.php?status=pending: no row says Pending and the list shows no empty state (layout not recognised)"]
+    return [records.batch("pending_payment", "all", pending, complete)], failed
 
 
 _PAGED_RE = re.compile(r"Page\s+\d+\s+of\s+\d+|[?&](?:pg|page)=\d", re.I)
@@ -233,7 +242,8 @@ _PAGED_RE = re.compile(r"Page\s+\d+\s+of\s+\d+|[?&](?:pg|page)=\d", re.I)
 
 async def collect_window_applications(client) -> Tuple[Batches, List[str]]:
     """window_applications.php?status=under_review -> window_application; complete when the page
-    has no pager (it has no total to prove more pages by)."""
+    has no pager (it has no total to prove more pages by) and its rows can be told apart from a
+    layout change (records.window_complete: its own empty table, or a row under review)."""
     from src.scraper.parsers import parse_window_applications
     try:
         html = await client.fetch_html("window_applications.php?status=under_review")
@@ -242,8 +252,12 @@ async def collect_window_applications(client) -> Tuple[Batches, List[str]]:
     rows = await asyncio.to_thread(parse_window_applications, html)
     if rows is None:
         return [], ["window_applications.php: no table with a Status column (layout not recognised)"]
-    return [records.batch("window_application", "all", records.window_applications(rows),
-                          not _PAGED_RE.search(html))], []
+    apps = records.window_applications(rows)
+    paged = bool(_PAGED_RE.search(html))
+    complete = records.window_complete(rows, apps, paged)
+    failed = [] if complete or paged else [
+        "window_applications.php: no row's status reads under review (layout not recognised)"]
+    return [records.batch("window_application", "all", apps, complete)], failed
 
 
 async def collect_dashboard(client) -> Tuple[Batches, List[str]]:
@@ -288,9 +302,11 @@ def _mtime(path: Path) -> str:
 ALL_SCOPES = ("", chr(0xFFFF))      # every scope: the store holds every passport there is
 
 
-def collect_results(verification_dir: Path) -> Tuple[Batches, List[str], Dict[str, Any]]:
+def collect_results(verification_dir: Path, ids: Optional[Dict[str, Tuple[str, str]]] = None
+                    ) -> Tuple[Batches, List[str], Dict[str, Any]]:
     """results.json -> doc_verdict and field_check (per passport, complete), doc_check (complete),
-    field_correction (append-only) and the DOCUMENT CHECK / FIELD CHECK reports; and the store."""
+    field_correction (append-only) and the DOCUMENT CHECK / FIELD CHECK reports; and the store.
+    `ids` ({passport: (uid, HNG id)}, src.cloud.student_index) gives each record its student."""
     path = verification_dir / "results.json"
     try:
         store = _read_json(path)
@@ -300,14 +316,17 @@ def collect_results(verification_dir: Path) -> Tuple[Batches, List[str], Dict[st
         return [], [], {}
     except Exception as e:
         return [], [f"results.json: unreadable ({type(e).__name__})"], {}
+    ids = ids or {}
+    read_at = _mtime(path)
     docs = {p: e for p, e in (store.get("documents") or {}).items() if isinstance(e, dict)}
     fields = {p: e for p, e in (store.get("fields") or {}).items() if isinstance(e, dict)}
-    verdicts = [r for p, e in docs.items() for r in records.doc_verdicts(p, e)]
-    checks = [r for p, e in fields.items() for r in records.field_checks(p, e)]
+    verdicts = [r for p, e in docs.items() for r in records.doc_verdicts(p, e, ids.get(records._passport(p) or p))]
+    checks = [r for p, e in fields.items() for r in records.field_checks(p, e, ids.get(records._passport(p) or p))]
     out = [records.batches("doc_verdict", verdicts, True, ALL_SCOPES),
            records.batches("field_check", checks, True, ALL_SCOPES),
-           records.batch("doc_check", "all", records.doc_checks(docs, fields), True),
-           records.batch("field_correction", "all", records.field_corrections(store.get("corrections") or []), False)]
+           records.batch("doc_check", "all", records.doc_checks(docs, fields, ids), True, read_at=read_at),
+           records.batch("field_correction", "all",
+                         records.field_corrections(store.get("corrections") or [], ids), False)]
     for maker in (records.document_check_report, records.field_check_report):
         whole, sections = maker(store)
         if whole is not None:
@@ -331,7 +350,8 @@ def _current_files(docs_root: Path, passport: str) -> Dict[str, Tuple[int, int]]
     return out
 
 
-def collect_page_texts(verification_dir: Path, store: Dict[str, Any], docs_root: Path) -> Tuple[Batches, List[str]]:
+def collect_page_texts(verification_dir: Path, store: Dict[str, Any], docs_root: Path,
+                       ids: Optional[Dict[str, Tuple[str, str]]] = None) -> Tuple[Batches, List[str]]:
     """Every data/verification/text/<PASSPORT>.json -> doc_page_text, one batch per passport
     (complete: the cache file is the whole of it)."""
     names = {p: (e or {}).get("student", "") for p, e in (store.get("documents") or {}).items()}
@@ -345,15 +365,21 @@ def collect_page_texts(verification_dir: Path, store: Dict[str, Any], docs_root:
         except Exception as e:
             failed.append(f"an OCR text cache file: unreadable ({type(e).__name__})")
             continue
-        rows = records.doc_page_texts(passport, cache, names.get(passport, ""),
-                                      _current_files(docs_root, passport), _mtime(path))
         scope = records._passport(passport) or passport
+        rows = records.doc_page_texts(passport, cache, names.get(passport, ""),
+                                      _current_files(docs_root, passport), _mtime(path), (ids or {}).get(scope))
         out.append(records.batch("doc_page_text", scope, rows, True))
     return out, failed
 
 
-def collect_watcher(data_dir: Path) -> Tuple[Batches, List[str]]:
-    """data/alerted_passport_issues.json (v2) -> passport_alert, complete (the memory is the truth)."""
+def collect_watcher(data_dir: Path, students: Optional[Sequence[Dict[str, Any]]] = None,
+                    listed_at: Any = None) -> Tuple[Batches, List[str]]:
+    """data/alerted_passport_issues.json (v2) -> passport_alert. Complete over the scans the student
+    list shows (`students`, a whole read of students.php made at `listed_at`:
+    bot_jobs.watched_scans), as the watcher publishes it: an alert is deleted only once its scan is
+    no longer listed, never because a memory that is being rebuilt lacks it. Without the list, not
+    complete (nothing deleted)."""
+    from src.cloud.bot_jobs import watched_scans
     path = data_dir / "alerted_passport_issues.json"
     try:
         memory = _read_json(path)
@@ -363,7 +389,11 @@ def collect_watcher(data_dir: Path) -> Tuple[Batches, List[str]]:
         return [], [f"alerted_passport_issues.json: unreadable ({type(e).__name__})"]
     if not isinstance(memory, dict) or memory.get("version") != 2 or not isinstance(memory.get("scans"), dict):
         return [], ["alerted_passport_issues.json: not the version-2 memory"]
-    return [records.batch("passport_alert", "all", records.passport_alerts(memory), True)], []
+    rows = records.passport_alerts(memory)
+    if students is None:
+        return [records.batch("passport_alert", "all", rows, False)], []
+    return [records.batch("passport_alert", "all", rows, True, all_keys=watched_scans(students),
+                          read_at=listed_at or _mtime(path))], []
 
 
 def collect_issue_dates(data_dir: Path) -> Tuple[Batches, List[str]]:
@@ -433,23 +463,29 @@ def publish_all(batches: Batches, say: Callable[[str], None] = print, only: Opti
         if not b or (only and b["kind"] not in only):
             continue
         if b.get("scope") is None:
-            res = publish.publish_scopes(b["kind"], b["rows"], b["complete"], b.get("scope_range"))
+            res = publish.publish_scopes(b["kind"], b["rows"], b["complete"], b.get("scope_range"),
+                                         read_at=b.get("read_at"))
         else:
-            res = [publish.publish(b["kind"], b["scope"], b["rows"], b["complete"], all_keys=b.get("all_keys"))]
+            res = [publish.publish(b["kind"], b["scope"], b["rows"], b["complete"], all_keys=b.get("all_keys"),
+                                   read_at=b.get("read_at"))]
         _say(res, b["kind"], b["complete"], publish._dry(None), say)
         results += res
     return results
 
 
-async def _portal(args, today: date, say: Callable[[str], None], failed: List[str], only: Optional[set]) -> None:
+async def _portal(args, today: date, say: Callable[[str], None], failed: List[str],
+                  only: Optional[set]) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """The portal's part -> (the whole student list, when it was read, and when)."""
     from src.scraper.client import HangeulAdminClient
     client = HangeulAdminClient()
+    students, listed_at = None, None
     try:
         def step(what: str) -> None:
             say(f"Reading {what} ...")
 
         step("every page of students.php")
         b, f, students = await collect_students(client, today)
+        listed_at = records.as_read_at(None) if students is not None else None
         failed += f
         say(f"  {len(students)} students" if students is not None else f"  not read: {f[0]}")
         publish_all(b, say, only)
@@ -494,7 +530,8 @@ async def _portal(args, today: date, say: Callable[[str], None], failed: List[st
                 cons = [x for x in b if x["kind"] == "consultation"]
                 if cons and (not only or "consultation" in only):
                     from src.cloud import publish
-                    res = [publish.publish(x["kind"], x["scope"], x["rows"], x["complete"]) for x in cons]
+                    res = [publish.publish(x["kind"], x["scope"], x["rows"], x["complete"], read_at=x.get("read_at"))
+                           for x in cons]
                     _say(res, "consultation", all(x["complete"] for x in cons), publish._dry(None), say)
                 publish_all([x for x in b if x["kind"] != "consultation"], say, only)
 
@@ -512,24 +549,32 @@ async def _portal(args, today: date, say: Callable[[str], None], failed: List[st
             publish_all(b, say, only)
     finally:
         await client.close()
+    return students, listed_at
 
 
-def _disk(args, say: Callable[[str], None], failed: List[str], only: Optional[set]) -> None:
+def _disk(args, say: Callable[[str], None], failed: List[str], only: Optional[set],
+          students: Optional[List[Dict[str, Any]]] = None, listed_at: Optional[str] = None) -> None:
+    from src.cloud import publish, student_index
     data_dir = Path(args.data_dir) if args.data_dir else BOT_ROOT / "data"
     verification_dir = Path(args.verification_dir) if args.verification_dir else settings.verification_dir()
     docs_root = Path(args.docs_root) if args.docs_root else settings.docs_root()
+    # Which student each passport is (the portal's list, when it was read, and what earlier lists
+    # showed); a dry run changes no local file.
+    ids = (student_index.remember(student_index.from_students(students), save=not publish._dry(None))
+           if students else student_index.load())
     say(f"Reading {verification_dir / 'results.json'} ...")
-    b, f, store = collect_results(verification_dir)
+    b, f, store = collect_results(verification_dir, ids)
     failed += f
     publish_all(b, say, only)
     if not only or "doc_page_text" in only:
         say(f"Reading the OCR text caches in {verification_dir / 'text'} ...")
-        b, f = collect_page_texts(verification_dir, store, docs_root)
+        b, f = collect_page_texts(verification_dir, store, docs_root, ids)
         failed += f
         from src.cloud import publish
-        res = [publish.publish(x["kind"], x["scope"], x["rows"], x["complete"]) for x in b]
+        res = [publish.publish(x["kind"], x["scope"], x["rows"], x["complete"], read_at=x.get("read_at"))
+               for x in b]
         _say(res, "doc_page_text", True, publish._dry(None), say)
-    for what, collect in (("the passport watcher's memory", lambda: collect_watcher(data_dir)),
+    for what, collect in (("the passport watcher's memory", lambda: collect_watcher(data_dir, students, listed_at)),
                           ("data/passport_issue.json", lambda: collect_issue_dates(data_dir)),
                           ("the newest missing-information report", lambda: collect_missing_report(data_dir))):
         say(f"Reading {what} ...")
@@ -576,7 +621,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     publish.set_dry_run(args.dry_run)
     if args.ignore_state and not args.dry_run and publish.STATE_PATH.exists():
         backup = publish.STATE_PATH.with_name(publish.STATE_PATH.name + ".bak")
+        model = str(publish.load_state().get("embed_model") or "")
         os.replace(publish.STATE_PATH, backup)
+        if model:            # the chunks Supabase holds are still that model's: the check stays
+            publish.save_state(dict(publish._empty_state(), embed_model=model))
         say(f"The hash state was moved to {backup.name}: every record is sent.")
     started = time.perf_counter()
     today = records.now().date()
@@ -586,10 +634,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             say("Another publisher is running; try again later.")
             return 1
         with publish.run("backfill", dry_run=args.dry_run) as r:
+            students, listed_at = None, None
             if not args.skip_portal:
-                asyncio.run(_portal(args, today, say, failed, only))
+                students, listed_at = asyncio.run(_portal(args, today, say, failed, only))
             if not args.skip_disk:
-                _disk(args, say, failed, only)
+                _disk(args, say, failed, only, students, listed_at)
             if r is not None:
                 r.failed_reads.extend(failed)
     say(f"Done in {time.perf_counter() - started:.0f} s; {len(failed)} read(s) failed."

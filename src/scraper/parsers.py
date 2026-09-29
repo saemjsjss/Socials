@@ -675,7 +675,11 @@ def _consultation_table_rows(table) -> List[Dict[str, Any]]:
         contact_cell = cell(cols, "contact") or (name_cell.select_one(".cr-contact") if name_cell else None)
         remark_box = cell(cols, "remarks").select_one("textarea") if cell(cols, "remarks") else None
         details = (place.select_one(".crd-body") if place else None) or cell(cols, "details")
+        # The request's own id: the hidden "id" of the row's (never submitted) forms, when every
+        # form that has one agrees on one number; "" otherwise.
+        form_ids = {str(i.get("value") or "").strip() for i in tr.select('form input[type="hidden"][name="id"]')}
         rows.append({
+            "id": next(iter(form_ids)) if len(form_ids) == 1 and next(iter(form_ids)).isdigit() else "",
             "name": name,
             "contact": text(contact_cell).replace("[email protected]", "").strip(),
             # The portal writes "—" for a city or program nobody gave: that is no value, not a place.

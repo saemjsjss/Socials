@@ -25,9 +25,10 @@ anything can import torch, so gte-small runs on the CPU (R12), and only when som
 It does nothing while publishing is off or the bot is in mock mode; nothing in (or less than
 LEAD_MINUTES before) the quiet windows of the scheduled jobs (18:00-18:10, 08:25-08:40,
 09:00-09:10) or while a portal sync runs (data/auto_sync.lock), checked by the scheduler before it
-starts this and again here; and nothing while another publisher (the backfill) holds the publish
-lock. It stops itself after DEADLINE seconds, well before the next hour. It sends nothing to
-Telegram and never logs student data.
+starts this, again here, again once it holds the publish lock, and before every page it reads (a
+run that began just before a quiet window stops reading there); and nothing while another
+publisher (the backfill) holds the publish lock. It stops itself after DEADLINE seconds, well
+before the next hour. It sends nothing to Telegram and never logs student data.
 """
 from __future__ import annotations
 
@@ -43,7 +44,7 @@ import logging
 import threading
 import time
 from datetime import date, timedelta
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from src.cloud import backfill, publish, records
 from src.config import settings
@@ -89,30 +90,37 @@ class PortalSession(HangeulAdminClient):
             raise
 
 
-async def collect(client, today: date) -> Tuple[Batches, List[str]]:
+async def collect(client, today: date, may_read: Optional[Callable[[], Optional[str]]] = None
+                  ) -> Tuple[Batches, List[str]]:
     """Every page of the full picture (see the module docstring), one after another, with the
-    backfill's readers -> (their batches, the reads that failed)."""
+    backfill's readers -> (their batches, the reads that failed). `may_read` (skip_reason) is
+    asked before each page: once it gives a reason (a quiet window is near, a portal sync began),
+    the pages after are not read (one failed read says why); what was read is each a whole read of
+    its own page, and goes as it is."""
     batches, failed = [], []
-    got, why, _students = await backfill.collect_students(client, today)
-    batches += got
-    failed += why
-    for step in (lambda: backfill.collect_pending(client),
-                 lambda: backfill.collect_consultations(client, [today - timedelta(days=1), today]),
-                 lambda: backfill.collect_totals(client),
-                 lambda: backfill.collect_window_applications(client),
-                 lambda: backfill.collect_dashboard(client),
-                 lambda: backfill.collect_calendar(client, today)):
-        got, why = await step()
+    steps = [lambda: backfill.collect_students(client, today),
+             lambda: backfill.collect_pending(client),
+             lambda: backfill.collect_consultations(client, [today - timedelta(days=1), today]),
+             lambda: backfill.collect_totals(client),
+             lambda: backfill.collect_window_applications(client),
+             lambda: backfill.collect_dashboard(client),
+             lambda: backfill.collect_calendar(client, today)]
+    for n, step in enumerate(steps):
+        stop = may_read() if may_read is not None else None
+        if stop:
+            failed.append(f"the full picture's last {len(steps) - n} page read(s): not read ({stop})")
+            break
+        got, why, *_ = await step()
         batches += got
         failed += why
     return batches, failed
 
 
-async def _read(today: date, client=None) -> Tuple[Batches, List[str]]:
+async def _read(today: date, client=None, may_read=None) -> Tuple[Batches, List[str]]:
     own = client is None
     client = client or PortalSession()
     try:
-        return await collect(client, today)
+        return await collect(client, today, may_read)
     finally:
         if own:
             await client.close()
@@ -134,9 +142,15 @@ def run(today: Optional[date] = None, *, client=None, dry_run: bool = False) -> 
         if not got:
             logger.info("Full picture skipped: another publisher (the backfill?) holds the publish lock.")
             return 0
+        # The lock can take LOCK_WAIT seconds: look again, and before every page (a run that
+        # started just before a quiet window must not read the portal into it).
+        reason = skip_reason()
+        if reason:
+            logger.info("Full picture skipped: %s.", reason)
+            return 0
         started = time.perf_counter()
         today = today or records.now().date()
-        batches, failed = asyncio.run(_read(today, client))
+        batches, failed = asyncio.run(_read(today, client, lambda: skip_reason()))
         read_seconds = time.perf_counter() - started
         results = publish.publish_batches(JOB, batches, failed, dry_run=dry_run)
     logger.info("Full picture: %d batch(es) read in %.1f s, %d read(s) failed; %d publish(es), %d failed.",

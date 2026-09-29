@@ -9,7 +9,8 @@
                         complete: read_students() reads every page and checks the pager), this run's
                         passport audits (passport_audit: the audits of every scan the list still
                         shows are kept, those of scans it no longer shows are deleted) and its memory
-                        (passport_alert, complete: the memory is the whole truth after every save)
+                        (passport_alert: the alerts about the scans the list still shows are kept,
+                        so a memory that was lost and is being rebuilt never deletes one)
   the full picture      once an hour, in its own process: src/cloud/full_picture.py
 
 The bot process only builds the records and hands them over (hand_over): in a worker thread, so
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -242,6 +244,29 @@ def listed_scans(students: Iterable[Mapping[str, Any]]) -> List[str]:
                    for f in s.get("files") or [] if str(f).startswith("passport_")})
 
 
+# scheduler.passport_scan's rule (the upload time in the file name orders a student's scans), kept
+# here so the backfill need not import the scheduler; a test pins the two together.
+_UPLOAD_TIME_RE = re.compile(r"passport_\d+_(\d{9,11})\b")
+
+
+def _upload_time(file_name: str) -> int:
+    m = _UPLOAD_TIME_RE.search(file_name or "")
+    return int(m.group(1)) if m else 0
+
+
+def watched_scans(students: Iterable[Mapping[str, Any]]) -> List[str]:
+    """The scans the watcher's memory is about, as "uid|file": each listed student's newest
+    passport scan (scheduler.passport_scan), the only keys the memory keeps. An alert about any
+    other scan is one the watcher has forgotten (the scan was replaced, or the student is gone)."""
+    out = set()
+    for s in students:
+        uid = str(s.get("uid") or "").strip()
+        scans = [f for f in s.get("files") or [] if str(f).startswith("passport_")]
+        if uid and scans:
+            out.add(f"{uid}|{max(scans, key=_upload_time)}")
+    return sorted(out)
+
+
 def watcher_batches(students: Sequence[Mapping[str, Any]], read_at: Any,
                     audits: Sequence[Tuple[Mapping[str, Any], str, Mapping[str, Any], Mapping[str, Any], Any]],
                     memory: Mapping[str, Any], unchecked: int = 0,
@@ -253,12 +278,21 @@ def watcher_batches(students: Sequence[Mapping[str, Any]], read_at: Any,
     scans could not be checked (tried again next run), `sent` the (text, time) of each alert
     message Telegram accepted (notification, as sent) and `profiles` the (uid, profile, time) of
     each student_edit.php profile the audits read (student_profile, its uid its own complete scope;
-    never the legacy full-page read, which carries the form's _csrf)."""
+    never the legacy full-page read, which carries the form's _csrf).
+
+    The alerts are complete over the scans the list shows (watched_scans): an alert is deleted
+    only once the portal no longer lists its scan, never because the memory lacks it. A memory the
+    watcher could not read restarts empty and is rebuilt over several runs (its budget is 20
+    minutes); until a scan is audited again, the alert Supabase holds about it (its text, sent,
+    sent_at) is the only copy left, and it stays. Every batch is dated by the list read (`read_at`),
+    which the watcher hands over only after its audits."""
     rows = [records.passport_audit(s.get("uid"), scan, result, at, student=s, form=form)
             for s, scan, form, result, at in audits]
-    out = [records.batch("student", "all", records.students(students, read_at), True),
-           records.batch("passport_audit", "all", [r for r in rows if r], True, all_keys=listed_scans(students)),
-           records.batch("passport_alert", "all", records.passport_alerts(memory), True)]
+    out = [records.batch("student", "all", records.students(students, read_at), True, read_at=read_at),
+           records.batch("passport_audit", "all", [r for r in rows if r], True, all_keys=listed_scans(students),
+                         read_at=read_at),
+           records.batch("passport_alert", "all", records.passport_alerts(memory), True,
+                         all_keys=watched_scans(students), read_at=read_at)]
     latest: Dict[str, Any] = {}
     for uid, profile, at in profiles or ():
         if isinstance(profile, Mapping) and "_csrf" not in profile:
