@@ -76,6 +76,9 @@ Section = Tuple[List[str], List[str]]     # (Markdown lines, plain one-figure fa
 class Brief(NamedTuple):
     text: str                   # the brief, Telegram Markdown
     facts: List[str]            # its figures, one plain line each: what the summary and Jennie may say
+    # What its portal reads returned (compose_brief), for the Supabase copy (src.cloud.bot_jobs);
+    # the text and facts never depend on it. None when a Brief is built by hand.
+    reads: Optional[Dict[str, Any]] = None
 
 
 def _now() -> datetime:
@@ -567,6 +570,7 @@ class _PortalReads:
         self.started = time.perf_counter()
         self.down: Optional[str] = None
         self.why: Dict[str, str] = {}
+        self.errors: Dict[str, Exception] = {}      # each failed read's exception (for the Supabase run)
 
     async def read(self, what: str, job: Callable[[], Awaitable[Any]]) -> Any:
         if self.down:
@@ -580,6 +584,7 @@ class _PortalReads:
         try:
             return await asyncio.wait_for(job(), timeout=min(READ_TIMEOUT, left))
         except Exception as e:
+            self.errors[what] = e
             # The portal not answering: a timeout, a refused or dropped connection (raised by
             # admin_client.fetch_html as a PortalUnavailable marked unreachable).
             if isinstance(e, (asyncio.TimeoutError, httpx.TransportError)) or (
@@ -648,7 +653,13 @@ async def compose_brief(day: Optional[date] = None, with_summary: bool = True) -
                 f"{' (' + reads.down + ')' if reads.down else ''}, total "
                 f"{time.perf_counter() - started:.1f} s, {len(text)} characters, "
                 f"summary {'added' if summary else 'none'}.")
-    return Brief(text, facts)
+    # What was read, as it was read (None: not read), for the Supabase copy after the brief is sent.
+    read = {"day": day, "today": today, "at": now, "is_today": is_today, "mock": admin_client.mock_mode,
+            "consultations": consultations, "verified": verified, "verified_why": verified_why,
+            "consultation totals": consult_totals, "pending payments": pending,
+            "window applications": review, "dashboard": dashboard, "calendar": calendar,
+            "documents": documents, "why": dict(reads.why), "errors": dict(reads.errors), "down": reads.down}
+    return Brief(text, facts, read)
 
 
 async def compose_daily_brief(day: Optional[date] = None, with_summary: bool = True) -> str:
