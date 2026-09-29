@@ -235,9 +235,12 @@ class HangeulAdminClient:
 
         -> {"students": the admitted students matching the query, "admitted": how many are
             admitted in all, "checked": how many students were read, "stage": the stage used,
-            "tile": the dashboard's Admitted figure (None when not read), "query": query}
+            "tile": the dashboard's Admitted figure (None when not read), "query": query,
+            "listed": every student read (the whole list), "dashboard": get_dashboard()'s read
+            (None in mock mode)}
         Raises PortalUnavailable when the list cannot be read whole."""
         stage, tile = ADMITTED_STAGE, None
+        dash = None
         if self.mock_mode:
             students = MOCK_APPLICATIONS
         else:
@@ -252,7 +255,7 @@ class HangeulAdminClient:
         admitted = [s for s in students if is_admitted(s, stage)]
         matching = [s for s in admitted if student_matches(s, query)] if query else admitted
         return {"students": matching, "admitted": len(admitted), "checked": len(students),
-                "stage": stage, "tile": tile, "query": query}
+                "stage": stage, "tile": tile, "query": query, "listed": students, "dashboard": dash}
 
     async def get_consultation_requests(self, target_date: Optional[str] = "today") -> List[Dict[str, Any]]:
         """Retrieve student consultation requests from consult_requests.php, optionally filtered by date."""
