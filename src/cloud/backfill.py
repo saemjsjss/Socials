@@ -435,7 +435,7 @@ def publish_all(batches: Batches, say: Callable[[str], None] = print, only: Opti
         if b.get("scope") is None:
             res = publish.publish_scopes(b["kind"], b["rows"], b["complete"], b.get("scope_range"))
         else:
-            res = [publish.publish(b["kind"], b["scope"], b["rows"], b["complete"])]
+            res = [publish.publish(b["kind"], b["scope"], b["rows"], b["complete"], all_keys=b.get("all_keys"))]
         _say(res, b["kind"], b["complete"], publish._dry(None), say)
         results += res
     return results

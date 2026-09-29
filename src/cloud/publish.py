@@ -549,14 +549,17 @@ def _can_embed_here() -> bool:
 
 
 def publish(kind: str, scope: str, rows: Sequence[Dict[str, Any]], complete: bool, *,
-            dry_run: Optional[bool] = None, job: Optional[str] = None) -> Result:
+            all_keys: Optional[Iterable[str]] = None, dry_run: Optional[bool] = None,
+            job: Optional[str] = None) -> Result:
     """Publish every record a read saw for one (kind, scope): see the module docstring. Never raises.
-    In a process that may not load the model (the bot, a job with torch on the GPU) the batch is
-    handed to the publisher process instead (src.cloud.handoff.submit)."""
+    `all_keys` (complete reads only): the whole key list when `rows` hold only some records
+    (records.batch). In a process that may not load the model (the bot, a job with torch on the
+    GPU) the batch is handed to the publisher process instead (src.cloud.handoff.submit)."""
     res = Result(kind=str(kind), scope=str(scope))
     try:
         rows = list(rows or [])
         res.rows = len(rows)
+        extra = None if all_keys is None else [str(k) for k in all_keys if k not in (None, "")]
         dry = _dry(dry_run)
         if not dry and not enabled():
             res.skipped = "publishing is off"
@@ -568,29 +571,31 @@ def publish(kind: str, scope: str, rows: Sequence[Dict[str, Any]], complete: boo
         if not dry and not _can_embed_here():
             from src.cloud import handoff
             from src.cloud.records import batch
-            path = handoff.submit(job or current_job(), [batch(kind, scope, rows, complete)])
+            path = handoff.submit(job or current_job(), [batch(kind, scope, rows, complete, extra)])
             res.delegated, res.skipped = path is not None, "handed to the publisher process"
             return res
         with run(job or DEFAULT_JOB, dry_run=dry) as r:
             if r is None:
                 res.skipped = "publishing is off"
                 return res
-            return _publish(r, res, kind, scope, rows, bool(complete))
+            return _publish(r, res, kind, scope, rows, bool(complete), extra)
     except Exception as e:
         res.ok, res.error = False, f"internal error ({type(e).__name__})"
         logger.warning("Supabase publish failed (%s): %s", kind, res.error)
         return res
 
 
-def _publish(r: Run, res: Result, kind: str, scope: str, rows: List[Any], complete: bool) -> Result:
+def _publish(r: Run, res: Result, kind: str, scope: str, rows: List[Any], complete: bool,
+             all_keys: Optional[List[str]] = None) -> Result:
     from src.cloud import embed
+    from src.cloud.records import clean_text
     r.publishes += 1
     valid, res.left_out = _normalise(kind, scope, rows)
     if res.left_out:
         complete = False               # a record could not be sent: its absence proves nothing
         logger.warning("Supabase publish (%s): %d record(s) left out (no key, another scope or no data); "
                        "nothing is deleted this time.", kind, res.left_out)
-    keys = sorted(v["key"] for v in valid)
+    keys = sorted({v["key"] for v in valid} | {clean_text(k).strip() for k in all_keys or [] if str(k).strip()})
     digest = _keys_digest(keys)
     with publisher_lock() as got:
         if not got:
@@ -707,7 +712,7 @@ def publish_batches(job: str, batches: Sequence[Dict[str, Any]], failed_reads: S
                                                   dry_run=dry_run, job=job)
                     else:
                         results.append(publish(kind, str(b["scope"]), b.get("rows") or [], complete,
-                                               dry_run=dry_run, job=job))
+                                               all_keys=b.get("all_keys"), dry_run=dry_run, job=job))
     except Exception as e:
         logger.warning("Supabase publish failed (%s): internal error (%s)", job, type(e).__name__)
     return results

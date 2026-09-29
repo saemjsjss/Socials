@@ -22,6 +22,8 @@ The file:
   {"version": 1, "job": "passport_watcher", "created_at": "2026-09-29T18:21:04+06:00",
    "failed_reads": ["calendar.php: the portal did not answer in time"],
    "batches": [records.batch(...) or records.batches(...), ...]}
+a batch being {"kind", "scope", "complete", "rows": [records], "all_keys"?: [...]} (one scope)
+or {"kind", "scope": null, "complete", "rows", "scope_range"?: [lo, hi]} (each row's own scope).
 """
 from __future__ import annotations
 

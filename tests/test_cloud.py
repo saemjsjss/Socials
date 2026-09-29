@@ -578,6 +578,24 @@ def test_a_complete_read_without_a_student_deletes_exactly_that_student(cloud):
     assert back.changed == 1 and cloud.fake.keys("student") == ["500", "501", "502"]
 
 
+def test_a_complete_key_list_can_cover_records_not_sent_this_time(cloud):
+    """The watcher audits only new scans, but its complete read of the list names every scan: the
+    audits of scans still listed are kept, the one whose scan was replaced is deleted."""
+    def audit(uid, scan):
+        return records.passport_audit(uid, scan, {"status": "MATCH", "is_valid": True, "fields": {},
+                                                  "discrepancies": [], "uncertain": [], "verdict": "ok"}, READ_AT)
+    first = records.batch("passport_audit", "all", [audit("500", "passport_500_1.jpg"), audit("501", "passport_501_1.jpg")],
+                          True, all_keys=["500|passport_500_1.jpg", "501|passport_501_1.jpg", "502|passport_502_1.jpg"])
+    publish.publish_batches("passport_watcher", [first])
+    assert cloud.fake.keys("passport_audit") == ["500|passport_500_1.jpg", "501|passport_501_1.jpg"]
+    second = records.batch("passport_audit", "all", [audit("501", "passport_501_2.jpg")], True,
+                           all_keys=["500|passport_500_1.jpg", "501|passport_501_2.jpg", "502|passport_502_1.jpg"])
+    publish.publish_batches("passport_watcher", [second])
+    assert cloud.fake.keys("passport_audit") == ["500|passport_500_1.jpg", "501|passport_501_2.jpg"]
+    assert cloud.fake.syncs()[-1]["p_all_keys"] == second["all_keys"]
+    assert set(state()["records"]) == {"passport_audit|500|passport_500_1.jpg", "passport_audit|501|passport_501_2.jpg"}
+
+
 def test_a_partial_read_sends_no_key_list_and_deletes_nothing(cloud):
     publish.publish("student", "all", student_rows("TEST A", "TEST B", "TEST C"), True)
     res = publish.publish("student", "all", student_rows("TEST A", "TEST B X"), False)   # e.g. /students: page 1

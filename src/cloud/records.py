@@ -212,12 +212,21 @@ def unique_keys(records: Iterable[Optional[Dict[str, Any]]]) -> List[Dict[str, A
     return out
 
 
-def batch(kind: str, scope: str, rows: Sequence[Dict[str, Any]], complete: bool) -> Dict[str, Any]:
+def batch(kind: str, scope: str, rows: Sequence[Dict[str, Any]], complete: bool,
+          all_keys: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """One (kind, scope) to publish: `rows` are every record the read saw (not only the changed
     ones: publishing sends only those whose hash changed); `complete` only when the read was whole
     (every page, pager total matched, no error): Supabase then deletes the (kind, scope)'s other
-    records. A partial or failed read is complete=False, and deletes nothing."""
-    return {"kind": kind, "scope": scope, "complete": bool(complete), "rows": list(rows)}
+    records. A partial or failed read is complete=False, and deletes nothing.
+
+    `all_keys`, with complete=True, is the whole key list when `rows` hold only some of the
+    records (the passport watcher audits only new scans, but its complete list read names every
+    scan there is: all_keys = every "uid|file" listed now). The records to keep are then those
+    keys and the rows' own."""
+    out = {"kind": kind, "scope": scope, "complete": bool(complete), "rows": list(rows)}
+    if all_keys is not None:
+        out["all_keys"] = sorted({str(k) for k in all_keys if k not in (None, "")})
+    return out
 
 
 def batches(kind: str, rows: Sequence[Dict[str, Any]], complete: bool,
