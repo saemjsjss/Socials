@@ -35,6 +35,14 @@ pydantic-settings==2.15.0
 python-dotenv==1.2.3
 rich==15.0.0
 
+# Supabase publishing (src/cloud): gte-small embeddings on the CPU. sentence-transformers
+# pulls transformers, huggingface_hub, tokenizers, safetensors and scikit-learn; pinned here
+# are the two whose versions decide how the model loads (transformers 5 loads it as float16
+# unless src/cloud/embed.py asks for float32). The model weights (thenlper/gte-small at the
+# revision pinned in src/config.py) are downloaded once into the Hugging Face cache.
+sentence-transformers==6.1.0
+transformers==5.17.0
+
 # Google Sheets / Drive
 google-api-python-client==2.200.0
 google-auth-oauthlib==1.4.1

@@ -32,6 +32,15 @@ from src.llm.ollama_client import ollama_client
 EAP = "EAP (ENGLISH FOR ACADEMIC PURPOSE)"
 
 
+@pytest.fixture(autouse=True)
+def pinned_today(monkeypatch):
+    """Today is 28 Sep 2026 in Dhaka for every test here. src.bot.ask imported local_today by name,
+    so pinning src.dates.local_today alone (the portal fixture) leaves ask on the real clock."""
+    from src import dates
+    monkeypatch.setattr(dates, "local_today", lambda: TODAY)
+    monkeypatch.setattr(ask, "local_today", lambda: TODAY)
+
+
 # --------------------------------------------------------------------------- synthetic pages
 
 def _tile(href, num, label):

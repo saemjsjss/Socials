@@ -79,6 +79,18 @@ class Settings(BaseSettings):
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
 
+    # Supabase: a second, independent copy of everything the bot reads (src/cloud/). It publishes
+    # only when all three of SUPABASE_URL, SUPABASE_SECRET_KEY and CLOUD_PUBLISH_ENABLED are set;
+    # a failure there is one log line and never touches Drive, Sheets or Telegram. The secret key
+    # (sb_secret_...) is never printed or logged. The Supabase CLI's access token is not read here.
+    SUPABASE_URL: str = ""
+    SUPABASE_SECRET_KEY: str = ""
+    CLOUD_PUBLISH_ENABLED: bool = False
+    # The embedding model (gte-small, 384 dimensions, on the CPU) and its pinned revision: every
+    # vector in Supabase must come from this exact model, the one Jeannie uses.
+    CLOUD_EMBED_MODEL: str = "thenlper/gte-small"
+    CLOUD_EMBED_REVISION: str = "17e1f347d17fe144873b1201da91788898c639cd"
+
     # Local folders. Empty = the default beside the bot folder, so with the bot in
     # E:\BOT they are E:\VERIFIED STUDENT DOCUMENTS etc., exactly as before.
     DOCS_ROOT: str = ""              # downloaded documents: <PROGRAM>\<NAME (PASSPORT)>\

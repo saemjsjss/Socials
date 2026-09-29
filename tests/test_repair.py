@@ -37,6 +37,15 @@ from src.sheets import auto_sync, missing_report
 from src.sheets import progress_builder as pb
 
 
+@pytest.fixture(autouse=True)
+def pinned_today(monkeypatch):
+    """Today is 28 Sep 2026 in Dhaka for every test here. src.bot.ask imported local_today by name,
+    so pinning src.dates.local_today alone (the portal fixture) leaves ask on the real clock."""
+    from src import dates
+    monkeypatch.setattr(dates, "local_today", lambda: TODAY)
+    monkeypatch.setattr(ask, "local_today", lambda: TODAY)
+
+
 def say(text, user_data):
     """A typed message (no command) in a chat whose user_data is `user_data`."""
     chat, _ = run(telegram_bot.handle_natural_language_message, text, None, user_data)

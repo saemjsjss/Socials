@@ -35,13 +35,45 @@ import re as _re
 # The ":" is URL-encoded as "%3A" in file-download URLs (api.telegram.org/file/bot<token>/...).
 _TOKEN_RE = _re.compile(r"bot\d{6,}(?::|%3[Aa])[A-Za-z0-9_-]{30,}")
 
+# The Supabase keys (src/cloud publishes with the secret key): the new-style secret and
+# publishable keys, the CLI's personal access token, and the older JWT-shaped keys, also after
+# "apikey:" / "Authorization: Bearer" wherever a request's headers get printed.
+_SECRET_PATTERNS = (
+    (_TOKEN_RE, "bot<token>"),
+    (_re.compile(r"(?i)(bearer\s+)(?!<)[A-Za-z0-9._~+/=-]{8,}"), r"\1<redacted>"),
+    (_re.compile(r"""(?i)(apikey['"]?\s*[:=,]\s*b?['"]?)(?!<)[A-Za-z0-9._~+/=-]{8,}"""), r"\1<redacted>"),
+    (_re.compile(r"sb_secret_[A-Za-z0-9_-]{6,}"), "sb_secret_<redacted>"),
+    (_re.compile(r"sb_publishable_[A-Za-z0-9_-]{6,}"), "sb_publishable_<redacted>"),
+    (_re.compile(r"sbp_[A-Za-z0-9_-]{16,}"), "sbp_<redacted>"),
+    (_re.compile(r"eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}"), "<jwt>"),
+)
+
+
+def redact(text: str) -> str:
+    """`text` with every bot token and Supabase key (or JWT) in it replaced by a marker."""
+    for pattern, marker in _SECRET_PATTERNS:
+        text = pattern.sub(marker, text)
+    return text
+
 
 class _RedactBotToken(_logging.Filter):
+    """Replaces the bot token and the Supabase keys in a log line (the name is kept from when it
+    covered the bot token only)."""
+
     def filter(self, record):
-        msg = record.getMessage()
-        if _TOKEN_RE.search(msg):
-            record.msg, record.args = _TOKEN_RE.sub("bot<token>", msg), ()
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        clean = redact(msg)
+        if clean != msg:
+            record.msg, record.args = clean, ()
         return True
 
 
-_logging.getLogger("httpx").addFilter(_RedactBotToken())
+# A filter on a logger does not see its children's records, so each logger that can print a
+# request (httpx's own, and httpcore's per-module loggers at DEBUG) gets one.
+_REDACTOR = _RedactBotToken()
+for _name in ("httpx", "httpcore", "httpcore.connection", "httpcore.http11", "httpcore.http2",
+              "httpcore.proxy", "httpcore.socks", "hangeul.cloud"):
+    _logging.getLogger(_name).addFilter(_REDACTOR)
