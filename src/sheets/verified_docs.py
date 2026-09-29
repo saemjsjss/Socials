@@ -43,7 +43,8 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 # --- portal side (read-only) -------------------------------------------------------
 def _parse_rows(html: str) -> List[Dict[str, str]]:
     from bs4 import BeautifulSoup
-    soup = BeautifulSoup(html, "html.parser")
+    from src.scraper.parsers import decode_cf_emails
+    soup = decode_cf_emails(BeautifulSoup(html, "html.parser"))
     out = []
     for a in soup.find_all("a", href=re.compile(r"download_docs\.php\?uid=\d+")):
         uid = re.search(r"uid=(\d+)", a["href"]).group(1)

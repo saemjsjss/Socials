@@ -1,9 +1,97 @@
 import logging
 import re
 from typing import List, Dict, Any, Optional, Tuple
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 logger = logging.getLogger("hangeul.parsers")
+
+
+# --------------------------------------------------------------------------- Cloudflare's e-mail protection
+
+# hangeul.com.bd is served through Cloudflare, whose e-mail obfuscation rewrites every address in a
+# page's HTML: an address in the text becomes <a href="/cdn-cgi/l/email-protection"
+# class="__cf_email__" data-cfemail="HEX">[email&#160;protected]</a> (or a span with that class), and
+# a mailto link becomes <a href="/cdn-cgi/l/email-protection#HEX">, its text such a span. A browser's
+# script puts the addresses back; a parser reading the HTML sees "[email protected]" instead.
+_CF_CLASS = "__cf_email__"
+_CF_LINK = "/cdn-cgi/l/email-protection#"
+_HEX_RE = re.compile(r"[0-9A-Fa-f]+")
+
+
+def _cf_address(hexstr: Any) -> str:
+    """The text Cloudflare hid in HEX: the first byte is the key, and each following byte XOR the
+    key is one byte of the UTF-8 text. "" when HEX is not a whole hidden address: empty, an odd
+    length, not hex, not UTF-8, no "@", or a space or control character in it (a mailto link's
+    query, "?subject=...", is URL-encoded, so it has none either)."""
+    h = str(hexstr or "").strip()
+    if len(h) < 4 or len(h) % 2 or not _HEX_RE.fullmatch(h):
+        return ""
+    raw = bytes.fromhex(h)
+    try:
+        text = bytes(b ^ raw[0] for b in raw[1:]).decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+    if "@" not in text or not text.isprintable() or any(ch.isspace() for ch in text):
+        return ""
+    return text
+
+
+def _is_cf_email(tag) -> bool:
+    return (_CF_CLASS in (tag.get("class") or []) and tag.has_attr("data-cfemail")) or \
+        (tag.name == "a" and _CF_LINK in (tag.get("href") or ""))
+
+
+def _put_text(el, text: str) -> None:
+    """`el` replaced by `text`, joined to the plain text on either side of it (one text, as a
+    browser shows it, so get_text(strip=True) reads "Email: x@y.com", not "Email:x@y.com")."""
+    new = NavigableString(text)
+    el.replace_with(new)
+    before, after = new.previous_sibling, new.next_sibling
+    joined = text
+    if type(before) is NavigableString:
+        joined = str(before) + joined
+        before.extract()
+    if type(after) is NavigableString:
+        joined += str(after)
+        after.extract()
+    if joined != text:
+        new.replace_with(NavigableString(joined))
+
+
+def decode_cf_emails(node):
+    """Put back, in place, every address Cloudflare's e-mail protection hid in `node` (a parsed page,
+    or one of its tags), as a browser shows it: an element with class __cf_email__ and
+    data-cfemail="HEX" (an a or a span) becomes the address as plain text, and a link to
+    /cdn-cgi/l/email-protection#HEX gets href="mailto:<address>" (its own text is kept; a
+    __cf_email__ span in it becomes the address). An element whose HEX is empty or malformed is
+    left as it is, its text still "[email protected]", which src.cloud.records.is_filler reads as no
+    value, so no stand-in is ever published as an address. Form fields' value attributes are not
+    touched (Cloudflare does not rewrite them). Nothing is fetched. Call it once, right after
+    building the soup and before any get_text. -> `node`."""
+    if not isinstance(node, Tag):
+        return node
+    found = node.find_all(_is_cf_email)
+    if not isinstance(node, BeautifulSoup) and _is_cf_email(node):
+        found.insert(0, node)
+    for el in found:
+        href = el.get("href") or ""
+        at = href.find(_CF_LINK)
+        if el.name == "a" and at >= 0:
+            address = _cf_address(href[at + len(_CF_LINK):])
+            if address:
+                el["href"] = "mailto:" + address
+        if _CF_CLASS in (el.get("class") or []):
+            address = _cf_address(el.get("data-cfemail"))
+            if not address:
+                continue
+            if el is node or el.parent is None:        # the caller's own tag: keep it, change its text
+                el.clear()
+                el.append(NavigableString(address))
+                del el["data-cfemail"]
+                el["class"] = [c for c in el["class"] if c != _CF_CLASS]
+            else:
+                _put_text(el, address)
+    return node
 
 
 def _label_key(text: str) -> str:
@@ -22,7 +110,7 @@ def _int_or_none(text: str) -> Optional[int]:
 
 def extract_csrf_token(html: str) -> Optional[str]:
     """Extract CSRF token from HTML form inputs."""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = decode_cf_emails(BeautifulSoup(html, "html.parser"))
     
     # Check for name="_csrf"
     csrf_input = soup.find("input", {"name": "_csrf"})
@@ -44,7 +132,7 @@ def extract_csrf_token(html: str) -> Optional[str]:
 
 def parse_tables(html: str) -> List[Dict[str, Any]]:
     """Parse all HTML tables into structured records."""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = decode_cf_emails(BeautifulSoup(html, "html.parser"))
     tables = soup.find_all("table")
     results = []
     
@@ -91,7 +179,7 @@ def parse_tables(html: str) -> List[Dict[str, Any]]:
 
 def parse_dashboard_metrics(html: str) -> Dict[str, Any]:
     """Parse statistics cards, counts, and KPI elements from dashboard HTML."""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = decode_cf_emails(BeautifulSoup(html, "html.parser"))
     metrics = {}
     
     # Search common card structures (.card, .stat, .metric, .box, .counter)
@@ -182,7 +270,7 @@ def parse_hangeul_live_dashboard(html: str) -> Dict[str, Any]:
     students", "Pending payment"...). A figure the page does not show is None, never a stand-in
     number: the brief and /stats then say "not available"."""
     from datetime import datetime
-    soup = BeautifulSoup(html, "html.parser")
+    soup = decode_cf_emails(BeautifulSoup(html, "html.parser"))
     tiles = _dashboard_tiles(soup)
 
     # label -> figure as printed. A label used by two tiles ("Docs to review") gets its group too.
@@ -233,7 +321,9 @@ _STUDENT_COLUMNS = (("sl", ("sl",)), ("student", ("student",)), ("university", (
 _REQUIRED_STUDENT_COLUMNS = ("sl", "student", "program", "stage")
 _PAGER_RE = re.compile(r"Page\s+(\d+)\s+of\s+(\d+)(?:\s*·\s*([\d,]+)\s+students?)?", re.I)
 _UID_RE = re.compile(r"student_edit\.php\?id=(\d+)")
-_EMAIL_HIDDEN_RE = re.compile(r"\[email\s*protected\]", re.I)
+_EMAIL_HIDDEN_RE = re.compile(r"\[email\s*protected\]", re.I)      # Cloudflare's stand-in text
+_EMAIL_HIDDEN_GAP_RE = re.compile(r"\s*\[email\s*protected\]\s*", re.I)
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _HNG_RE = re.compile(r"HNG-\d{4}-\d+")
 _STAMP_TEXT = r"\d{1,2}\s+[A-Za-z]{3,9}\.?(?:\s+\d{4})?(?:,\s*\d{1,2}:\d{2})?"
 _VERIFIED_BY_RE = re.compile(rf"Payment verified by\s+([^·\n]{{1,80}}?)\s*·\s*({_STAMP_TEXT})", re.I)
@@ -339,8 +429,10 @@ def parse_students_page(html: str) -> Dict[str, Any]:
                     line whose stamp cannot be read is told apart from no line)
     Nothing is filled in: a field the portal does not show is "". Raises StudentListLayoutError
     when the page has no student table, its header lacks the SL / Student / Program / Stage
-    columns, or it has rows none of which can be read."""
-    soup = BeautifulSoup(html or "", "html.parser")
+    columns, or it has rows none of which can be read. An address the page hides behind
+    Cloudflare's e-mail protection (the Student cell's, the details' Email) is read as the address
+    (decode_cf_emails); one it cannot decode stays "[email protected]", a filler to records."""
+    soup = decode_cf_emails(BeautifulSoup(html or "", "html.parser"))
     table = soup.find("table")
     if table is None:
         raise StudentListLayoutError("students.php has no student table")
@@ -415,9 +507,9 @@ def _student_row(cells, col: Dict[str, int], sl: str) -> Dict[str, Any]:
     name_el = student.select_one(".stu-name") if student is not None else None
     if name_el is not None:
         name = _blank(_EMAIL_HIDDEN_RE.sub("", name_el.get_text(" ", strip=True)))
-    else:
+    else:                                # the cell's lines: the name, its address (.stu-mail), the HNG id
         lines = [_blank(_EMAIL_HIDDEN_RE.sub("", s)) for s in (student.stripped_strings if student is not None else [])]
-        name = next((s for s in lines if s and not _HNG_RE.fullmatch(s)), "")
+        name = next((s for s in lines if s and not _HNG_RE.fullmatch(s) and not _EMAIL_RE.fullmatch(s)), "")
     hng = _HNG_RE.search(student.get_text(" ", strip=True)) if student is not None else None
     program, intake = _main_and_sub(cell("program"))
     stage, applied = _main_and_sub(cell("stage"))
@@ -468,7 +560,7 @@ def parse_progress_page(html: str) -> Dict[str, Any]:
     (22), "stage": its "Current stage" ("Payment Verified"), "status": the status under it
     ("Verified", "Pending verification")}. Raises StudentListLayoutError when the page has no
     progress ring with a % and a current stage (its layout is not recognised)."""
-    soup = BeautifulSoup(html or "", "html.parser")
+    soup = decode_cf_emails(BeautifulSoup(html or "", "html.parser"))
     ring = soup.select_one(".pg-ring")
     pct = re.search(r"(\d{1,3})\s*%", ring.get_text(" ", strip=True)) if ring is not None else None
     stage_el, status_el = soup.select_one(".pg-now .pg-stage"), soup.select_one(".pg-now .pg-status")
@@ -517,8 +609,10 @@ def consultation_rows(html: str) -> List[Dict[str, Any]]:
     City & program, Received, Status, Remarks, Update status); the old fixed column positions
     then matched nothing and every count silently read 0.  Reading by header name, and by the
     cells' own classes (.cr-name, .stbadge, .city, .prog, .d/.t, .cr-by), keeps working when
-    columns move.  The Remarks/Update-status forms are only ever read, never submitted."""
-    table = BeautifulSoup(html, "html.parser").find("table")
+    columns move.  The Remarks/Update-status forms are only ever read, never submitted.  An address
+    behind Cloudflare's e-mail protection (a name, the contact line) is read as the address
+    (decode_cf_emails); the stand-in of one it cannot decode is left out of the contact and details."""
+    table = decode_cf_emails(BeautifulSoup(html, "html.parser")).find("table")
     return _consultation_table_rows(table) if table else []
 
 
@@ -526,7 +620,7 @@ def consultation_table(html: str) -> Optional[List[Dict[str, Any]]]:
     """consultation_rows, or None when the page has no table, or a table with rows in a layout the
     parser does not recognise; [] when the table is empty. One parse of the ~2 MB page, so a
     caller can run it all in a worker thread."""
-    table = BeautifulSoup(html, "html.parser").find("table")
+    table = decode_cf_emails(BeautifulSoup(html, "html.parser")).find("table")
     if table is None:
         return None
     rows = _consultation_table_rows(table)
@@ -588,7 +682,7 @@ def consultation_view(html: str) -> Dict[str, Any]:
                 when it has no search form),
         "listed": the caption's count of listed rows ("<b>500</b> requests · newest first"), or
                 None when it has no such caption}"""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = decode_cf_emails(BeautifulSoup(html, "html.parser"))
     tabs, current = _consultation_tabs(soup)
     table = soup.find("table")
     rows: Optional[List[Dict[str, Any]]] = None
@@ -607,23 +701,10 @@ def consultation_view(html: str) -> Dict[str, Any]:
             "listed": _int_or_none(caption.group(1)) if caption else None}
 
 
-def _cf_email(hexstr: str) -> str:
-    """The address behind Cloudflare's email protection (<span class="__cf_email__"
-    data-cfemail="HEX">[email protected]</span>, which a browser decodes), or "" when unreadable."""
-    try:
-        key = int(hexstr[:2], 16)
-        return "".join(chr(int(hexstr[i:i + 2], 16) ^ key) for i in range(2, len(hexstr), 2))
-    except (ValueError, TypeError):
-        return ""
-
-
-def _decode_cf_emails(tag) -> None:
-    """Put back, in place, what a browser shows for each Cloudflare-protected address in `tag`
-    (a request whose name is an email address otherwise reads "[email protected]")."""
-    for span in tag.select(".__cf_email__[data-cfemail]") if tag is not None else []:
-        shown = _cf_email(span.get("data-cfemail", ""))
-        if shown:
-            span.string = shown
+def _without_hidden_email(text: str) -> str:
+    """A longer text without the stand-in of an address Cloudflare hid and decode_cf_emails could
+    not put back ("01700000000 [email protected]" -> "01700000000"): the stand-in is no address."""
+    return _EMAIL_HIDDEN_GAP_RE.sub(" ", text or "").strip()
 
 
 def _no_dash(value: str) -> str:
@@ -658,7 +739,6 @@ def _consultation_table_rows(table) -> List[Dict[str, Any]]:
         if len(cols) <= max(col["name"], col["status"]):
             continue
         name_cell, status_cell = cell(cols, "name"), cell(cols, "status")
-        _decode_cf_emails(name_cell.select_one(".cr-name") if name_cell else None)
         name = text(name_cell, ".cr-name") or text(name_cell)
         if not name:
             continue
@@ -681,12 +761,12 @@ def _consultation_table_rows(table) -> List[Dict[str, Any]]:
         rows.append({
             "id": next(iter(form_ids)) if len(form_ids) == 1 and next(iter(form_ids)).isdigit() else "",
             "name": name,
-            "contact": text(contact_cell).replace("[email protected]", "").strip(),
+            "contact": _without_hidden_email(text(contact_cell)),
             # The portal writes "—" for a city or program nobody gave: that is no value, not a place.
             "city": _no_dash(text(place, ".city") or text(place)),
             "program": _no_dash(text(place, ".prog") or text(cell(cols, "program"))),
             "consultant": consultant,
-            "details": text(details).replace("View", "").strip(),
+            "details": _without_hidden_email(text(details).replace("View", "")),
             "received": received,
             "received_date": day or received,
             "status": status,
@@ -810,7 +890,7 @@ def parse_pending_payments(html: str) -> Optional[Dict[str, Any]]:
     "listed" counts the student rows on the page (a number in the SL column, found by the
     header's name); "badge" is the portal's own "Pending Payments N" count. The badge wins when
     both are there (the list is paged at 50); a paged list with no badge is not counted at all."""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = decode_cf_emails(BeautifulSoup(html, "html.parser"))
     badge = None
     for a in soup.find_all("a", href=re.compile(r"status=pending")):
         m = re.search(r"pending\s+payments?\D{0,5}(\d+)", a.get_text(" ", strip=True), re.I)
@@ -838,7 +918,7 @@ def parse_window_applications(html: str) -> Optional[List[Dict[str, str]]]:
     """window_applications.php rows by the header's column names: {"student", "window", "status"}.
     None when the page has no table with a Status column (layout not recognised); [] when the
     table is there but empty (its "no applications" row has too few cells to be a row)."""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = decode_cf_emails(BeautifulSoup(html, "html.parser"))
     for table in soup.find_all("table"):
         trs = table.find_all("tr")
         col = _header_index(trs[0]) if trs else {}
@@ -982,7 +1062,7 @@ def parse_calendar_events(html: str) -> Dict[str, Any]:
     A reminders card with no entries it recognises is a real "none today" only when it says so
     ("· 0 items", "No reminders"); otherwise its entries' layout changed, which must read as
     "not available", never as 0."""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = decode_cf_emails(BeautifulSoup(html, "html.parser"))
     card = _cal_card(soup, "Reminders for today")
     items = card.select(".rm-item") if card is not None else soup.select(".rm-item")
     heading_count = None

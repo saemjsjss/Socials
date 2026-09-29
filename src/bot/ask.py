@@ -474,10 +474,10 @@ def dashboard_facts(html: str) -> List[Fact]:
     """Every figure on index.php: its tiles (parsers.parse_hangeul_live_dashboard) and the cards
     At a glance, Needs attention, Application pipeline, Applications by program and Top
     universities, each figure with the portal's own label. [] for a page with none of them."""
-    from src.scraper.parsers import parse_hangeul_live_dashboard
+    from src.scraper.parsers import decode_cf_emails, parse_hangeul_live_dashboard
     facts = [Fact(t.get("group") or "Dashboard", t["label"], t.get("value"), t.get("text") or "")
              for t in parse_hangeul_live_dashboard(html).get("tiles") or []]
-    soup = BeautifulSoup(html, "html.parser")
+    soup = decode_cf_emails(BeautifulSoup(html, "html.parser"))
     for card in soup.select(".card"):
         title = _text(card.select_one(".card-title"))
         card_name = next((c for c in _CARDS if title.lower().startswith(c.lower())), None)

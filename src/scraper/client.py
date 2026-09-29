@@ -12,6 +12,7 @@ from src.dates import parse_portal_date, parse_stamp
 from src.scraper.parsers import (
     ADMITTED_STAGE,
     StudentListLayoutError,
+    decode_cf_emails,
     extract_csrf_token,
     is_admitted,
     parse_dashboard_metrics,
@@ -573,7 +574,7 @@ class HangeulAdminClient:
                 await self.login()
                 resp = await self.client.get(url)
 
-            soup = BeautifulSoup(resp.text, "html.parser")
+            soup = decode_cf_emails(BeautifulSoup(resp.text, "html.parser"))
             profile = {}
             for inp in soup.find_all(["input", "textarea", "select"]):
                 name = inp.get("name") or inp.get("id")
@@ -677,8 +678,10 @@ class HangeulAdminClient:
     @staticmethod
     def _profile_fields(html: str) -> Dict[str, str]:
         """student_edit.php's form as {field name: value}: an input's value, a textarea's text, a
-        select's chosen option (never the text of all its options); empty fields left out."""
-        soup = BeautifulSoup(html or "", "html.parser")
+        select's chosen option (never the text of all its options); empty fields left out. An input's
+        value is kept as the page has it (Cloudflare's e-mail protection leaves value attributes
+        alone); an address it hid in a textarea's text is read as the address (decode_cf_emails)."""
+        soup = decode_cf_emails(BeautifulSoup(html or "", "html.parser"))
         profile: Dict[str, str] = {}
         for inp in soup.find_all(["input", "textarea", "select"]):
             name = (inp.get("name") or inp.get("id") or "").strip()

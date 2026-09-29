@@ -14,7 +14,8 @@ Nothing is re-parsed here and nothing is filled in: a value the reader did not g
 of the text, never replaced by a stand-in, and the words a reader writes where the portal shows
 nothing ("Unassigned", "Event", "Dashboard") are no value in data or text (R1). Nor are the words
 the portal itself (or a student filling in its form) types in a field that has no value ("N/A",
-"None", "--", "—", "PENDING", "TBD"...: is_filler), in every kind read from the portal's own
+"None", "--", "—", "PENDING", "TBD"..., and Cloudflare's "[email protected]" for an address the
+parser could not decode: is_filler), in every kind read from the portal's own
 fields: such a cell is "" in data, left out of the text, and its name is kept in
 data["blank_on_portal"] (sorted; "details.<label>" for a students.php details field; only when
 there is one), so Jeannie can say "not given on the portal" without a value being lost or made
@@ -199,9 +200,11 @@ def _passport_value(value: Any) -> str:
 # "--", "–", "-", "...") is no value either. Every marker progress_builder.clean_value blanks is
 # here (na, n/a, n.a., none, null, not provided, not applicable, the dashes); unlike clean_value,
 # a text in another script (Bangla) is a value: clean_value compares ASCII letters only, so it
-# reads such a text as a mark. "NO", "NOT YET", "0" are answers, not fillers.
+# reads such a text as a mark. "NO", "NOT YET", "0" are answers, not fillers. Cloudflare's
+# "[email protected]" ("emailprotected") is the stand-in of an address the page hid and the parser
+# could not decode (parsers.decode_cf_emails): no address, so a cell of it alone is no value either.
 FILLER_WORDS = frozenset({"na", "none", "null", "nil", "pending", "tbd", "notavailable", "notapplicable",
-                          "notprovided"})
+                          "notprovided", "emailprotected"})
 # Fields whose "Pending" is a real state, not a stand-in for a value: every field whose name says
 # status, stage, result or step (students.php's status = the stage, payment_status = the Payment
 # column, docs_status; its details' Payment Status, Passport Status, Study Status; the export's

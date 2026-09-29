@@ -41,6 +41,10 @@ ENCODE_BATCH = 32
 # CUDA_VISIBLE_DEVICES for a process that must not use the GPU (the publisher, the backfill, the
 # full picture and the handoff's child all set this very value; "" does not survive on Windows).
 NO_GPU = "-1"
+# The libraries that load the model log at INFO ("No modules.json found for thenlper/gte-small..."
+# when the model is missing), and the embedding processes log at INFO: they are kept at WARNING, so
+# a missing model costs the run exactly its one hangeul.cloud warning.
+QUIET_LOGGERS = ("sentence_transformers", "transformers", "huggingface_hub")
 
 
 class EmbedError(RuntimeError):
@@ -57,7 +61,7 @@ def prepare_process() -> None:
     """Make this process a CPU-only embedding process. Call it first thing, before anything imports
     torch (the publisher's and the backfill's entry points do): the GPU is hidden, the Hugging Face
     hub is offline (the pinned model must already be in the cache: nothing is downloaded), and no
-    progress bars are drawn into the log."""
+    progress bars or library INFO lines are written into the log (quiet_libraries)."""
     if "torch" in sys.modules and os.environ.get("CUDA_VISIBLE_DEVICES") != NO_GPU:
         raise EmbedError("torch was imported before prepare_process(), so CUDA cannot be hidden")
     os.environ["CUDA_VISIBLE_DEVICES"] = NO_GPU
@@ -66,6 +70,18 @@ def prepare_process() -> None:
     os.environ["TQDM_DISABLE"] = "1"
     os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    quiet_libraries()
+
+
+def quiet_libraries() -> None:
+    """The model libraries' loggers (QUIET_LOGGERS) at WARNING at least: a logger left at NOTSET or
+    set lower would pass the process's INFO on; one already stricter (transformers' own ERROR,
+    from TRANSFORMERS_VERBOSITY) is left as it is. Called by prepare_process and again once the
+    libraries are imported, which may set their own level."""
+    for name in QUIET_LOGGERS:
+        lib = logging.getLogger(name)
+        if lib.level < logging.WARNING:            # NOTSET (0) or DEBUG / INFO
+            lib.setLevel(logging.WARNING)
 
 
 def cpu_only_process() -> bool:
@@ -197,9 +213,11 @@ class GteSmall:
                 return self._model
             if not cpu_only_process():
                 raise EmbedError("this process did not hide CUDA before torch (call prepare_process first)")
+            quiet_libraries()
             try:
                 import torch
                 from sentence_transformers import SentenceTransformer
+                quiet_libraries()                  # the imports may have set their own levels
                 model = SentenceTransformer(self.name, revision=self.revision, device="cpu",
                                             model_kwargs={"dtype": torch.float32})
             except Exception as e:
