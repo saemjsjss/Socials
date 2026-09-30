@@ -24,21 +24,12 @@ from datetime import date
 import pytest
 
 from test_foundation import (  # noqa: F401  (the portal fixture is used by name)
-    ADMIN_ID, BACHELOR, KLP, TODAY, page, portal, report_of, row, run,
+    ADMIN_ID, BACHELOR, KLP, TODAY, page, pin_today, portal, report_of, row, run,
 )
 from src.bot import ask, replies, telegram_bot, voice
 from src.llm.ollama_client import ollama_client
 
 EAP = "EAP (ENGLISH FOR ACADEMIC PURPOSE)"
-
-
-@pytest.fixture(autouse=True)
-def pinned_today(monkeypatch):
-    """Today is 28 Sep 2026 in Dhaka for every test here. src.bot.ask imported local_today by name,
-    so pinning src.dates.local_today alone (the portal fixture) leaves ask on the real clock."""
-    from src import dates
-    monkeypatch.setattr(dates, "local_today", lambda: TODAY)
-    monkeypatch.setattr(ask, "local_today", lambda: TODAY)
 
 
 # --------------------------------------------------------------------------- synthetic pages
@@ -347,7 +338,8 @@ def test_a_span_of_days_for_a_one_day_answer_asks_which_day(portal, commands):
     assert commands[-1] == ("crosscheck_command", "cross-check student 412 last week", None)
 
 
-def test_the_report_route_fires_only_for_real_report_requests():
+def test_the_report_route_fires_only_for_real_report_requests(monkeypatch):
+    pin_today(monkeypatch)
     for text in ("how many students today", "how many were done", "who came yesterday", "8 Sep",
                  "what happened in march", "how many consultations today"):
         assert telegram_bot.parse_user_report_intent(text) == (False, "", ""), text
@@ -566,7 +558,7 @@ VERIFIED_12 = ("✅ *Student Payment Verifications — 12 September 2026*\n• *
                "• *Total Verified Revenue:* `৳ 152,000.00 BDT`\n\n📋 *Verified Student Records:*\n*1. A B*\n"
                "   ├ 💰 *Payment:* `20,000.00 BDT Cash`\n*2. C D*\n   ├ 💰 *Payment:* `8,000.00 BDT Cash`")
 INQUIRIES = ("📞 *Consultancy Inquiries Report — 27 September 2026*\n• *Total Inquiries on Portal:* `999`\n"
-             "📅 *Performance on 27 September 2026:*\n• *Inquiries Received:* `21`\n• *Inquiries Done:* `17`\n"
+             "📅 *Consultations on 27 September 2026:*\n• *Inquiries Received:* `21`\n• *Inquiries Done:* `17`\n"
              "   ├ ✅ *Consulted:* `17`\n• *Consultations Handled by:* Noshin Samad: 7, Fahmid Kaisar: 5")
 
 

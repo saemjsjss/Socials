@@ -11,7 +11,9 @@ from src.config import BOT_ROOT, settings
 from src.dates import parse_portal_date, parse_stamp
 from src.scraper.parsers import (
     ADMITTED_STAGE,
+    PerformanceLayoutError,
     StudentListLayoutError,
+    _label_key,
     decode_cf_emails,
     extract_csrf_token,
     is_admitted,
@@ -26,6 +28,7 @@ from src.scraper.parsers import (
     parse_window_applications,
     count_under_review,
     parse_calendar_events,
+    parse_consult_performance,
     student_matches,
     student_pager,
     student_uids,
@@ -48,6 +51,11 @@ CONNECT_TIMEOUT = 10.0
 # a status tab opened without a date filter (a handful of rows instead of the ~2 MB full list).
 CONSULT_LIST_LIMIT = 500
 CONSULT_TOTALS_VIEW = {"status": "file_opened"}
+# The portal's own Consultant Performance page (Leads > Performance), read for these periods
+# through its period links (?period=today, ?period=month) with the period the page must then say
+# it shows. Its "Custom range" is a form: never used.
+PERFORMANCE_PAGE = "consult_performance.php"
+PERFORMANCE_PERIODS = {"today": "Today", "month": "This Month"}
 
 
 def _error_text(e: Exception) -> str:
@@ -413,6 +421,35 @@ class HangeulAdminClient:
                 raise PortalUnavailable(f"consult_requests.php: the statuses of the {len(rows)} requests on {shown} "
                                         "do not match its own status counts (layout not recognised)")
         return {"day": day, "counts": counts, "rows": rows, "complete": complete}
+
+    async def read_consult_performance(self, period: str) -> Dict[str, Any]:
+        """The portal's Consultant Performance page for `period` ("today" or "month"): one
+        read-only GET of consult_performance.php?period=<period> (the page's own period link,
+        never its Custom range form), parsed in a worker thread by
+        parsers.parse_consult_performance (tiles, top performer, leaderboard, sort note, the Score
+        and Points tooltips; every figure as the portal prints it).
+
+        The page shows This Month for a period it does not take, so it must say it shows the
+        period asked for (its open tab and its "Showing <period>" line). Raises ValueError for
+        another period, and PortalUnavailable when the page cannot be read, shows another period,
+        or its layout is not recognised (no tiles, no leaderboard header, a row or figure it cannot
+        read): never an empty leaderboard or zeros for a page that was not read."""
+        want = PERFORMANCE_PERIODS.get(period)
+        if want is None:
+            raise ValueError(f"no such performance period: {period!r} (only {', '.join(PERFORMANCE_PERIODS)})")
+        if self.mock_mode:
+            raise PortalUnavailable("the bot is in mock mode, so there is no live portal to read")
+        html = await self.fetch_html(PERFORMANCE_PAGE, params={"period": period})
+        try:
+            page = await asyncio.to_thread(parse_consult_performance, html)
+        except PerformanceLayoutError as e:
+            raise PortalUnavailable(f"{PERFORMANCE_PAGE}: {e} (layout not recognised)") from e
+        shown = page.get("period_label") or ""
+        if _label_key(shown) != _label_key(want) or page.get("period") not in (None, period):
+            raise PortalUnavailable(f"{PERFORMANCE_PAGE}?period={period} shows "
+                                    f"{repr(shown) if shown else 'no period'} instead of {want!r} "
+                                    "(layout not recognised)")
+        return page
 
     async def read_student_pages(self, params: Optional[Dict[str, Any]] = None, *,
                                  all_pages: bool = True) -> List[str]:

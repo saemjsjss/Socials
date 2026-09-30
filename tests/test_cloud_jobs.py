@@ -453,8 +453,20 @@ def run_main(module, monkeypatch, *argv):
     module.main()
 
 
+def pin_job_clock(monkeypatch, at):
+    """The job's own clock at `at` too (missing_report reads time.time() for the send time and
+    time.strftime for its heading), not only records.now: else the notice's day is the PC's."""
+    import time as real_time
+    epoch = at.timestamp()
+    monkeypatch.setattr(missing_report, "time", SimpleNamespace(
+        time=lambda: epoch,
+        strftime=lambda fmt, *t: real_time.strftime(fmt, *(t or (real_time.localtime(epoch),)))))
+
+
 def test_the_daily_missing_report_hands_over_the_report_its_sections_and_the_text_sent(sheets, cloud, monkeypatch):
-    monkeypatch.setattr(records, "now", lambda: records.datetime(2026, 9, 29, 9, 5, 12, tzinfo=records._zone()))
+    at = records.datetime(2026, 9, 29, 9, 5, 12, tzinfo=records._zone())
+    monkeypatch.setattr(records, "now", lambda: at)
+    pin_job_clock(monkeypatch, at)
     with telegram() as posts:
         run_main(missing_report, monkeypatch)
     assert [p["url"] for p in posts] == ["sendMessage", "sendDocument"]

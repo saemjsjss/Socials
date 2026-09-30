@@ -11,8 +11,8 @@ every consultation's contact was "[email protected]". What is pinned here:
                nothing is fetched; a form field's value attribute is kept as it is
   every page   each portal page parse decodes first (every BeautifulSoup construction in src/ is
                wrapped in decode_cf_emails): students.php (list and details), consult_requests.php
-               (table and tabs), student_edit.php, progress.php, calendar.php, index.php and
-               window_applications.php
+               (table and tabs), student_edit.php, progress.php, calendar.php, index.php,
+               window_applications.php and consult_performance.php
   no stand-in  a stand-in that cannot be decoded is a filler to records (blanked, and named in
                blank_on_portal) and is left out of a longer text (a request's contact), so no
                record ever holds a fake address
@@ -291,10 +291,10 @@ def test_every_page_parse_in_src_decodes_right_after_building_its_soup():
             if "BeautifulSoup(" in line and "import" not in line:
                 assert "decode_cf_emails(BeautifulSoup(" in line, f"{path.relative_to(BOT_ROOT)}:{n}: {line.strip()}"
                 wrapped.append(path.name)
-    # students.php, consult_requests.php, progress, calendar, index, window applications, the
-    # login page and the generic crawl (parsers); student_edit.php twice (client); the index cards
-    # (ask); the verified-documents list (verified_docs)
-    assert wrapped.count("parsers.py") == 12 and wrapped.count("client.py") == 2
+    # students.php, consult_requests.php, progress, calendar, index, window applications,
+    # consult_performance.php, the login page and the generic crawl (parsers); student_edit.php
+    # twice (client); the index cards (ask); the verified-documents list (verified_docs)
+    assert wrapped.count("parsers.py") == 13 and wrapped.count("client.py") == 2
     assert wrapped.count("ask.py") == 1 and wrapped.count("verified_docs.py") == 1
 
 

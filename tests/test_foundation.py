@@ -33,7 +33,7 @@ if str(BOT_ROOT) not in sys.path:
     sys.path.insert(0, str(BOT_ROOT))
 
 from src import dates  # noqa: E402
-from src.bot import replies, telegram_bot  # noqa: E402
+from src.bot import ask, replies, telegram_bot  # noqa: E402
 from src.config import settings  # noqa: E402
 from src.scraper import client as client_module, parsers  # noqa: E402
 from src.scraper.client import PortalUnavailable, admin_client  # noqa: E402
@@ -128,9 +128,16 @@ def portal(monkeypatch):
     monkeypatch.setattr(admin_client, "is_authenticated", True)
     monkeypatch.setattr(admin_client, "mock_mode", False)
     monkeypatch.setattr(admin_client, "login", no_login)
-    monkeypatch.setattr(dates, "local_today", lambda: TODAY)
+    pin_today(monkeypatch)
     monkeypatch.setattr(settings, "TELEGRAM_ADMIN_CHAT_ID", str(ADMIN_ID))
     return SimpleNamespace(pages=pages, asked=asked)
+
+
+def pin_today(monkeypatch, today=TODAY):
+    """Today is `today` in Dhaka for every reader of it: src.dates.local_today, and src.bot.ask's
+    own name for it (ask imports local_today by name, so patching src.dates alone misses it)."""
+    monkeypatch.setattr(dates, "local_today", lambda: today)
+    monkeypatch.setattr(ask, "local_today", lambda: today)
 
 
 class Sent:

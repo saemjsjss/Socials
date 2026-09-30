@@ -37,7 +37,7 @@ from test_cloud import cloud, cloud_warnings, state  # noqa: E402,F401  (cloud i
 from test_consultations import _row as consult_row  # noqa: E402
 from test_crosscheck import audits, the_list, VERDICT  # noqa: E402,F401  (audits is a fixture)
 from test_foundation import (  # noqa: E402,F401  (portal is a fixture)
-    TODAY, admitted_portal, fake_update, page, portal, report_of, row, verified,
+    TODAY, admitted_portal, fake_update, page, pin_today, portal, report_of, row, verified,
 )
 from test_freetext import calendar_html, dashboard_page, pending_pages, window_page  # noqa: E402
 from test_inquiries import TOTALS, TOTALS_KEY, day_key, day_page, inquiry_portal  # noqa: E402
@@ -54,10 +54,9 @@ DASHBOARD_FACTS = len(ask.dashboard_facts(dashboard_page()))      # its tiles an
 
 @pytest.fixture(autouse=True)
 def pinned_today(monkeypatch):
-    """28 Sep 2026 in Dhaka (src.bot.ask imported local_today by name, so it is pinned too)."""
-    from src import dates
-    monkeypatch.setattr(dates, "local_today", lambda: TODAY)
-    monkeypatch.setattr(ask, "local_today", lambda: TODAY)
+    """28 Sep 2026 in Dhaka for every test here, those without the portal fixture too
+    (test_foundation.pin_today: src.dates and src.bot.ask's own name for it)."""
+    pin_today(monkeypatch)
 
 
 def hooked(handler, text="", args=None, user_data=None):
