@@ -95,15 +95,22 @@ _STATS_RE = _re(r"stats|statistics|dashboard|figures|kpis?|metrics|numbers")
 _REJECT_RE = _re(r"reject\w*")
 _APPROVE_RE = _re(r"approv\w*")
 _MOST_RE = _re(r"most|top|biggest|largest|popular|highest|leading|best")
-# The whole team's performance (/performance_today, /performance_month): "performance today",
-# "today's performance", "how did the team do today", "monthly performance", "team activity".
-_PERFORMANCE_RE = _re(r"performance|productivity|leaderboard"
+# Performance (/performance_today, /performance_month: the portal's Consultant Performance page):
+# "performance today", "today's performance", "how did the team do today", "monthly performance",
+# "team activity", "who is the top performer this month".
+_PERFORMANCE_RE = _re(r"performance|productivity|leaderboard|performers?"
                       r"|how\s+(?:did|does|do|has|have|is|are|was|were)\s+(?:the\s+|our\s+|my\s+)?(?:whole\s+)?"
                       r"(?:team|staff|everyone|everybody|counsell?ors?|consultants?)\s+"
                       r"(?:do|done|doing|did|perform(?:ed|ing)?|go|going|gone)"
                       r"|(?:team|staff)(?:'s)?\s+(?:activity|stats|statistics|report|summary|scores?|results?)")
 _OTHER_MONTH_RE = _re(r"(?:last|previous|past|next|coming|following)\s+(?:\w+\s+)?months?(?:'s)?|months")
 _THIS_MONTH_RE = _re(r"monthly|month(?:'s)?|mtd")
+# Periods the Consultant Performance page has besides Today and This Month, named without a date
+# ("all time performance", "overall leaderboard", "weekly performance", "yearly", "custom range").
+_OTHER_PERIOD_RE = _re(r"all[\s-]*time|overall|lifetime|ever|in\s+total|altogether"
+                       r"|yearly|annual(?:ly)?|year(?:'s)?|quarter(?:ly)?|custom(?:\s+range)?|range")
+# A week ("this week's performance", "weekly leaderboard", "last 2 weeks"): the page's This Week.
+_WEEK_RE = _re(r"(?:(?:this|current|last|previous|past|next)\s+)?(?:weekly|weeks?(?:'s)?|fortnight(?:ly)?)")
 # "this months performance": the owner writes without apostrophes ("todays", "inquires"), so "this
 # months" and "current months" are this month's, never "another month".
 _THIS_MONTHS_RE = re.compile(r"\b(this|current)\s+months\b")
@@ -115,10 +122,10 @@ _YEAR_WORD_RE = re.compile(r"(?<![\w/.:-])(?:19|20)\d\d(?![\w/:-]|\.\d)")
 # Another year in words ("this month last year", "a year ago").
 _OTHER_YEAR_RE = re.compile(r"\b(?:(?:last|previous|past|next|coming|following)\s+years?|years?\s+ago"
                             r"|a\s+year\s+(?:ago|back))\b")
-# Subjects the team-performance report does not read (it reads consultations and payment
-# verifications only): a question that names one of them is that subject's, even when it also says
-# "how is the team doing" or "performance" ("how is the team doing with pending payments",
-# "academic performance of the March 2027 intake").
+# Subjects the Consultant Performance page does not show (it shows consultancies, files opened,
+# conversion and docs ready, per consultant): a question that names one of them is that subject's,
+# even when it also says "how is the team doing" or "performance" ("how is the team doing with
+# pending payments", "academic performance of the March 2027 intake").
 _CROSS_WORD_RE = _re(r"cross[\s-]*check(?:ed|ing|s)?|crosscheck(?:ed|ing|s)?")
 _CALENDAR_TOPIC_RE = _re(r"calendar|events?|deadlines?|dhl|shipping|shipments?|courier|reminders?")
 
@@ -364,12 +371,13 @@ def _when(low: str, today: date) -> Tuple[Optional[date], Optional[Window], Opti
 
 
 def performance_route(text: str, today: Optional[date] = None) -> Route:
-    """Which team-performance report the words ask for: topic "today" (no day named, or today) or
-    "month" (this month, from its 1st to today: "this month", "monthly", "month's", the month's
-    own name). Anything else, another day or span or month, has no topic, with the `day`,
-    `window` or `words` it named, or the `problem` of a date that cannot be read: it is answered
-    with performance_other_reply, never with a stand-in window. "This month" is given only when
-    the words name no other month and no other year ("performance for the month of august" and
+    """Which view of the portal's Consultant Performance page the words ask for: topic "today" (no
+    day named, or today) or "month" (this month: "this month", "monthly", "month's", the month's
+    own name). Anything else, another day or span or month, or another period of the page ("all
+    time", "overall", "weekly", "yearly", "custom range"), has no topic, with the `day`, `window`
+    or `words` it named, or the `problem` of a date that cannot be read: it is answered with
+    performance_other_reply, never with a stand-in period. "This month" is given only when the
+    words name no other month and no other year ("performance for the month of august" and
     "month performance 2025" ask about another month)."""
     today = today or local_today()
     low = re.sub(r"\s+", " ", (text or "").lower().replace("’", "'")).strip()
@@ -377,6 +385,13 @@ def performance_route(text: str, today: Optional[date] = None) -> Route:
     if _OTHER_MONTH_RE.search(low):
         window, _ = date_window(low, today, forward=False)
         return Route("performance", window=window, words="" if window else "another month")
+    week = _WEEK_RE.search(low)
+    if week:
+        # The page's This Week (or another week) is not Today, even on a Monday, when "this week"
+        # is one day so far.
+        window, _ = date_window(low, today, forward=False)
+        span = window if window is not None and window.first != window.last else None
+        return Route("performance", window=span, words="" if span else week.group(0))
     window, problem = date_window(low, today, forward=False)
     if (window is not None and window.first == today.replace(day=1) and window.last is not None
             and window.last >= today and (window.first != window.last or _THIS_MONTH_RE.search(low))):
@@ -393,6 +408,10 @@ def performance_route(text: str, today: Optional[date] = None) -> Route:
         return _this_month_route(low, today)
     if problem:
         return Route("performance", problem=problem)
+    other = _OTHER_PERIOD_RE.search(low)
+    if other:
+        # The page's other periods ("all time performance", "weekly performance"): not today's.
+        return Route("performance", words=other.group(0))
     return Route("performance", topic="today")
 
 
@@ -434,8 +453,8 @@ def _this_month_route(low: str, today: date, window: Optional[Window] = None) ->
 
 
 def _names_another_topic(low: str) -> bool:
-    """Whether the words name a subject the team-performance report does not read (it reads the
-    consultation requests and the payment verifications only): pending payments, window
+    """Whether the words name a subject the Consultant Performance page does not show (it shows
+    consultancies, files opened, conversion and docs ready per consultant): pending payments, window
     applications, intakes, programs, universities, stages, documents, missing information,
     admitted students, visas, the calendar, passports, cross-checks or registrations. Such a
     question keeps that subject's own route even with "performance" or "how is the team doing" in
@@ -452,8 +471,9 @@ def _names_another_topic(low: str) -> bool:
 
 
 def performance_other_reply(route: Route) -> str:
-    """For a performance question about another day, span or month (Telegram Markdown): what can
-    be read, and how."""
+    """For a performance question about another day, span, month or period (Telegram Markdown):
+    what the two commands cover, and that the portal page itself offers the other periods. The
+    bot never uses the page's Custom range form, so it reads nothing for them."""
     from src.bot.brief import esc
     if route.problem:
         asked = f" (I couldn't read the date there: {esc(route.problem)})"
@@ -465,9 +485,10 @@ def performance_other_reply(route: Route) -> str:
         asked = f", and you asked about {esc(route.words)}"
     else:
         asked = ""
-    return ("📈 Team performance is read for *today* (/performance\\_today) or for *this month*, from its 1st "
-            f"to today (/performance\\_month){asked}.\n"
-            "For one day's consultations or payments, use /inquiries\\_date or /verified\\_date.")
+    return ("📈 /performance\\_today and /performance\\_month show the portal's Consultant Performance page "
+            f"for *today* and for *this month*{asked}.\n"
+            "The page itself (Leads › Performance, consult\\_performance.php) also offers This Week, "
+            "All Time and a custom range: open it on the portal for those.")
 
 
 def classify(text: str, today: Optional[date] = None) -> Route:
@@ -476,9 +497,9 @@ def classify(text: str, today: Optional[date] = None) -> Route:
 
       hello          a greeting or thanks
       pin            the command cheat-sheet ("pin", "menu", "commands")
-      performance    the whole team's performance today or this month (performance_route: topic
-                     "today" or "month"; another day or span has no topic), unless the words name
-                     a subject the report does not read (_names_another_topic: pending payments,
+      performance    the portal's Consultant Performance page, today or this month (performance_route:
+                     topic "today" or "month"; another day, span or period has no topic), unless the
+                     words name a subject the page does not show (_names_another_topic: pending payments,
                      an intake...), or name another single day and consultations or verifications
                      ("how did the counsellors do yesterday": that day's own answer)
       crosscheck     a cross-check: a day, a student, a range (window: "cross-check last week")
@@ -682,7 +703,7 @@ CANT_ANSWER = (
     "• Deadlines and DHL: /calendar, or “any deadlines this week”\n"
     "• Admitted students: /admitted · Stages: /stage · Missing information: /missing\n"
     "• Passport and document cross-checks: /crosscheck\\_today · /crosscheck\\_date\n"
-    "• The whole team's performance: /performance\\_today · /performance\\_month\n"
+    "• The portal's Consultant Performance page (tiles, top performer, leaderboard): /performance\\_today · /performance\\_month\n"
     "• The day's brief: /brief"
 )
 

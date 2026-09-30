@@ -1,6 +1,9 @@
+import copy
 import logging
 import re
 from typing import List, Dict, Any, Optional, Tuple
+from urllib.parse import parse_qs, urlsplit
+
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger("hangeul.parsers")
@@ -587,23 +590,15 @@ def consultation_view(html: str) -> Dict[str, Any]:
         "from", "to": the dates the page's search form says it filtered on ("" for none; None
                 when it has no search form),
         "listed": the caption's count of listed rows ("<b>500</b> requests · newest first"), or
-                None when it has no such caption,
-        "columns": the columns the table's header names, by meaning ("name", "consultant",
-                "status"...; _consult_columns), or None when there is no table. A row's
-                "consultant" is "Unassigned" both for the portal's "—" and for a table with no
-                Consultant column: this tells the two apart}"""
+                None when it has no such caption}"""
     soup = BeautifulSoup(html, "html.parser")
     tabs, current = _consultation_tabs(soup)
     table = soup.find("table")
     rows: Optional[List[Dict[str, Any]]] = None
-    columns: Optional[List[str]] = None
     if table is not None:
         rows = _consultation_table_rows(table)
         if not rows and _consultation_data_rows(table):
             rows = None                          # rows there, none of them readable
-        header = table.find("tr")
-        columns = sorted(_consult_columns([c.get_text(" ", strip=True) for c in header.find_all(["th", "td"])])
-                         if header is not None else {})
     form = soup.select_one("form.cr-search")
     echo = None
     if form is not None:
@@ -612,8 +607,7 @@ def consultation_view(html: str) -> Dict[str, Any]:
     return {"rows": rows, "tabs": tabs, "status": current,
             "from": None if echo is None else echo.get("from", ""),
             "to": None if echo is None else echo.get("to", ""),
-            "listed": _int_or_none(caption.group(1)) if caption else None,
-            "columns": columns}
+            "listed": _int_or_none(caption.group(1)) if caption else None}
 
 
 def _cf_email(hexstr: str) -> str:
@@ -787,33 +781,6 @@ def verified_on_day(students: List[Dict[str, Any]], day) -> List[Dict[str, Any]]
     return [v for v in (verification(s, day) for s in students) if v is not None]
 
 
-def verified_between(students: List[Dict[str, Any]], first, last) -> List[Dict[str, Any]]:
-    """The payment verifications of `students` (parse_students_page records) on a day from `first`
-    to `last` (dates, both included): verification's dict plus the "day" it was on, in list order.
-    Each student counts once, on the day of the row's own stamp, with verification's rules (whole
-    day and month tokens, a stamp's own year when it has one, never before the student applied).
-    The portal writes no year, so the caller must first reject a window reaching a year or more
-    back (src.dates.yearless_day_problem), as for one day."""
-    from datetime import timedelta
-    from src.dates import parse_stamp
-    days: Dict[tuple, List[Any]] = {}
-    day = first
-    while day <= last:
-        days.setdefault((day.day, day.month), []).append(day)
-        day += timedelta(days=1)
-    found = []
-    for s in students:
-        stamp = parse_stamp(s.get("verified_stamp", ""))
-        if stamp is None:
-            continue
-        for candidate in days.get((stamp.day, stamp.month), ()):
-            v = verification(s, candidate)
-            if v is not None:
-                found.append({**v, "day": candidate})
-                break
-    return found
-
-
 def scan_verified_students(html: str, target_date="today") -> Dict[str, Any]:
     """One students.php page -> {"verified": the students verified on target_date (as
     parse_verified_students), "students": how many student rows the page has, "markers": how many
@@ -897,6 +864,258 @@ def parse_window_applications(html: str) -> Optional[List[Dict[str, str]]]:
 def count_under_review(rows: List[Dict[str, str]]) -> int:
     """Window applications whose status is "under review" ("under_review", "Under Review"...)."""
     return sum(1 for r in rows if _label_key(r.get("status", "")) == "under review")
+
+
+# --------------------------------------------------------------------------- consult_performance.php
+
+class PerformanceLayoutError(ValueError):
+    """consult_performance.php is not laid out the way the parser knows (no tiles, no leaderboard
+    table with its named columns, a row or a figure it cannot read): nothing may be reported."""
+
+
+# The leaderboard's columns, found by the header's own words (never by position): each key takes
+# the first unused header its test accepts (on the label key: lower case, punctuation dropped, a
+# plural last word without its "s": "Consultancies" -> "consultancie").
+_PERF_COLUMNS = (
+    ("rank", lambda key, raw: key in ("rank", "no", "pos", "position", "sl") or (not key and "#" in raw)),
+    ("name", lambda key, raw: key.startswith(("consultant", "counsellor", "counselor", "staff", "name"))),
+    ("score", lambda key, raw: key.startswith("score")),
+    ("conversion", lambda key, raw: key.startswith("conversion")),
+    ("files_opened", lambda key, raw: key.startswith("file")),
+    ("consultancies", lambda key, raw: key.startswith("consultanc")),
+    ("points", lambda key, raw: key.startswith("point")),
+    ("docs_ready", lambda key, raw: key.startswith(("doc", "document"))),
+)
+_PERF_NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
+# What each figure may look like, as the portal prints it ("17.9", "18%", "149.5", "1,304"); the
+# portal's "—" for no figure is kept as it is.
+_PERF_SHAPES = {
+    "rank": re.compile(r"\d+"),
+    "score": re.compile(_PERF_NUMBER),
+    "conversion": re.compile(_PERF_NUMBER + r"\s*%?"),
+    "files_opened": re.compile(r"\d[\d,]*"),
+    "consultancies": re.compile(r"\d[\d,]*"),
+    "points": re.compile(_PERF_NUMBER),
+    "docs_ready": re.compile(r"\d[\d,]*"),
+}
+_PERF_TILE_SHAPE = re.compile(_PERF_NUMBER + r"\s*%?")
+_PERF_DASHES = ("—", "–", "-", "--")
+# The top-performer card's figures, by their own labels ("Files opened" -> files_opened).
+_PERF_TOP_METRICS = (("score", "score"), ("conversion", "conversion"), ("files_opened", "file"),
+                     ("consultancies", "consultanc"))
+
+
+def _perf_text(tag) -> str:
+    return " ".join(tag.get_text(" ", strip=True).split()) if tag is not None else ""
+
+
+def _perf_value(text: str, shape, what: str) -> str:
+    """A figure exactly as the portal prints it, once it looks like one; else the layout is not
+    the known one."""
+    text = " ".join((text or "").split())
+    if text in _PERF_DASHES:
+        return text
+    if not shape.fullmatch(text):
+        raise PerformanceLayoutError(f"{what} reads {text[:30]!r}, which is not a figure")
+    return text
+
+
+def _perf_columns(header_cells) -> Dict[str, int]:
+    """{column key: index} for the leaderboard's header cells (see _PERF_COLUMNS)."""
+    found: Dict[str, int] = {}
+    for i, cell in enumerate(header_cells):
+        raw = _perf_text(cell)
+        key = _label_key(raw)
+        for name, accepts in _PERF_COLUMNS:
+            if name not in found and accepts(key, raw):
+                found[name] = i
+                break
+    return found
+
+
+def _perf_table(soup):
+    """The leaderboard: the first table whose header names a Consultant and a Score column ->
+    (table, header cells, {key: index}), or None."""
+    for table in soup.find_all("table"):
+        header = table.select_one("thead tr") or table.find("tr")
+        if header is None:
+            continue
+        cells = header.find_all(["th", "td"], recursive=False) or header.find_all(["th", "td"])
+        cols = _perf_columns(cells)
+        if "name" in cols and "score" in cols:
+            return table, header, cells, cols
+    return None
+
+
+def _perf_name(cell) -> str:
+    """A consultant's name from its cell: the name element itself (a Cloudflare-protected address
+    shown as the browser shows it), else the cell without its avatar initial and its crown."""
+    _decode_cf_emails(cell)
+    name = cell.select_one(".pf-name") or cell.select_one("strong")
+    if name is not None:
+        return _perf_text(name)
+    rest = copy.copy(cell)
+    for extra in rest.select(".cav, .pf-crown, .medal"):
+        extra.decompose()
+    return _perf_text(rest)
+
+
+def _perf_top(soup) -> Optional[Dict[str, Any]]:
+    """The "Top performer" card -> {"label" ("Top performer · This Month"), "name", "score",
+    "conversion", "files_opened", "consultancies", "metrics": [(label, figure)] in the card's
+    order}, or None when the page shows no card or a card with no name (a period nobody worked
+    in). A card whose figures are not the known ones raises PerformanceLayoutError."""
+    card = soup.select_one("section.pf-top") or soup.find(attrs={"aria-label": re.compile(r"^\s*top performer", re.I)})
+    if card is None:
+        return None
+    name_tag = card.select_one(".pf-top-name") or card.find(["h2", "h3", "strong"])
+    if name_tag is not None:
+        _decode_cf_emails(name_tag)
+    name = _perf_text(name_tag)
+    if not name or name in _PERF_DASHES:
+        return None
+    metrics: List[Tuple[str, str]] = []
+    holder = card.select_one(".pf-top-m") or card
+    for item in holder.find_all("div", recursive=False):
+        value, label = item.find("b"), item.find("span")
+        if value is not None and label is not None:
+            metrics.append((_perf_text(label), _perf_text(value)))
+    top: Dict[str, Any] = {"label": _perf_text(card.select_one(".pf-top-k")), "name": name, "metrics": metrics}
+    for key, word in _PERF_TOP_METRICS:
+        figures = [v for label, v in metrics if _label_key(label).startswith(word)]
+        if not figures:
+            raise PerformanceLayoutError(f"the top performer card shows no {key.replace('_', ' ')} "
+                                         f"(it reads {[label for label, _ in metrics]})")
+        top[key] = _perf_value(figures[0], _PERF_SHAPES[key], f"the top performer's {key.replace('_', ' ')}")
+    return top
+
+
+def _perf_help(soup, cells, cols, key: str, word: str) -> str:
+    """A column's explanation: its header's info tooltip (title), else the page's own legend
+    ("How the numbers are worked out": <dt>Score</dt><dd>...</dd>), else ""."""
+    i = cols.get(key)
+    title = (cells[i].get("title") or "").strip() if i is not None else ""
+    if title:
+        return " ".join(title.split())
+    for dt in soup.select("dl dt"):
+        if _label_key(_perf_text(dt)).startswith(word):
+            return _perf_text(dt.find_next_sibling("dd"))
+    return ""
+
+
+def parse_consult_performance(html: str) -> Dict[str, Any]:
+    """consult_performance.php (Leads > Performance, the "Consultant Performance" page) for one
+    period, read by its labels, header texts and classes, never by position:
+
+      {"period": the open period tab's ?period= value ("today", "month"...), or None,
+       "period_label": the period the page says it shows ("Showing <strong>This Month</strong>"),
+                  else the open tab's text, or None,
+       "range_text": its dates ("01 Sep – 30 Sep 2026"; "" when the page hides them, as for
+                  All Time, whose hidden span is a placeholder),
+       "scope_note": the page's scope note ("" for the owner/admin, for whom it is empty),
+       "tiles": {label: figure} in the page's order ("Consultancies done": "715", "Conversion
+                  (file open)": "15%"),
+       "top": the top-performer card (_perf_top) or None,
+       "columns": [(key or None, header text)] in the header's order (None: a column the bot
+                  does not know, kept with its own header text),
+       "leaderboard": [{"rank", "name", "top" (the row's "Top" crown), "score", "conversion",
+                  "files_opened", "consultancies", "points", "docs_ready", "extra": {header text:
+                  figure} for other columns}] in the portal's order,
+       "count": the leaderboard's own count badge, or None,
+       "empty_text": the leaderboard's empty-state words ("" when it has rows),
+       "sort_note": "Sorted by score, highest first" (or "" when not shown),
+       "score_help", "points_help": the Score and Points columns' info tooltips (else the page's
+                  legend for them, else "")}
+
+    Every figure is kept exactly as the portal prints it ("17.9", "18%", "149.5"). A recognised
+    empty state (the table's one "pf-empty-row") is an empty leaderboard. Raises
+    PerformanceLayoutError when the tiles or the leaderboard's header cannot be found, a column
+    the page has always shown is missing, a row cannot be read, a figure is not a figure, or the
+    count badge does not match the rows."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    tiles: Dict[str, str] = {}
+    for stat in soup.select(".pf-stat"):
+        label, value = stat.select_one(".l"), stat.select_one(".n")
+        if label is None or value is None:
+            continue
+        name = _perf_text(label)
+        if name and name not in tiles:
+            tiles[name] = _perf_value(_perf_text(value), _PERF_TILE_SHAPE, f"the {name!r} tile")
+    if not tiles:
+        raise PerformanceLayoutError("its tiles (Consultancies done, Files opened, ...) were not found")
+
+    found = _perf_table(soup)
+    if found is None:
+        raise PerformanceLayoutError("its leaderboard table (a header with Consultant and Score) was not found")
+    table, header, cells, cols = found
+    missing = [key for key, _ in _PERF_COLUMNS if key not in cols]
+    if missing:
+        raise PerformanceLayoutError(f"the leaderboard's header has no {', '.join(missing)} column "
+                                     f"(it reads {[_perf_text(c) for c in cells]})")
+    known = {i: key for key, i in cols.items()}
+    columns = [(known.get(i), _perf_text(c)) for i, c in enumerate(cells)]
+
+    rows: List[Dict[str, Any]] = []
+    empty_text = ""
+    body = table.find("tbody") or table
+    body_rows = [tr for tr in body.find_all("tr") if tr is not header and tr.find_parent("thead") is None]
+    for n, tr in enumerate(body_rows):
+        tds = tr.find_all(["td", "th"], recursive=False)
+        if not tds or not _perf_text(tr):
+            continue
+        classes = tr.get("class") or []
+        if "pf-empty-row" in classes or (len(tds) == 1 and (tds[0].get("colspan") or tr.select_one(".pf-empty"))):
+            empty_text = _perf_text(tr.select_one(".pf-empty") or tr)
+            continue
+        if len(tds) != len(cells):
+            raise PerformanceLayoutError(f"leaderboard row {n + 1} has {len(tds)} cells, its header {len(cells)}")
+        entry: Dict[str, Any] = {"extra": {}}
+        for i, td in enumerate(tds):
+            key = known.get(i)
+            if key == "name":
+                entry["name"] = _perf_name(td)
+            elif key is not None:
+                entry[key] = _perf_value(_perf_text(td), _PERF_SHAPES[key], f"leaderboard row {n + 1}'s {key.replace('_', ' ')}")
+            else:
+                entry["extra"][columns[i][1]] = _perf_text(td)
+        if not entry.get("name"):
+            raise PerformanceLayoutError(f"leaderboard row {n + 1} shows no consultant's name")
+        entry["top"] = "is-top" in classes or tr.select_one(".pf-crown") is not None
+        rows.append(entry)
+    if rows and empty_text:
+        raise PerformanceLayoutError("the leaderboard shows rows and its empty state at once")
+
+    count_tag = soup.select_one(".pf-count")
+    count = _int_or_none(_perf_text(count_tag)) if count_tag is not None else None
+    if count_tag is not None and count is None:
+        raise PerformanceLayoutError(f"the leaderboard's count reads {_perf_text(count_tag)[:20]!r}")
+    if count is not None and count != len(rows):
+        raise PerformanceLayoutError(f"the leaderboard counts {count} consultants but {len(rows)} rows could be read")
+
+    showing = soup.select_one(".pf-showing")
+    label_tag = showing.find("strong") if showing is not None else None
+    tab = soup.select_one(".pf-tabs a.on")
+    period = None
+    if tab is not None and tab.get("href"):
+        period = (parse_qs(urlsplit(tab["href"]).query).get("period") or [None])[0]
+    dates = showing.select_one(".pf-dates") if showing is not None else None
+    hidden = dates is not None and "is-hidden" in (dates.get("class") or [])
+    return {
+        "period": period,
+        "period_label": _perf_text(label_tag) or _perf_text(tab) or None,
+        "range_text": "" if dates is None or hidden else _perf_text(dates),
+        "scope_note": _perf_text(soup.select_one(".pf-scope")),
+        "tiles": tiles,
+        "top": _perf_top(soup),
+        "columns": columns,
+        "leaderboard": rows,
+        "count": count,
+        "empty_text": empty_text,
+        "sort_note": _perf_text(soup.select_one(".pf-note")),
+        "score_help": _perf_help(soup, cells, cols, "score", "score"),
+        "points_help": _perf_help(soup, cells, cols, "points", "point"),
+    }
 
 
 _CAL_RANGE_RE = re.compile(r"\d{1,2}\s+[A-Za-z]{3}(?:\s+\d{4})?(?:\s*[–—-]\s*\d{1,2}\s+[A-Za-z]{3}(?:\s+\d{4})?)?")

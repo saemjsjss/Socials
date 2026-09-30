@@ -1,32 +1,31 @@
-"""/performance_today, /performance_month (and /perf_today, /perf_month, /performance [month]), and
-their free-text routes: the whole team's performance for today or for this month so far.
+"""/performance_today, /performance_month (and /perf_today, /perf_month, /performance [today|month]),
+and their free-text routes: the portal's own Consultant Performance page (Leads > Performance,
+consult_performance.php), and only that page's data.
 
-What is pinned here: the team figures are the portal's own status counts under its date filter for
-the window, and the payments verified by each row's own stamp, read from every students.php page
-ONCE for the window; each person's consultations done and follow-ups are counted from the rows'
-"Last updated by", requests assigned from the Consultant column, payments verified from the stamp's
-name (names matched without regard to case); a month whose requests are more than the list shows is
-read again in parts, never double-counted; a yearless stamp that cannot be this year's is never
-counted; a request still New is nobody's activity; what no name is on is said, never credited; each
-person's amount is the verified income, else what was paid; the range reader refuses a filter not
-echoed, a row from outside the window, statuses that do not match the tabs, and more than
-CONSULT_RANGE_MAX_READS reads; a part that cannot be read says so while the other part is still
-shown (never a 0), and the last line names only what was read; "—" in the Consultant column is a
-count, a missing column "not available"; the reply is split under Telegram's limit and resent as
-plain text when its Markdown is refused; both commands are in the menu and the cheat-sheet; the
-free-text routes are whole words ("this months performance" is this month's), never answer another
-month or year with this month's report, and do not take other routes' questions ("how is the team
-doing with pending payments"); and the root staging copy of telegram_bot.py is byte-identical.
+What is pinned here: one read-only GET of consult_performance.php?period=today or ?period=month
+(the page's own period links; its Custom range form is never used, no other page is read); the
+tiles, the top performer card and the whole leaderboard parsed by their labels and header texts,
+every figure exactly as the portal prints it ("17.9", "18%", "149.5"); columns found by the
+header's words, so a reordered header reads the same and an unknown column is kept with its own
+header; the page must say it shows the period asked (it shows This Month for a period it does not
+take); a recognised empty state is an empty leaderboard, never an error; a page with no tiles, no
+leaderboard header, a missing column, a row or a figure it cannot read, or a count badge that does
+not match its rows is "layout not recognised"; a portal that cannot be read says so, never zeros;
+where the page disagrees with itself a ⚠️ line says so; the reply is the bot's house style, split
+under Telegram's limit and resent as plain text when its Markdown is refused; the menu and the
+cheat-sheet name the page; the free-text routes are whole words ("this months performance" is this
+month's, "consultations today" is still the inquiries), and another day, month or period is told
+what the commands cover and what the page itself offers; the root staging copy of telegram_bot.py
+is byte-identical (R24).
 
-Every portal page is synthetic (laid out like the live pages, Sep 2026); today is 28 Sep 2026 in
-Dhaka. Nothing reaches the network or Telegram.
+Every page is synthetic, laid out like the live consult_performance.php (30 Sep 2026); today is
+28 Sep 2026 in Dhaka. Nothing reaches the network or Telegram.
 
 Run from the BOT folder:
     .venv\\Scripts\\python.exe -m pytest tests\\test_performance.py -q
 """
 import asyncio
 import filecmp
-from collections import Counter
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,9 +34,8 @@ import httpx
 import pytest
 from telegram.error import BadRequest
 
-from test_consultations import _page as consult_page, _row as consult_row
 from test_foundation import (  # noqa: F401  (the portal fixture is used by name)
-    BACHELOR, TODAY, Message, Sent, fake_update, page, portal, report_of, row, run, verified,
+    TODAY, Message, Sent, fake_update, portal, report_of, run,
 )
 from src.bot import ask, performance, replies, telegram_bot
 from src.config import settings
@@ -45,568 +43,457 @@ from src.scraper import client as client_module, parsers
 from src.scraper.client import PortalUnavailable, admin_client
 
 BOT_ROOT = Path(__file__).resolve().parent.parent
-MONTH_FIRST = "2026-09-01"
-TODAY_ISO = "2026-09-28"
+TODAY_KEY = "consult_performance.php?period=today"
+MONTH_KEY = "consult_performance.php?period=month"
+SCORE_TIP = "Balanced score = files opened × (0.5 + conversion) × program weight"
+POINTS_TIP = "Weighted workload: Bachelor/Master/PhD ×1.5, KLP/EAP ×1"
 
 
-def range_key(first, last):
-    return f"consult_requests.php?status=all&from={first}&to={last}"
+# --------------------------------------------------------------------------- synthetic consult_performance.php
+
+COLUMNS = ("rank", "name", "score", "conversion", "files_opened", "consultancies", "points", "docs_ready")
+TH = {
+    "rank": '<th class="c-rank">#</th>',
+    "name": "<th>Consultant</th>",
+    "score": f'<th title="{SCORE_TIP}">Score<i class="fas fa-circle-info"></i></th>',
+    "conversion": "<th>Conversion</th>",
+    "files_opened": "<th>Files Opened</th>",
+    "consultancies": "<th>Consultancies</th>",
+    "points": f'<th title="{POINTS_TIP}">Points<i class="fas fa-circle-info"></i></th>',
+    "docs_ready": "<th>Docs Ready</th>",
+}
 
 
-def range_page(first, last, *rows, **kw):
-    return consult_page(*rows, day_from=first, day_to=last, **kw)
+def td(key, r):
+    """One leaderboard cell as the live page lays it out."""
+    if key == "rank":
+        g = f" g{r['rank']}" if r["rank"] in ("1", "2", "3") else ""
+        return f'<td class="c-rank"><span class="rank{g}">{r["rank"]}</span></td>'
+    if key == "name":
+        crown = ('<span class="pf-crown" title="Top performer"><i class="fas fa-trophy"></i> Top</span>'
+                 if r.get("top") else "")
+        return (f'<td class="c-who"><div class="pf-who"><span class="cav">{r["name"][:1]}</span>'
+                f'<div class="pf-who-t"><strong class="pf-name">{r["name"]}</strong>\n {crown} </div></div></td>')
+    if key == "score":
+        return f'<td class="c-score"><span class="pf-score">{r["score"]}</span></td>'
+    if key == "conversion":
+        return (f'<td class="c-conv" data-l="Conversion"><div class="pf-conv"><span class="convbar">'
+                f'<i style="width:{r["conversion"]}"></i></span><b>{r["conversion"]}</b></div></td>')
+    if key == "files_opened":
+        return f'<td class="c-mini" data-l="Files opened"><span class="pill green">{r["files_opened"]}</span></td>'
+    if key == "consultancies":
+        return f'<td class="c-mini" data-l="Consultancies"><span class="pill blue">{r["consultancies"]}</span></td>'
+    if key == "points":
+        return f'<td class="c-mini pf-dim" data-l="Points">{r["points"]}</td>'
+    if key == "docs_ready":
+        return f'<td class="c-mini pf-dim" data-l="Docs ready">{r["docs_ready"]}</td>'
+    return f'<td class="c-mini">{r.get(key, "")}</td>'
 
 
-def consult_reads(asked):
-    return [key for _, key in asked if key.startswith("consult_requests.php")]
+def person(rank, name, score, conversion, files, consultancies, points, docs, top=False):
+    return {"rank": str(rank), "name": name, "score": score, "conversion": conversion, "files_opened": files,
+            "consultancies": consultancies, "points": points, "docs_ready": docs, "top": top}
 
 
-def student_reads(asked):
-    return [key for _, key in asked if key.startswith("students.php")]
-
-
-# --------------------------------------------------------------------------- synthetic portal
+# The owner's screenshots of 30 Sep 2026 (This Month).
+MONTH_ROWS = (
+    person(1, "SUMONA HALDER", "17.9", "18%", "26", "146", "148", "1", top=True),
+    person(2, "NOSHIN SAMAD", "15.8", "16%", "16", "100", "149.5", "5"),
+    person(3, "MAHIRA JANAN", "15.6", "19%", "22", "117", "120", "0"),
+    person(4, "FAHMID KAISAR", "14.6", "11%", "16", "146", "218", "2"),
+    person(5, "FIROZA ARA SHAMPA", "14.1", "18%", "20", "111", "115", "0"),
+    person(6, "ARSHIA JANAN", "5", "6%", "6", "95", "141.5", "0"),
+    person(7, "Owner", "1", "0%", "2", "0", "0", "0"),
+)
+MONTH_TILES = (("Consultancies done", "715"), ("Files opened", "108"), ("Conversion (file open)", "15%"),
+               ("Docs ready", "8"))
+MONTH_TOP = ("SUMONA HALDER", "17.9", "18%", "26", "146")
 
 TODAY_ROWS = (
-    consult_row("Student A", "Consulted", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),
-    consult_row("Student B", "Consulted", "28 Sep 2026", by="Arshia Janan", consultant="Mahira Janan"),
-    consult_row("Student C", "File Opened", "28 Sep 2026", by="Fahmid Kaisar", consultant="Fahmid Kaisar"),
-    consult_row("Student D", "No Answer", "28 Sep 2026", by="Fahmid Kaisar", consultant="Fahmid Kaisar"),
-    consult_row("Student E", "Wrong Number", "28 Sep 2026", by="Mahira Janan", consultant="Mahira Janan"),
-    consult_row("Student F", "New", "28 Sep 2026", consultant="Mahira Janan"),
-    consult_row("Student G", "New", "28 Sep 2026", consultant="—"),
-    consult_row("Student H", "Consulted", "28 Sep 2026", consultant="Sumona Halder"),      # no "Last updated by"
+    person(1, "FAHMID KAISAR", "2.3", "100%", "1", "1", "1.5", "0", top=True),
+    person(2, "SUMONA HALDER", "0", "0%", "0", "1", "1", "0"),
+    person(3, "MAHIRA JANAN", "0", "0%", "0", "1", "1.5", "0"),
 )
+TODAY_TILES = (("Consultancies done", "3"), ("Files opened", "1"), ("Conversion (file open)", "33%"),
+               ("Docs ready", "0"))
+TODAY_TOP = ("FAHMID KAISAR", "2.3", "100%", "1", "1")
+
+EMPTY_ROW = ('<tr class="pf-empty-row"><td colspan="8"><div class="pf-empty"><span class="ic">'
+             '<i class="fas fa-user-clock"></i></span><b>No consultant activity yet</b>'
+             '<span>Nothing was logged in this period.</span></div></td></tr>')
 
 
-def student_pages():
-    """Two pages of students.php: verified today by MAHIRA JANAN (twice, one on page 2) and SUMONA
-    HALDER; and stamps that are not today's or cannot be this year's."""
-    return {
-        "students.php": page(
-            verified(917, 1, "RAHIM UDDIN", "28 Sep, 10:00", by="MAHIRA JANAN", applied="27 Sep 2026"),
-            verified(916, 2, "NUSRAT JAHAN", "28 Sep, 11:30", amount="8,000.00 BDT", method="bKash",
-                     by="SUMONA HALDER", program=BACHELOR, applied="27 Sep 2026"),
-            verified(910, 3, "EARLIER ONE", "27 Sep, 11:00", by="MAHIRA JANAN", applied="20 Sep 2026"),
-            row(969, 4, "PENDING APPLICANT", pay="Pending", stage="Application Received", applied="28 Sep 2026"),
-            pg=1, pages=2, total=10),
-        "students.php?pg=2": page(
-            verified(300, 5, "PAGE TWO TODAY", "28 Sep, 09:00", amount="12,000.00 BDT", by="MAHIRA JANAN",
-                     applied="1 Sep 2026"),
-            verified(301, 6, "FIRST OF MONTH", "01 Sep, 12:00", amount="5,000.00 BDT", by="FAHMID KAISAR",
-                     applied="1 Sep 2026"),
-            verified(302, 7, "TWELFTH", "12 Sep, 10:00", by="Owner", applied="1 Sep 2026"),
-            verified(303, 8, "LAST MONTH", "28 Aug, 09:00", by="FAHMID KAISAR", applied="1 Aug 2026"),
-            # "30 Sep" is still to come this month: that stamp is last year's.
-            verified(304, 9, "LAST YEAR THIRTIETH", "30 Sep, 09:00", by="FAHMID KAISAR", applied="1 Aug 2026"),
-            # Verified "10 Sep" but applied on 20 Sep 2026: that stamp is last year's 10 Sep.
-            verified(305, 10, "LAST YEAR TENTH", "10 Sep, 09:00", by="FAHMID KAISAR", applied="20 Sep 2026"),
-            pg=2, pages=2, total=10),
-    }
+def perf_page(period="month", label="This Month", dates="01 Sep – 30 Sep 2026", tiles=MONTH_TILES,
+              top=MONTH_TOP, rows=MONTH_ROWS, columns=COLUMNS, count=None, scope="", dates_class="",
+              empty=EMPTY_ROW, extra_th=None):
+    """consult_performance.php as the live page lays it out (sidebar, period tabs, the Custom range
+    form, the "Showing" line, the scope note, the tiles, the top performer card, the leaderboard
+    card with its count and sort note, and the legend). `columns` orders the header and the cells."""
+    tabs = "".join(f'<a class="{"on" if p == period else ""}" href="?period={p}">{t}</a>'
+                   for p, t in (("today", "Today"), ("week", "This Week"), ("month", "This Month"), ("all", "All Time")))
+    head = "".join(extra_th.get(c, TH.get(c, "")) if extra_th else TH.get(c, "") for c in columns)
+    body = "".join(('<tr style="background:#f0fdf4" class="is-top">' if r.get("top") else "<tr>")
+                   + "".join(td(c, r) for c in columns) + "</tr>" for r in rows) or (empty or "")
+    shown = len(rows) if count is None else count
+    top_card = ""
+    if top is not None:
+        name, score, conv, files, cons = top
+        top_card = (
+            '<section class="pf-top" aria-label="Top performer"><div class="pf-top-who">'
+            f'<div class="pf-top-av">{name[:1]}<span class="medal"><i class="fas fa-trophy"></i></span></div>'
+            f'<div><div class="pf-top-k"><i class="fas fa-star"></i> Top performer · {label}</div>'
+            f'<h2 class="pf-top-name">{name}</h2></div></div><div class="pf-top-m">'
+            f"<div><b>{score}</b><span>Score</span></div><div><b>{conv}</b><span>Conversion</span></div>"
+            f"<div><b>{files}</b><span>Files opened</span></div><div><b>{cons}</b><span>Consultancies</span></div>"
+            "</div></section>")
+    return (
+        '<html><head><title>Consultant Performance — Hangeul Admin</title></head><body>'
+        '<aside class="sidebar"><a href="consult_performance.php" class="sb-item sb-subitem active">'
+        '<i class="fas fa-chart-line"></i> Performance</a><table class="decoy"><tr><th>Menu</th></tr>'
+        '<tr><td>Leads</td></tr></table></aside>'
+        '<div class="main-wrap"><main class="content">'
+        f'<div class="pf-bar"><nav class="pf-tabs" aria-label="Period">{tabs}'
+        '<label class="" for="pf-from"><i class="fas fa-calendar-days"></i> Custom range</label></nav>'
+        '<form method="get" class="pf-range"><input type="hidden" name="period" value="custom">'
+        '<div class="pf-f"><label for="pf-from">From</label><input type="date" id="pf-from" name="from" value="2026-09-01"></div>'
+        '<div class="pf-f"><label for="pf-to">To</label><input type="date" id="pf-to" name="to" value="2026-09-30"></div>'
+        '<button type="submit" class="pf-btn"><i class="fas fa-filter"></i> Apply range</button>'
+        f'<p class="pf-showing"><i class="fas fa-calendar-day"></i> Showing <strong>{label}</strong>'
+        f'<span class="pf-dates{(" " + dates_class) if dates_class else ""}">{dates}</span></p></form></div>'
+        f'<p class="pf-scope">{scope}</p>'
+        '<div class="pf-stats">' + "".join(
+            f'<div class="pf-stat"><span class="ic inf"><i class="fas fa-headset"></i></span><div>'
+            f'<div class="n">{n}</div><div class="l">{lbl}</div></div></div>' for lbl, n in tiles) + "</div>"
+        + top_card +
+        '<div class="card pf-card"><div class="card-head"><div class="card-title"><i class="fas fa-ranking-star"></i>'
+        f' Leaderboard <span class="pf-count">{shown}</span></div><span class="pf-note">'
+        '<i class="fas fa-arrow-down-wide-short"></i> Sorted by score, highest first</span></div>'
+        f'<div class="tbl-wrap"><table class="tbl pf"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div></div>'
+        '<section class="pf-legend" aria-label="How the numbers are worked out"><dl class="pf-defs">'
+        '<div class="d-files"><dt><i class="fas fa-folder-open"></i> Files opened</dt><dd>Payments you <b>verified</b> in this period.</dd></div>'
+        f'<div class="d-score"><dt>Score</dt><dd>{SCORE_TIP}.</dd></div>'
+        f'<div class="d-pts"><dt>Points</dt><dd>{POINTS_TIP}.</dd></div></dl></section>'
+        "</main></div></body></html>")
+
+
+def today_page(**kw):
+    kw = {"period": "today", "label": "Today", "dates": "28 Sep – 28 Sep 2026", "tiles": TODAY_TILES,
+          "top": TODAY_TOP, "rows": TODAY_ROWS, **kw}
+    return perf_page(**kw)
 
 
 def perf_portal(portal):
-    portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = range_page(TODAY_ISO, TODAY_ISO, *TODAY_ROWS)
-    portal.pages.update(student_pages())
+    portal.pages[TODAY_KEY] = today_page()
+    portal.pages[MONTH_KEY] = perf_page()
     return portal
 
 
 def blocks(text):
-    """The per-person blocks: {name: the block's lines}, in the report's order."""
-    people = text.split("👥 *By Person*")[1].split("\n\n")[0].splitlines()[1:]
+    """The leaderboard's blocks: {name: the block's lines}, in the reply's order."""
+    part = text.split("🏅 *Leaderboard*")[1].split("\n\n")[0].splitlines()[1:]
     found, name = {}, None
-    for line in people:
+    for line in part:
         if line.startswith("*") and ". " in line:
-            name = line.split(". ", 1)[1].rstrip("*")
-            found[name] = []
+            name = line.split(". ", 1)[1].split("*")[0]
+            found[name] = [line]
         elif name and line.startswith("   "):
             found[name].append(line.strip())
     return found
 
 
-# --------------------------------------------------------------------------- today
+# --------------------------------------------------------------------------- the parser
 
-def test_today_team_totals_and_every_persons_counts_are_exact(portal):
+def test_the_month_page_is_parsed_exactly_by_its_labels_and_headers():
+    got = parsers.parse_consult_performance(perf_page())
+    assert (got["period"], got["period_label"], got["range_text"]) == ("month", "This Month", "01 Sep – 30 Sep 2026")
+    assert got["tiles"] == {"Consultancies done": "715", "Files opened": "108", "Conversion (file open)": "15%",
+                            "Docs ready": "8"}
+    assert list(got["tiles"]) == [label for label, _ in MONTH_TILES]            # the page's order
+    top = got["top"]
+    assert (top["name"], top["score"], top["conversion"], top["files_opened"], top["consultancies"]) == MONTH_TOP
+    assert top["label"] == "Top performer · This Month"
+    assert top["metrics"] == [("Score", "17.9"), ("Conversion", "18%"), ("Files opened", "26"), ("Consultancies", "146")]
+    rows = got["leaderboard"]
+    assert [r["name"] for r in rows] == [r["name"] for r in MONTH_ROWS]           # the portal's order
+    for got_row, want in zip(rows, MONTH_ROWS):
+        assert {k: got_row[k] for k in COLUMNS} == {k: want[k] for k in COLUMNS}
+        assert got_row["top"] is want["top"] and got_row["extra"] == {}
+    assert rows[1]["points"] == "149.5" and rows[0]["conversion"] == "18%"       # kept as printed
+    assert got["count"] == 7 and got["empty_text"] == "" and got["scope_note"] == ""
+    assert got["sort_note"] == "Sorted by score, highest first"
+    assert (got["score_help"], got["points_help"]) == (SCORE_TIP, POINTS_TIP)
+    assert got["columns"] == [("rank", "#"), ("name", "Consultant"), ("score", "Score"), ("conversion", "Conversion"),
+                              ("files_opened", "Files Opened"), ("consultancies", "Consultancies"),
+                              ("points", "Points"), ("docs_ready", "Docs Ready")]
+
+
+def test_the_today_page_is_parsed_exactly():
+    got = parsers.parse_consult_performance(today_page())
+    assert (got["period"], got["period_label"], got["range_text"]) == ("today", "Today", "28 Sep – 28 Sep 2026")
+    assert got["tiles"]["Consultancies done"] == "3" and got["tiles"]["Conversion (file open)"] == "33%"
+    assert got["top"]["name"] == "FAHMID KAISAR" and got["top"]["score"] == "2.3" and got["top"]["conversion"] == "100%"
+    assert [(r["rank"], r["name"], r["score"], r["points"]) for r in got["leaderboard"]] == [
+        ("1", "FAHMID KAISAR", "2.3", "1.5"), ("2", "SUMONA HALDER", "0", "1"), ("3", "MAHIRA JANAN", "0", "1.5")]
+
+
+def test_columns_are_found_by_their_header_text_in_any_order():
+    shuffled = ("docs_ready", "name", "points", "rank", "consultancies", "score", "files_opened", "conversion")
+    got = parsers.parse_consult_performance(perf_page(columns=shuffled))
+    want = parsers.parse_consult_performance(perf_page())
+    assert [{k: r[k] for k in COLUMNS} for r in got["leaderboard"]] == [{k: r[k] for k in COLUMNS} for r in want["leaderboard"]]
+    assert [key for key, _ in got["columns"]] == list(shuffled)
+    # The reply lists each consultant's columns in the header's order, with the header's own text.
+    text = performance.format_consult_performance("month", got, TODAY)
+    assert blocks(text)["NOSHIN SAMAD"][1:] == ["├ Docs Ready `5` · Points `149.5`",
+                                                 "├ Consultancies `100` · Score `15.8`",
+                                                 "└ Files Opened `16` · Conversion `16%`"]
+
+
+def test_header_words_are_matched_by_meaning_and_an_unknown_column_is_kept():
+    renamed = {"rank": '<th class="c-rank">Rank</th>', "name": "<th>Counsellor</th>",
+               "files_opened": "<th>Files opened</th>", "docs_ready": "<th>Documents ready</th>",
+               "branch": "<th>Branch</th>"}
+    rows = [dict(r, branch="Dhaka") for r in MONTH_ROWS[:2]]
+    html = perf_page(rows=rows, columns=COLUMNS + ("branch",), extra_th=renamed)
+    got = parsers.parse_consult_performance(html)
+    assert got["leaderboard"][0]["name"] == "SUMONA HALDER" and got["leaderboard"][0]["docs_ready"] == "1"
+    assert got["leaderboard"][1]["extra"] == {"Branch": "Dhaka"} and got["columns"][-1] == (None, "Branch")
+    text = performance.format_consult_performance("month", got, TODAY)
+    assert blocks(text)["SUMONA HALDER"][1:] == ["├ Score `17.9` · Conversion `18%`",
+                                                 "├ Files opened `26` · Consultancies `146`",
+                                                 "├ Points `148` · Documents ready `1`",
+                                                 "└ Branch `Dhaka`"]
+
+
+def test_the_crown_and_the_avatar_initial_are_not_part_of_the_name():
+    got = parsers.parse_consult_performance(perf_page())
+    assert got["leaderboard"][0]["name"] == "SUMONA HALDER"                      # not "S SUMONA HALDER Top"
+
+
+def test_a_cloudflare_protected_name_is_shown_as_the_browser_shows_it():
+    protected = ('<a href="/cdn-cgi/l/email-protection" class="__cf_email__" '
+                 'data-cfemail="42212d2c31372e36232c366c2d2c2702273a232f322e276c212d2f">[email&#160;protected]</a>')
+    rows = [dict(MONTH_ROWS[0], name=protected)] + list(MONTH_ROWS[1:])
+    got = parsers.parse_consult_performance(perf_page(rows=rows))
+    assert got["leaderboard"][0]["name"] == parsers._cf_email("42212d2c31372e36232c366c2d2c2702273a232f322e276c212d2f")
+    assert "[email" not in got["leaderboard"][0]["name"]
+
+
+def test_a_hidden_range_placeholder_is_no_range():
+    # All Time hides a placeholder span ("01 Jan – 31 Dec 2999"): never shown as the period's dates.
+    got = parsers.parse_consult_performance(perf_page(period="all", label="All Time", dates="01 Jan – 31 Dec 2999",
+                                                      dates_class="is-hidden"))
+    assert got["range_text"] == "" and got["period"] == "all"
+
+
+def test_the_empty_state_is_an_empty_leaderboard_not_an_error():
+    zero = (("Consultancies done", "0"), ("Files opened", "0"), ("Conversion (file open)", "0%"), ("Docs ready", "0"))
+    got = parsers.parse_consult_performance(today_page(tiles=zero, top=None, rows=()))
+    assert got["leaderboard"] == [] and got["top"] is None and got["count"] == 0
+    assert got["empty_text"] == "No consultant activity yet Nothing was logged in this period."
+    text = performance.format_consult_performance("today", got, TODAY)
+    assert "🏆 *Top performer:* none shown on the page for this period." in text
+    assert "🏅 *Leaderboard* (0 consultants)\n• Nobody is listed for this period (the page says: " in text
+    assert "🎧 *Consultancies done:* `0`" in text                                # a page read whole: a real 0
+    assert "⚠️" not in text
+
+
+def test_a_top_card_with_no_name_is_no_top_performer():
+    got = parsers.parse_consult_performance(today_page(top=("—", "0", "0%", "0", "0"), rows=()))
+    assert got["top"] is None
+
+
+@pytest.mark.parametrize("html, why", [
+    (perf_page(tiles=()), "its tiles"),
+    (perf_page().replace("<th>Consultant</th>", "<th>Member</th>"), "leaderboard table"),
+    (perf_page().replace('<table class="tbl pf">', '<div class="tbl pf">').replace("</table>", "</div>"),
+     "leaderboard table"),
+    (perf_page(columns=tuple(c for c in COLUMNS if c != "points")), "no points column"),
+    (perf_page().replace('<td class="c-mini pf-dim" data-l="Docs ready">5</td>', "", 1), "row 2 has 7 cells"),
+    (perf_page().replace('<span class="pf-score">15.8</span>', '<span class="pf-score">high</span>', 1),
+     "score reads 'high'"),
+    (perf_page().replace('<div class="n">715</div>', '<div class="n">lots</div>'), "tile reads 'lots'"),
+    (perf_page(count=8), "counts 8 consultants but 7 rows"),
+    (perf_page().replace("<span>Score</span>", "<span>Rating</span>"), "top performer card shows no score"),
+    (perf_page().replace('<strong class="pf-name">NOSHIN SAMAD</strong>', '<strong class="pf-name"></strong>'),
+     "row 2 shows no consultant"),
+], ids=["no-tiles", "no-consultant-header", "no-table", "no-points-column", "short-row", "score-not-a-figure",
+        "tile-not-a-figure", "count-badge-mismatch", "top-card-without-score", "row-without-name"])
+def test_a_layout_the_parser_does_not_know_raises(html, why):
+    with pytest.raises(parsers.PerformanceLayoutError) as e:
+        parsers.parse_consult_performance(html)
+    assert why in str(e.value)
+
+
+# --------------------------------------------------------------------------- the reader
+
+def test_one_get_of_the_period_link_and_nothing_else(portal):
+    perf_portal(portal)
+    got = asyncio.run(admin_client.read_consult_performance("month"))
+    assert got["tiles"]["Consultancies done"] == "715"
+    got = asyncio.run(admin_client.read_consult_performance("today"))
+    assert got["top"]["name"] == "FAHMID KAISAR"
+    assert portal.asked == [("GET", MONTH_KEY), ("GET", TODAY_KEY)]           # never the form, no other page
+    with pytest.raises(ValueError):
+        asyncio.run(admin_client.read_consult_performance("custom"))
+    assert len(portal.asked) == 2
+
+
+def test_a_page_that_shows_another_period_is_refused(portal):
+    # The page shows This Month for a period it does not take: never labelled "today".
+    portal.pages[TODAY_KEY] = perf_page()
+    with pytest.raises(PortalUnavailable) as e:
+        asyncio.run(admin_client.read_consult_performance("today"))
+    assert "shows 'This Month' instead of 'Today'" in e.value.reason
+    portal.pages[TODAY_KEY] = today_page(period="month")                        # the open tab disagrees
+    with pytest.raises(PortalUnavailable):
+        asyncio.run(admin_client.read_consult_performance("today"))
+
+
+def test_an_unknown_layout_is_portal_unavailable_with_its_reason(portal):
+    portal.pages[MONTH_KEY] = perf_page(tiles=())
+    with pytest.raises(PortalUnavailable) as e:
+        asyncio.run(admin_client.read_consult_performance("month"))
+    assert e.value.reason.startswith("consult_performance.php: its tiles") and "layout not recognised" in e.value.reason
+
+
+# --------------------------------------------------------------------------- the reply
+
+def test_this_month_reply_shows_only_the_pages_data_in_house_style(portal):
+    perf_portal(portal)
+    chat, _ = run(telegram_bot.performance_month_command, "/performance_month", [])
+    assert len(chat) == 1 and chat[0].edits == 1 and chat[0].parse_mode == "Markdown"   # the "⏳" note became it
+    text = report_of(chat)
+    lines = text.splitlines()
+    assert lines[:3] == ["📈 *Consultant Performance — This Month*", "📅 Showing *This Month* · 01 Sep – 30 Sep 2026",
+                         performance.RULE]
+    assert lines[3:7] == ["🎧 *Consultancies done:* `715`", "📂 *Files opened:* `108`",
+                          "🎯 *Conversion (file open):* `15%`", "📋 *Docs ready:* `8`"]
+    assert ("🏆 *Top performer · This Month:* SUMONA HALDER\n"
+            "   Score `17.9` · Conversion `18%` · Files opened `26` · Consultancies `146`") in text
+    people = blocks(text)
+    assert list(people) == [r["name"] for r in MONTH_ROWS]
+    assert people["SUMONA HALDER"] == ["*1. SUMONA HALDER* 🏆 Top", "├ Score `17.9` · Conversion `18%`",
+                                       "├ Files Opened `26` · Consultancies `146`", "└ Points `148` · Docs Ready `1`"]
+    assert people["NOSHIN SAMAD"][-1] == "└ Points `149.5` · Docs Ready `5`"
+    assert people["Owner"][0] == "*7. Owner*"
+    assert "🏅 *Leaderboard* (7 consultants)" in text
+    assert f"ℹ️ *Score:* {SCORE_TIP}" in text and f"ℹ️ *Points:* {POINTS_TIP}" in text
+    assert lines[-1] == ("🔗 Read live just now, read-only, from the portal's Consultant Performance page "
+                         "(consult\\_performance.php?period=month). Sorted by score, highest first.")
+    assert "⚠️" not in text                                                     # the page agrees with itself
+    # Nothing of the old self-counted report.
+    for gone in ("Consultation Requests", "Payments Verified", "By Person", "Received", "৳", "Last updated by"):
+        assert gone not in text
+    assert portal.asked == [("GET", MONTH_KEY)]
+
+
+def test_today_reply(portal):
     perf_portal(portal)
     chat, _ = run(telegram_bot.performance_today_command, "/performance_today", [])
     text = report_of(chat)
-    assert text.startswith("📈 *Team Performance — Today, 28 September 2026*")
-    for line in ("• *Received:* `8`", "• *Done:* `4` (3 Consulted, 1 File Opened)",
-                 "• *Still New:* `2` | *No Answer:* `1` | *Wrong Number:* `1`",
-                 "• *Students Verified:* `3`", "• *Total:* `৳ 40,000.00 BDT` (verified income)"):
-        assert line in text, line
-    people = blocks(text)
-    # Sorted by activity (done + follow-ups + payments verified), then by requests assigned.
-    assert list(people) == ["Mahira Janan", "Fahmid Kaisar", "Arshia Janan", "Sumona Halder"]
-    assert people["Mahira Janan"] == ["├ ✅ Consultations done: `0`",
-                                       "├ 📵 Follow-ups: No Answer `0` · Wrong Number `1`",
-                                       "├ 📋 Requests assigned: `3`",
-                                       "└ 💳 Payments verified: `2` (৳ 32,000.00 BDT)"]
-    assert people["Fahmid Kaisar"] == ["├ ✅ Consultations done: `1` (0 Consulted, 1 File Opened)",
-                                      "├ 📵 Follow-ups: No Answer `1` · Wrong Number `0`",
-                                      "├ 📋 Requests assigned: `2`", "└ 💳 Payments verified: `0`"]
-    assert people["Arshia Janan"][0] == "├ ✅ Consultations done: `2`"
-    assert people["Arshia Janan"][2] == "├ 📋 Requests assigned: `1`"
-    assert people["Sumona Halder"][-1] == "└ 💳 Payments verified: `1` (৳ 8,000.00 BDT)"
-    # A request nobody's name is on is said so, never credited, and no "Unassigned" person.
-    assert "• Done with no name on the portal: `1`" in text
-    assert "• Requests assigned to no consultant: `1`" in text and "Unassigned" not in text
-    assert "MAHIRA JANAN" not in text                       # one person, the name as the portal writes it
-    assert "EARLIER ONE" not in text and "RAHIM" not in text  # no student names in the report
-    # One read of the day, and every page of students.php once; nothing but GETs.
-    assert consult_reads(portal.asked) == [range_key(TODAY_ISO, TODAY_ISO)]
-    assert student_reads(portal.asked) == ["students.php", "students.php?pg=2"]
-    assert all(method == "GET" for method, _ in portal.asked)
-    assert len(chat) == 1 and chat[0].edits == 1              # the ⏳ message became the report
-    assert "all 10 students of the student list" in text
+    assert text.startswith("📈 *Consultant Performance — Today*\n📅 Showing *Today* · 28 Sep – 28 Sep 2026\n")
+    assert "🎧 *Consultancies done:* `3`" in text and "🎯 *Conversion (file open):* `33%`" in text
+    assert "🏆 *Top performer · Today:* FAHMID KAISAR" in text
+    assert list(blocks(text)) == ["FAHMID KAISAR", "SUMONA HALDER", "MAHIRA JANAN"]
+    assert "(consult\\_performance.php?period=today)" in text and "⚠️" not in text
+    assert portal.asked == [("GET", TODAY_KEY)]
 
 
-def test_the_waiting_message_says_what_is_read(portal, monkeypatch):
+def test_the_waiting_message_names_the_page(portal):
     perf_portal(portal)
     seen = []
-    real = performance.build_performance_report
 
-    async def spy(kind, today=None):
-        seen.append(kind)
-        return await real(kind, today)
-    monkeypatch.setattr(performance, "build_performance_report", spy)
-    update, context, chat = fake_update("/perf_today", [])
-    status = []
-    original = update.message.reply_text
-
-    async def reply_text(text, parse_mode=None, **kw):
-        status.append(text)
-        return await original(text, parse_mode=parse_mode, **kw)
-    update.message.reply_text = reply_text
-    asyncio.run(telegram_bot.performance_today_command(update, context))
-    assert seen == ["today"] and status[0].startswith("⏳ _Reading today's team performance live from the portal")
+    class Watch(Message):
+        async def reply_text(self, text, parse_mode=None, **kwargs):
+            seen.append(text)
+            return await super().reply_text(text, parse_mode=parse_mode, **kwargs)
+    update, context, chat = fake_update("/performance_month", [])
+    update.message = Watch(chat)
+    asyncio.run(telegram_bot.performance_month_command(update, context))
+    assert seen[0] == "⏳ _Reading the portal's Consultant Performance page (This Month) live..._"
 
 
-# --------------------------------------------------------------------------- this month
-
-def month_page():
-    """The month's requests under the date filter, one of them in a status the portal has its own
-    tab for besides the five known ones ("Rescheduled")."""
-    rows = (consult_row("M1", "Consulted", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),
-            consult_row("M2", "No Answer", "20 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),
-            consult_row("M3", "Consulted", "12 Sep 2026", by="Fahmid Kaisar", consultant="Fahmid Kaisar"),
-            consult_row("M4", "Rescheduled", "05 Sep 2026", by="Fahmid Kaisar", consultant="Fahmid Kaisar"),
-            consult_row("M5", "New", "01 Sep 2026", consultant="Sumona Halder"))
-    tab = (f'<a class="st-rescheduled" href="?status=rescheduled&from={MONTH_FIRST}&to={TODAY_ISO}">'
-           '<span class="dot"></span>Rescheduled <span class="n">1</span></a>')
-    return range_page(MONTH_FIRST, TODAY_ISO, *rows).replace("</nav>", tab + "</nav>")
-
-
-def test_the_month_is_the_first_to_today_and_stamps_are_read_once_for_it(portal):
-    portal.pages.update(student_pages())
-    portal.pages[range_key(MONTH_FIRST, TODAY_ISO)] = month_page()
-    chat, _ = run(telegram_bot.performance_month_command, "/performance_month", [])
-    text = report_of(chat)
-    assert text.startswith("📈 *Team Performance — This Month, 01–28 September 2026*")
-    assert "• *Received:* `5`" in text and "• *Other statuses:* Rescheduled `1`" in text
-    # 28 Sep (three), 27 Sep, 12 Sep and 1 Sep; never 28 Aug, "30 Sep" (last year's: still to come)
-    # or the "10 Sep" of a student who applied on 20 Sep (last year's too).
-    assert "• *Students Verified:* `6`" in text
-    assert "• *Total:* `৳ 85,000.00 BDT` (verified income)" in text
-    people = blocks(text)
-    assert people["Fahmid Kaisar"][-1] == "└ 💳 Payments verified: `1` (৳ 5,000.00 BDT)"
-    assert "├ ✏️ Other status updates: Rescheduled `1`" in people["Fahmid Kaisar"]
-    assert people["Owner"][-1] == "└ 💳 Payments verified: `1` (৳ 20,000.00 BDT)"
-    assert people["MAHIRA JANAN"][-1] == "└ 💳 Payments verified: `3` (৳ 52,000.00 BDT)"
-    assert people["Arshia Janan"][:2] == ["├ ✅ Consultations done: `1`",
-                                            "├ 📵 Follow-ups: No Answer `1` · Wrong Number `0`"]
-    # The window's own date filter once, and every page of students.php once for the whole month.
-    assert consult_reads(portal.asked) == [range_key(MONTH_FIRST, TODAY_ISO)]
-    assert student_reads(portal.asked) == ["students.php", "students.php?pg=2"]
-
-
-def test_the_verified_window_reader_counts_each_student_once_on_their_stamps_day(portal):
-    portal.pages.update(student_pages())
-    got = asyncio.run(admin_client.read_verified_window(date(2026, 9, 1), date(2026, 9, 28)))
-    assert got["students"] == 10
-    assert sorted((v["uid"], v["day"].isoformat(), v["verified_by"]) for v in got["verified"]) == [
-        ("300", "2026-09-28", "MAHIRA JANAN"), ("301", "2026-09-01", "FAHMID KAISAR"),
-        ("302", "2026-09-12", "Owner"), ("910", "2026-09-27", "MAHIRA JANAN"),
-        ("916", "2026-09-28", "SUMONA HALDER"), ("917", "2026-09-28", "MAHIRA JANAN")]
-    # A stamp with its own year is that year's.
-    students = [{"verified_stamp": "12 Sep 2025, 10:00", "applied_on": "1 Sep 2025, 10:00", "uid": "1"},
-                {"verified_stamp": "12 Sep, 10:00", "applied_on": "1 Sep 2026, 10:00", "uid": "2"}]
-    assert [v["uid"] for v in parsers.verified_between(students, date(2026, 9, 1), date(2026, 9, 28))] == ["2"]
-    with pytest.raises(ValueError):
-        asyncio.run(admin_client.read_verified_window(date(2026, 9, 28), date(2026, 9, 1)))
-
-
-def test_a_window_a_year_back_is_not_available_for_payments(portal):
-    portal.pages.update(student_pages())
-    first, last = date(2025, 9, 1), date(2025, 9, 28)
-    portal.pages[range_key(first, last)] = range_page(first.isoformat(), last.isoformat())
-    reads = asyncio.run(performance.read_performance(first, last, TODAY))
-    text = performance.format_performance_report("month", first, last, reads)
-    assert "• ℹ️ Payments verified: not available (the portal writes verification times without a year" in text
-    assert "*Students Verified:*" not in text and student_reads(portal.asked) == []
-    assert "• *Received:* `0`" in text                                 # a real 0: the portal's own empty list
-
-
-# --------------------------------------------------------------------------- more requests than the list shows
-
-def cut_month(changed=False, r3="No Answer"):
-    """The month's requests, 10 in all, of which the list shows the newest 6 (down into 15 Sep); the
-    days from 1 Sep to 15 Sep read on their own hold the other 5 (6 when the list `changed`; `r3`:
-    the status one of them has by the time they are read)."""
-    first_rows = (consult_row("K1", "Consulted", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),
-                  consult_row("K2", "Consulted", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),
-                  consult_row("K3", "New", "28 Sep 2026", consultant="Fahmid Kaisar"),
-                  consult_row("K4", "Consulted", "20 Sep 2026", by="Fahmid Kaisar", consultant="Fahmid Kaisar"),
-                  consult_row("K5", "No Answer", "20 Sep 2026", by="Fahmid Kaisar", consultant="Fahmid Kaisar"),
-                  consult_row("C1", "Consulted", "15 Sep 2026", by="Firoza Ara Shampa",
-                              consultant="Firoza Ara Shampa"))
-    counts = {"All": 10, "New": 2, "No Answer": 2, "Wrong Number": 0, "Consulted": 6, "File Opened": 0}
-    rest_rows = (consult_row("C1", "Consulted", "15 Sep 2026", by="Firoza Ara Shampa",
-                             consultant="Firoza Ara Shampa"),
-                 consult_row("C2", "New", "15 Sep 2026", consultant="Firoza Ara Shampa"),
-                 consult_row("R1", "Consulted", "03 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),
-                 consult_row("R2", "Consulted", "03 Sep 2026", by="Firoza Ara Shampa",
-                             consultant="Firoza Ara Shampa"),
-                 consult_row("R3", r3, "03 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"))
-    if changed:                                   # a request came in for 3 Sep between the two reads
-        rest_rows += (consult_row("R4", "Consulted", "03 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),)
-    return {range_key(MONTH_FIRST, TODAY_ISO): range_page(MONTH_FIRST, TODAY_ISO, *first_rows, counts=counts),
-            range_key(MONTH_FIRST, "2026-09-15"): range_page(MONTH_FIRST, "2026-09-15", *rest_rows)}
-
-
-def test_a_month_longer_than_the_list_is_read_in_parts_and_never_counted_twice(portal):
-    portal.pages.update(student_pages())
-    portal.pages.update(cut_month())
-    got = asyncio.run(admin_client.read_consultation_range(date(2026, 9, 1), date(2026, 9, 28)))
-    assert got["counts"]["All"] == 10 and len(got["rows"]) == 10 and got["complete"] and got["reads"] == 2
-    assert [r["name"] for r in got["rows"]] == ["K1", "K2", "K3", "K4", "K5", "C1", "C2", "R1", "R2", "R3"]
-    portal.asked.clear()
+def test_where_the_page_disagrees_with_itself_it_is_said_never_corrected(portal):
+    rows = list(MONTH_ROWS)
+    rows[0] = dict(rows[0], score="17.8")                                       # the card says 17.9
+    tiles = (("Consultancies done", "720"),) + MONTH_TILES[1:]                   # the rows add up to 715
+    portal.pages[MONTH_KEY] = perf_page(rows=rows, tiles=tiles)
     text = report_of(run(telegram_bot.performance_month_command, "/performance_month", [])[0])
-    assert "• *Received:* `10`" in text and "• *Done:* `6` (6 Consulted, 0 File Opened)" in text
-    people = blocks(text)
-    assert people["Arshia Janan"][:3] == ["├ ✅ Consultations done: `3`",
-                                            "├ 📵 Follow-ups: No Answer `1` · Wrong Number `0`",
-                                            "├ 📋 Requests assigned: `4`"]
-    # The 15 Sep request the first page showed is counted once, from the read of 1-15 Sep.
-    assert people["Firoza Ara Shampa"][:3] == ["├ ✅ Consultations done: `2`",
-                                                "├ 📵 Follow-ups: No Answer `0` · Wrong Number `0`",
-                                                "├ 📋 Requests assigned: `3`"]
-    assert consult_reads(portal.asked) == [range_key(MONTH_FIRST, TODAY_ISO), range_key(MONTH_FIRST, "2026-09-15")]
+    assert "⚠️ The top performer card and the leaderboard's top row differ on: score." in text
+    assert "⚠️ The leaderboard's Consultancies add up to 715, the Consultancies done tile says 720." in text
+    assert "🎧 *Consultancies done:* `720`" in text and "├ Score `17.8`" in text  # both shown as the portal has them
 
 
-def test_parts_that_do_not_add_up_are_read_again_then_said_honestly(portal):
-    portal.pages.update(student_pages())
-    portal.pages.update(cut_month(changed=True))                       # 5 kept + 6 is not the month's 10
-    text = report_of(run(telegram_bot.performance_month_command, "/performance_month", [])[0])
-    assert "• ❌ Consultations: couldn't read the portal: consult\\_requests.php counts 10 requests for " \
-           "01 Sep 2026 – 28 Sep 2026, but read in parts they are 11 (the list changed while it was read)." in text
-    assert len(consult_reads(portal.asked)) == 4                        # read once more before giving up
-    assert "*Received:*" not in text and "Consultations done" not in text
-    assert "• *Students Verified:* `6`" in text                         # the part that was read is still shown
+@pytest.mark.parametrize("kw, said", [
+    ({"top": ("NOSHIN SAMAD",) + MONTH_TOP[1:]},
+     "⚠️ The top performer card names NOSHIN SAMAD, the leaderboard crowns SUMONA HALDER."),
+    ({"top": None}, "⚠️ The page shows no top performer card, though its leaderboard lists 7 consultants."),
+    ({"rows": (), "tiles": (("Consultancies done", "0"),)},
+     "⚠️ The page shows a top performer card but no one on its leaderboard."),
+])
+def test_the_top_card_and_the_leaderboard_are_checked_against_each_other(kw, said):
+    text = performance.format_consult_performance("month", parsers.parse_consult_performance(perf_page(**kw)), TODAY)
+    assert said in text
 
 
-def test_a_single_day_longer_than_the_list_keeps_its_own_counts(portal):
-    portal.pages.update(student_pages())
-    rows = [consult_row(f"S{i}", "Consulted", "28 Sep 2026", by="Sumona Halder", consultant="Sumona Halder")
-            for i in range(6)]
-    counts = {"All": 9, "New": 0, "No Answer": 0, "Wrong Number": 0, "Consulted": 9, "File Opened": 0}
-    portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = range_page(TODAY_ISO, TODAY_ISO, *rows, counts=counts)
+def test_a_range_that_is_not_today_is_said(portal):
+    portal.pages[TODAY_KEY] = today_page(dates="27 Sep – 27 Sep 2026")
     text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
-    assert "• *Received:* `9`" in text and "• *Done:* `9` (9 Consulted, 0 File Opened)" in text
-    assert "⚠️ _The portal lists 6 of the 9 requests (one day holds more than its list shows)" in text
-    assert blocks(text)["Sumona Halder"][0] == "├ ✅ Consultations done: `6`"
+    assert ("⚠️ The page's range is 27 Sep – 27 Sep 2026, but today in Dhaka is 28 Sep 2026: the figures are "
+            "the portal's, for the range it shows.") in text
+    # This month may end today or on the month's last day, as the page shows it.
+    for dates in ("01 Sep – 28 Sep 2026", "01 Sep – 30 Sep 2026"):
+        page = parsers.parse_consult_performance(perf_page(dates=dates))
+        assert "⚠️" not in performance.format_consult_performance("month", page, TODAY)
+    page = parsers.parse_consult_performance(perf_page(dates="01 Aug – 31 Aug 2026"))
+    assert "⚠️ The page's range is 01 Aug – 31 Aug 2026" in performance.format_consult_performance("month", page, TODAY)
 
 
-# --------------------------------------------------------------------------- a part that cannot be read
-
-def test_a_failed_consultation_read_still_shows_the_verifications_and_says_so(portal):
-    portal.pages.update(student_pages())                                # no consult_requests.php page: HTTP 404
-    chat, _ = run(telegram_bot.performance_today_command, "/performance_today", [])
-    text = report_of(chat)
-    assert "• ❌ Consultations: couldn't read the portal: consult\\_requests.php: the portal answered HTTP 404." in text
-    assert "*Received:*" not in text and "Consultations done" not in text and "Requests assigned" not in text
-    assert "_Consultation figures per person: not available (the consultation requests could not be read)._" in text
-    assert "• *Students Verified:* `3`" in text and "• *Total:* `৳ 40,000.00 BDT` (verified income)" in text
-    people = blocks(text)                                               # the names as the stamps write them
-    assert people == {"MAHIRA JANAN": ["└ 💳 Payments verified: `2` (৳ 32,000.00 BDT)"],
-                      "SUMONA HALDER": ["└ 💳 Payments verified: `1` (৳ 8,000.00 BDT)"]}
-
-
-def test_a_failed_student_read_still_shows_the_consultations_and_says_so(portal):
-    portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = range_page(TODAY_ISO, TODAY_ISO, *TODAY_ROWS)
-    portal.pages["students.php"] = page(row(1, 1, "A"), row(2, 2, "B"))   # no stamp on any row: layout unknown
-    text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
-    assert "• ❌ Payments verified: couldn't read the portal: students.php: 2 student rows but no " \
-           "'Payment verified by' line on any of them (layout not recognised)." in text
-    assert "*Students Verified:*" not in text and "💳" not in text
-    assert "• *Received:* `8`" in text and blocks(text)["Arshia Janan"][0] == "├ ✅ Consultations done: `2`"
-
-
-def test_requests_the_consultant_column_assigns_to_nobody_are_counted_as_such(portal):
-    # Early in the day every new request may still be "—": the column was read, and nobody is
-    # assigned to them. That is a count, not a column that could not be read.
-    portal.pages.update(student_pages())
-    rows = [consult_row(f"S{i}", "Consulted", "28 Sep 2026", by="Arshia Janan", consultant="—") for i in range(3)]
-    portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = range_page(TODAY_ISO, TODAY_ISO, *rows)
-    text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
-    assert "• Requests assigned to no consultant: `3`" in text
-    assert "not available" not in text and "Unassigned" not in text
-    assert blocks(text)["Arshia Janan"] == ["├ ✅ Consultations done: `3`",
-                                              "├ 📵 Follow-ups: No Answer `0` · Wrong Number `0`",
-                                              "├ 📋 Requests assigned: `0`",
-                                              "└ 💳 Payments verified: `0`"]
-    assert "assigned by its Consultant" in text
-
-
-def test_a_page_without_a_consultant_column_says_assigned_is_not_available(portal):
-    portal.pages.update(student_pages())
-    rows = [consult_row(f"S{i}", "Consulted", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan")
-            for i in range(2)]
-    html = range_page(TODAY_ISO, TODAY_ISO, *rows).replace("<th>Consultant</th>", "<th>Owner</th>")
-    portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = html
-    got = asyncio.run(admin_client.read_consultation_range(TODAY, TODAY))
-    assert got["consultant_column"] is False and len(got["rows"]) == 2
-    text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
-    assert "• Requests assigned: not available (the consultation page shows no Consultant column)" in text
-    assert "📋" not in text and "assigned to no consultant" not in text and "assigned by its Consultant" not in text
-    assert blocks(text)["Arshia Janan"][0] == "├ ✅ Consultations done: `2`"
-    columns = parsers.consultation_view(html)["columns"]
-    assert "consultant" not in columns and {"name", "status", "received"} <= set(columns)
-    assert "consultant" in parsers.consultation_view(range_page(TODAY_ISO, TODAY_ISO, *rows))["columns"]
+def test_a_scope_note_is_shown():
+    page = parsers.parse_consult_performance(perf_page(scope="Showing only your own figures"))
+    text = performance.format_consult_performance("month", page, TODAY)
+    assert "ℹ️ The page notes: Showing only your own figures" in text.splitlines()[2]
 
 
 @pytest.mark.parametrize("failure, reason", [
-    ("unreachable", "could not connect to the portal (ConnectError)"),
-    ("refused login", "couldn't log in to the portal: simulated bad credentials"),
+    ("down", "consult_performance.php: could not connect to the portal (ConnectError)"),
+    ("timeout", "consult_performance.php: the portal did not answer in time (ReadTimeout)"),
+    ("missing", "consult_performance.php: the portal answered HTTP 404"),
+    ("login", "couldn't log in to the portal: the portal refused the login (wrong username or password?)"),
+    ("layout", "consult_performance.php: its leaderboard table (a header with Consultant and Score) was not found "
+               "(layout not recognised)"),
+    ("period", "consult_performance.php?period=month shows 'Today' instead of 'This Month' (layout not recognised)"),
 ])
-def test_a_portal_that_cannot_be_read_says_so_for_both_parts_never_zero(portal, monkeypatch, failure, reason):
-    perf_portal(portal)
-    if failure == "unreachable":
-        def down(request):
-            raise httpx.ConnectError("unreachable", request=request)
-        monkeypatch.setattr(admin_client, "client", httpx.AsyncClient(transport=httpx.MockTransport(down)))
-    else:
+def test_a_page_that_cannot_be_read_says_so_never_zero(portal, monkeypatch, failure, reason):
+    if failure in ("down", "timeout"):
+        def fail(request):
+            if failure == "down":
+                raise httpx.ConnectError("refused", request=request)
+            raise httpx.ReadTimeout("", request=request)
+        monkeypatch.setattr(admin_client, "client", httpx.AsyncClient(transport=httpx.MockTransport(fail)))
+    elif failure == "login":
         async def refused(*args, **kwargs):
-            return {"success": False, "error": "simulated bad credentials"}
+            return {"success": False, "error": "the portal refused the login (wrong username or password?)"}
         monkeypatch.setattr(admin_client, "is_authenticated", False)
         monkeypatch.setattr(admin_client, "login", refused)
+    elif failure == "layout":
+        portal.pages[MONTH_KEY] = "<html><body><p>Maintenance</p><div class='pf-stat'><div class='n'>0</div>" \
+                                  "<div class='l'>Consultancies done</div></div></body></html>"
+    elif failure == "period":
+        portal.pages[MONTH_KEY] = today_page()
+    chat, _ = run(telegram_bot.performance_month_command, "/performance_month", [])
+    text = report_of(chat)
+    assert text == (f"❌ Couldn't read the portal: {replies.escape_markdown(reason, version=1)}.\n"
+                    "The portal's Consultant Performance page (This Month): not available right now. "
+                    "Please try again in a minute.")
+    assert "`0`" not in text and "Leaderboard" not in text
+
+
+def test_mock_mode_is_no_live_page(portal, monkeypatch):
+    monkeypatch.setattr(admin_client, "mock_mode", True)
     text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
-    assert text.count(reason) == 2
-    assert "• ❌ Consultations: couldn't read the portal:" in text and "• ❌ Payments verified: couldn't read" in text
-    assert "• not available (neither part could be read)" in text and "`0`" not in text
-    # Nothing was read, so the report claims no reading (R22): no "Read live just now" line.
-    assert "Read live" not in text and "date filter" not in text and "Sorted by" not in text
-    assert text.rstrip().endswith("• not available (neither part could be read)")
-
-
-def _reads(consultations=None, verified=None, error=None, problem=None):
-    error = error or PortalUnavailable("could not connect to the portal (ConnectError)", unreachable=True)
-    return performance.Reads(consultations, None if consultations is not None else error,
-                             verified, None if verified is not None or problem else error, problem)
-
-
-def _consults(*rows, **kw):
-    rows = [dict(r) for r in rows]
-    counts = Counter(r["status"] for r in rows)
-    counts["All"] = len(rows)
-    return {"counts": counts, "rows": rows, "complete": True, "reads": 1, **kw}
-
-
-def test_the_last_line_names_only_the_parts_that_were_read():
-    one = {"status": "Consulted", "handled_by": "Arshia Janan", "consultant": "Arshia Janan"}
-    pay = {"verified_by": "SUMONA HALDER", "amount": "8,000.00 BDT", "verified_income": "8,000.00 BDT",
-           "paid": "8,000.00 BDT"}
-    both = performance.format_performance_report("today", TODAY, TODAY,
-                                                 _reads(_consults(one), {"verified": [pay], "students": 330}))
-    assert both.endswith("_Read live just now, read-only: the consultation page's own date filter for the window "
-                         "(statuses as they are now; done and follow-ups by each request's own \"Last updated by\", "
-                         "assigned by its Consultant), and all 330 students of the student list by their own "
-                         "\"Payment verified by\" stamp. Sorted by consultations done + follow-ups + other status "
-                         "updates + payments verified._")
-    only_payments = performance.format_performance_report("today", TODAY, TODAY,
-                                                          _reads(None, {"verified": [pay], "students": 330}))
-    assert only_payments.endswith("_Read live just now, read-only: all 330 students of the student list by their "
-                                  "own \"Payment verified by\" stamp. Sorted by payments verified._")
-    assert "date filter" not in only_payments and "Last updated by" not in only_payments
-    only_requests = performance.format_performance_report("today", TODAY, TODAY, _reads(_consults(one), None))
-    assert only_requests.endswith("_Read live just now, read-only: the consultation page's own date filter for the "
-                                  "window (statuses as they are now; done and follow-ups by each request's own "
-                                  "\"Last updated by\", assigned by its Consultant). Sorted by consultations done + "
-                                  "follow-ups + other status updates._")
-    assert "students of the student list" not in only_requests
-    # A window the stamps cannot answer (a year back): the student list was not read, nor named.
-    year_back = performance.format_performance_report(
-        "month", date(2025, 9, 1), date(2025, 9, 28), _reads(_consults(), None, problem="no year on the stamps"))
-    assert "students of the student list" not in year_back and "date filter for the window" in year_back
-    for text in (both, only_payments, only_requests, year_back):
-        assert parse_legacy_markdown(text)[0], text
-
-
-def test_nobody_named_says_only_what_was_read():
-    no_requests = performance.format_performance_report("today", TODAY, TODAY,
-                                                        _reads(None, {"verified": [], "students": 5}))
-    assert "• Nobody's name is on a payment verification in this window." in no_requests
-    assert "on a request" not in no_requests
-    no_payments = performance.format_performance_report("today", TODAY, TODAY, _reads(_consults(), None))
-    assert "• Nobody's name is on a request in this window." in no_payments
-    assert "payment verification in this window" not in no_payments
-    both = performance.format_performance_report("today", TODAY, TODAY,
-                                                 _reads(_consults(), {"verified": [], "students": 5}))
-    assert "• Nobody's name is on a request or a payment verification in this window." in both
-
-
-# --------------------------------------------------------------------------- the counting rules
-
-def no_verification_today():
-    """students.php with one verification, on another day: today's payments verified are a real 0."""
-    return {"students.php": page(verified(917, 1, "RAHIM UDDIN", "27 Sep, 10:00", by="MAHIRA JANAN",
-                                          applied="20 Sep 2026"))}
-
-
-def test_a_request_still_new_is_nobodys_activity_even_with_a_name_on_it(portal):
-    # A request still New has no outcome: the name on it ("Last updated by", e.g. who assigned it)
-    # is no consultation done, follow-up or other update, and requests assigned are shown, never
-    # counted as activity. So Fahmid (1 done) ranks above Arshia (0 done, 2 assigned).
-    portal.pages.update(no_verification_today())
-    rows = (consult_row("N1", "New", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),
-            consult_row("N2", "New", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),
-            consult_row("D1", "Consulted", "28 Sep 2026", by="Fahmid Kaisar", consultant="—"))
-    portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = range_page(TODAY_ISO, TODAY_ISO, *rows)
-    text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
-    assert "• *Still New:* `2`" in text and "• *Students Verified:* `0`" in text
-    people = blocks(text)
-    assert list(people) == ["Fahmid Kaisar", "Arshia Janan"]
-    assert people["Arshia Janan"] == ["├ ✅ Consultations done: `0`",
-                                        "├ 📵 Follow-ups: No Answer `0` · Wrong Number `0`",
-                                        "├ 📋 Requests assigned: `2`",
-                                        "└ 💳 Payments verified: `0`"]
-    assert "Other status updates" not in text and "no name on the portal" not in text
-    t = performance.tally(parsers.consultation_rows(range_page(TODAY_ISO, TODAY_ISO, *rows)), [])
-    assert [(p.name, p.activity, p.assigned) for p in t.people] == [("Fahmid Kaisar", 1, 0), ("Arshia Janan", 0, 2)]
-
-
-def test_requests_and_payments_no_name_is_on_are_said_never_credited(portal):
-    portal.pages.update(no_verification_today())
-    rows = (consult_row("U1", "No Answer", "28 Sep 2026", consultant="Sumona Halder"),
-            consult_row("U2", "Wrong Number", "28 Sep 2026", consultant="Sumona Halder"),
-            consult_row("U3", "Consulted", "28 Sep 2026", consultant="Sumona Halder"),
-            consult_row("U4", "No Answer", "28 Sep 2026", by="Fahmid Kaisar", consultant="Fahmid Kaisar"))
-    portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = range_page(TODAY_ISO, TODAY_ISO, *rows)
-    text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
-    assert "• Done with no name on the portal: `1`" in text
-    assert "• No Answer / Wrong Number with no name on the portal: `2`" in text
-    people = blocks(text)
-    assert people["Sumona Halder"][:3] == ["├ ✅ Consultations done: `0`",
-                                           "├ 📵 Follow-ups: No Answer `0` · Wrong Number `0`",
-                                           "├ 📋 Requests assigned: `3`"]
-    assert people["Fahmid Kaisar"][1] == "├ 📵 Follow-ups: No Answer `1` · Wrong Number `0`"
-    # Another status nobody's name is on, and a verification with no name on its stamp.
-    other = {"status": "Rescheduled", "handled_by": "", "consultant": "Unassigned"}
-    nameless = {"verified_by": "", "amount": "5,000.00 BDT", "verified_income": "5,000.00 BDT", "paid": "5,000.00 BDT"}
-    named = {"verified_by": "FAHMID KAISAR", "amount": "3,000.00 BDT", "verified_income": "3,000.00 BDT",
-             "paid": "3,000.00 BDT"}
-    text = performance.format_performance_report(
-        "today", TODAY, TODAY, _reads(_consults(other), {"verified": [nameless, named], "students": 9}))
-    assert "• Other status updates with no name on the portal: `1`" in text
-    assert "• Payments verified with no name on the portal: `1`" in text
-    assert "• *Students Verified:* `2`" in text and "• *Total:* `৳ 8,000.00 BDT` (verified income)" in text
-    assert blocks(text) == {"FAHMID KAISAR": ["├ ✅ Consultations done: `0`",
-                                            "├ 📵 Follow-ups: No Answer `0` · Wrong Number `0`",
-                                            "├ 📋 Requests assigned: `0`",
-                                            "└ 💳 Payments verified: `1` (৳ 3,000.00 BDT)"]}
-
-
-def test_each_persons_amount_is_the_verified_income_else_what_was_paid(portal):
-    # Paid 8,160 but verified income 8,000: the income counts, per person and in the total (as the
-    # daily brief adds them); a row with no income shown counts what was paid.
-    portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = range_page(TODAY_ISO, TODAY_ISO)
-    portal.pages["students.php"] = page(
-        row(501, 1, "PAID MORE", hng="HNG-2026-501", by="MAHIRA JANAN", when="28 Sep, 10:00", paid="8,160.00 BDT",
-            method="bKash", income="8,000.00 BDT", applied="27 Sep 2026"),
-        row(502, 2, "PAID ONLY", hng="HNG-2026-502", by="Mahira Janan", when="28 Sep, 11:00", paid="5,000.00 BDT",
-            method="Cash", applied="27 Sep 2026"))
-    text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
-    assert "• *Students Verified:* `2`" in text
-    assert "• *Total:* `৳ 13,000.00 BDT` (verified income, or the amount paid where no income is shown)" in text
-    assert blocks(text)["Mahira Janan"][-1] == "└ 💳 Payments verified: `2` (৳ 13,000.00 BDT)"
-    assert "13,160" not in text and "8,160" not in text
-    assert "• *Received:* `0`" in text and "• Nobody" not in text
-
-
-# --------------------------------------------------------------------------- the range reader's guards
-
-def test_a_window_the_page_did_not_filter_on_is_not_read(portal):
-    rows = (consult_row("A", "Consulted", "20 Sep 2026", by="Arshia Janan"),)
-    # Asked for 1-28 Sep, the page's search form says 1-27 Sep: its tabs count another window.
-    portal.pages[range_key(MONTH_FIRST, TODAY_ISO)] = range_page(MONTH_FIRST, "2026-09-27", *rows)
-    with pytest.raises(PortalUnavailable, match=r"did not apply the date filter for 01 Sep 2026 – 28 Sep 2026"):
-        asyncio.run(admin_client.read_consultation_range(date(2026, 9, 1), TODAY))
-
-
-def test_a_request_from_outside_the_window_is_not_counted(portal):
-    rows = (consult_row("A", "Consulted", "20 Sep 2026", by="Arshia Janan"),
-            consult_row("B", "Consulted", "28 Aug 2026", by="Arshia Janan"))
-    portal.pages[range_key(MONTH_FIRST, TODAY_ISO)] = range_page(MONTH_FIRST, TODAY_ISO, *rows)
-    with pytest.raises(PortalUnavailable, match=r"listed 1 request\(s\) from outside it"):
-        asyncio.run(admin_client.read_consultation_range(date(2026, 9, 1), TODAY))
-
-
-def test_statuses_that_do_not_match_the_tabs_are_not_counted(portal):
-    rows = (consult_row("A", "Consulted", "20 Sep 2026", by="Arshia Janan"),
-            consult_row("B", "No Answer", "12 Sep 2026", by="Arshia Janan"))
-    counts = {"All": 2, "New": 1, "No Answer": 0, "Wrong Number": 0, "Consulted": 1, "File Opened": 0}
-    portal.pages[range_key(MONTH_FIRST, TODAY_ISO)] = range_page(MONTH_FIRST, TODAY_ISO, *rows, counts=counts)
-    with pytest.raises(PortalUnavailable, match=r"do not match its own status counts \(layout not recognised\)"):
-        asyncio.run(admin_client.read_consultation_range(date(2026, 9, 1), TODAY))
-    assert len(consult_reads(portal.asked)) == 1                        # one read: the layout, not a change
-
-
-def test_parts_whose_statuses_do_not_match_the_tabs_are_read_again_then_said_honestly(portal):
-    # The 3 Sep "No Answer" became "Consulted" between the reads: the counts add up, the statuses not.
-    portal.pages.update(cut_month(r3="Consulted"))
-    with pytest.raises(PortalUnavailable, match=r"do not match its own status counts \(the list changed while it was read\)"):
-        asyncio.run(admin_client.read_consultation_range(date(2026, 9, 1), TODAY))
-    assert len(consult_reads(portal.asked)) == 4                        # read once more before giving up
-
-
-def test_a_window_that_needs_too_many_reads_stops_and_says_so(portal):
-    # Each read lists only its newest request (its last day holds more than the list shows), so
-    # 1-20 Sep would take 20 reads: the reader stops at CONSULT_RANGE_MAX_READS.
-    for d in range(1, 21):
-        last = f"2026-09-{d:02d}"
-        counts = {"All": d, "New": 0, "No Answer": 0, "Wrong Number": 0, "Consulted": d, "File Opened": 0}
-        portal.pages[range_key(MONTH_FIRST, last)] = range_page(
-            MONTH_FIRST, last, consult_row(f"D{d}", "Consulted", f"{d:02d} Sep 2026", by="Arshia Janan"),
-            counts=counts)
-    with pytest.raises(PortalUnavailable, match=r"took more than 16 pages"):
-        asyncio.run(admin_client.read_consultation_range(date(2026, 9, 1), date(2026, 9, 20)))
-    assert client_module.CONSULT_RANGE_MAX_READS == 16
-    assert consult_reads(portal.asked) == [range_key(MONTH_FIRST, f"2026-09-{d:02d}") for d in range(20, 4, -1)]
-
-
-def test_a_last_day_longer_than_the_list_keeps_the_earlier_days(portal):
-    # 1-28 Sep holds 10 requests; the list shows 6, all of 28 Sep (which alone holds more), so the
-    # days before it are read on their own: their 2 requests are kept, and 8 of 10 are listed.
-    portal.pages.update(no_verification_today())
-    last_day = [consult_row(f"L{i}", "Consulted", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan")
-                for i in range(6)]
-    counts = {"All": 10, "New": 0, "No Answer": 1, "Wrong Number": 0, "Consulted": 9, "File Opened": 0}
-    portal.pages[range_key(MONTH_FIRST, TODAY_ISO)] = range_page(MONTH_FIRST, TODAY_ISO, *last_day, counts=counts)
-    portal.pages[range_key(MONTH_FIRST, "2026-09-27")] = range_page(
-        MONTH_FIRST, "2026-09-27",
-        consult_row("E1", "Consulted", "20 Sep 2026", by="Fahmid Kaisar", consultant="Fahmid Kaisar"),
-        consult_row("E2", "No Answer", "03 Sep 2026", by="Fahmid Kaisar", consultant="Fahmid Kaisar"))
-    got = asyncio.run(admin_client.read_consultation_range(date(2026, 9, 1), TODAY))
-    assert (len(got["rows"]), got["complete"], got["reads"], got["counts"]["All"]) == (8, False, 2, 10)
-    assert [r["name"] for r in got["rows"]][-2:] == ["E1", "E2"]
-    portal.asked.clear()
-    text = report_of(run(telegram_bot.performance_month_command, "/performance_month", [])[0])
-    assert "• *Received:* `10`" in text
-    assert "⚠️ _The portal lists 8 of the 10 requests (one day holds more than its list shows)" in text
-    people = blocks(text)
-    assert people["Fahmid Kaisar"][:2] == ["├ ✅ Consultations done: `1`",
-                                          "├ 📵 Follow-ups: No Answer `1` · Wrong Number `0`"]
-    assert people["Arshia Janan"][0] == "├ ✅ Consultations done: `6`"
+    assert text.startswith("❌ Couldn't read the portal: the bot is in mock mode") and portal.asked == []
 
 
 # --------------------------------------------------------------------------- Telegram
@@ -619,7 +506,7 @@ class PickySent(Sent):
 
 
 class PickyMessage(Message):
-    """Takes the "⏳" note, but refuses the report's Markdown (as Telegram does for a bad entity)."""
+    """Takes the "⏳" note, but refuses the reply's Markdown (as Telegram does for a bad entity)."""
 
     async def reply_text(self, text, parse_mode=None, **kwargs):
         if parse_mode == "Markdown" and not text.startswith("⏳"):
@@ -627,44 +514,53 @@ class PickyMessage(Message):
         return PickySent(self.chat, text, parse_mode)
 
 
-def test_a_report_whose_markdown_is_refused_is_resent_as_plain_text(portal):
+def test_a_reply_whose_markdown_is_refused_is_resent_as_plain_text(portal):
     perf_portal(portal)
     update, context, chat = fake_update("/performance_today", [])
     update.message = PickyMessage(chat)
     asyncio.run(telegram_bot.performance_today_command(update, context))
     assert len(chat) == 1 and chat[0].parse_mode is None and chat[0].edits == 1
-    assert chat[0].text.startswith("📈 Team Performance — Today, 28 September 2026")
-    assert "• Received: 8" in chat[0].text and "*" not in chat[0].text
+    assert chat[0].text.startswith("📈 Consultant Performance — Today\n📅 Showing Today · 28 Sep – 28 Sep 2026")
+    assert "Consultancies done: 3" in chat[0].text and "*" not in chat[0].text and "`" not in chat[0].text
+    assert "consult_performance.php?period=today" in chat[0].text
 
 
-def test_a_long_report_is_split_under_telegrams_limit(portal):
-    staff = [f"Counsellor Number {i:02d} With A Long Name" for i in range(80)]
-    rows = [consult_row(f"S{i}", "Consulted", "28 Sep 2026", by=name, consultant=name) for i, name in enumerate(staff)]
-    portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = range_page(TODAY_ISO, TODAY_ISO, *rows)
-    portal.pages.update(student_pages())
-    chat, _ = run(telegram_bot.performance_today_command, "/performance_today", [])
+def test_a_long_leaderboard_is_split_under_telegrams_limit(portal):
+    staff = [f"COUNSELLOR NUMBER {i:03d} WITH A LONG NAME" for i in range(1, 121)]
+    rows = [person(i, name, "1", "10%", "1", "10", "10", "0", top=i == 1) for i, name in enumerate(staff, 1)]
+    tiles = (("Consultancies done", "1200"), ("Files opened", "120"), ("Conversion (file open)", "10%"),
+             ("Docs ready", "0"))
+    portal.pages[MONTH_KEY] = perf_page(rows=rows, tiles=tiles, top=(staff[0], "1", "10%", "1", "10"))
+    chat, _ = run(telegram_bot.performance_month_command, "/performance_month", [])
     assert len(chat) > 1 and all(replies.telegram_len(m.text) <= replies.CHUNK_CHARS for m in chat)
     assert chat[0].edits == 1 and all(m.parse_mode == "Markdown" for m in chat)
     text = report_of(chat)
-    assert all(f"*{n}. " in text for n in range(1, 83)) and all(name in text for name in staff)
+    assert all(f"*{n}. {name}*" in text for n, name in enumerate(staff, 1))
     for piece in chat.shown():
         ok, error, rendered, _ = parse_legacy_markdown(piece)
         assert ok, error
-    # No person's block is cut between two messages' Markdown entities.
-    assert all(piece.count("*") % 2 == 0 and piece.count("`") % 2 == 0 for piece in chat.shown())
+    assert "⚠️" not in text                                                     # 120 × 10 = 1200, 120 × 1 = 120
 
 
-def test_every_report_is_valid_legacy_markdown(portal):
+def test_every_reply_is_valid_legacy_markdown(portal):
     perf_portal(portal)
-    portal.pages[range_key(MONTH_FIRST, TODAY_ISO)] = month_page()
     for command in (telegram_bot.performance_today_command, telegram_bot.performance_month_command):
         for piece in run(command, "/x", [])[0].shown():
             ok, error, rendered, _ = parse_legacy_markdown(piece)
             assert ok, error
             assert replies.telegram_len(rendered) <= replies.TELEGRAM_LIMIT
-    for fixed in (telegram_bot.get_commands_cheatsheet_text(),
+    # Portal words with Markdown characters in them stay text.
+    odd = [dict(MONTH_ROWS[0], name="LINA_PARVIN *STAR*")] + list(MONTH_ROWS[1:])
+    page = parsers.parse_consult_performance(perf_page(rows=odd, top=("LINA_PARVIN *STAR*",) + MONTH_TOP[1:],
+                                                       scope="only_yours [beta]"))
+    text = performance.format_consult_performance("month", page, TODAY)
+    ok, error, rendered, _ = parse_legacy_markdown(text)
+    assert ok, error
+    assert "LINA_PARVIN ∗STAR∗" in rendered and "only_yours [beta]" in rendered
+    for fixed in (telegram_bot.get_commands_cheatsheet_text(), performance.waiting_text("month"),
+                  performance.waiting_text("today"),
                   ask.performance_other_reply(ask.performance_route("performance yesterday", TODAY)),
-                  performance.waiting_text("month", date(2026, 9, 1), TODAY)):
+                  ask.performance_other_reply(ask.performance_route("all time performance", TODAY)), ask.CANT_ANSWER):
         assert parse_legacy_markdown(fixed)[0], fixed
 
 
@@ -681,7 +577,7 @@ def test_an_unknown_sender_is_refused_with_their_chat_id(portal):
 
 # --------------------------------------------------------------------------- menu, aliases, cheat-sheet
 
-def test_both_commands_are_in_the_menu_the_handlers_and_the_cheat_sheet(monkeypatch):
+def test_the_menu_the_handlers_and_the_cheat_sheet_name_the_page(monkeypatch):
     menus = []
 
     class App:
@@ -700,8 +596,11 @@ def test_both_commands_are_in_the_menu_the_handlers_and_the_cheat_sheet(monkeypa
     asyncio.run(telegram_bot.post_init(app))
     menu = {c.command: c.description for c in menus[0]}
     assert len(menu) == 13 and list(menu)[-2:] == ["performance_today", "performance_month"]
-    assert "today" in menu["performance_today"] and "this month" in menu["performance_month"]
-    assert all(len(d) <= 256 for d in menu.values())
+    assert menu["performance_today"] == ("Today: the portal's Consultant Performance page: tiles, top performer, "
+                                         "leaderboard")
+    assert menu["performance_month"] == ("This month: the portal's Consultant Performance page: tiles, top "
+                                         "performer, leaderboard")
+    assert all(3 <= len(d) <= 256 for d in menu.values())
 
     monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", "123456:TEST-TOKEN-NOT-REAL")
     monkeypatch.setattr(settings, "ENABLE_SCHEDULED_REPORTS", False)    # no scheduler in tests
@@ -713,48 +612,62 @@ def test_both_commands_are_in_the_menu_the_handlers_and_the_cheat_sheet(monkeypa
     assert by_name["performance"] is telegram_bot.performance_command
 
     sheet = telegram_bot.get_commands_cheatsheet_text()
-    assert "1️⃣1️⃣ `/performance_today`\n└ *Whole team's performance today" in sheet
-    assert "1️⃣2️⃣ `/performance_month`\n└ *Whole team's performance this month (1st → today), per person*" in sheet
-    assert "/performance\\_today" in ask.CANT_ANSWER and "/performance\\_month" in ask.CANT_ANSWER
+    assert ("1️⃣1️⃣ `/performance_today`\n└ *Today: the portal's Consultant Performance page — tiles, top performer, "
+            "leaderboard*") in sheet
+    assert ("1️⃣2️⃣ `/performance_month`\n└ *This month: the portal's Consultant Performance page — tiles, top "
+            "performer, leaderboard*") in sheet
+    assert "consultations & payments verified" not in sheet and "per person" not in sheet
+    assert ("• The portal's Consultant Performance page (tiles, top performer, leaderboard): /performance\\_today · "
+            "/performance\\_month") in ask.CANT_ANSWER
+
+
+def test_the_welcome_names_the_page(portal, monkeypatch):
+    async def no_brain():
+        return {"reachable": False}
+    monkeypatch.setattr(telegram_bot.ollama_client, "check_health", no_brain)
+    text = report_of(run(telegram_bot.start_command, "/start", [])[0])
+    assert "`/performance_today` — Today on the portal's Consultant Performance page: tiles, top performer, leaderboard" in text
+    assert "`/performance_month` — This month on the portal's Consultant Performance page: tiles, top performer, leaderboard" in text
 
 
 @pytest.mark.parametrize("args, expect", [
-    ([], "📈 *Team Performance — Today, 28 September 2026*"),
-    (["today"], "📈 *Team Performance — Today, 28 September 2026*"),
-    (["month"], "📈 *Team Performance — This Month, 01–28 September 2026*"),
-    (["this", "month"], "📈 *Team Performance — This Month, 01–28 September 2026*"),
-    (["last", "week"], "📈 Team performance is read for *today* (/performance\\_today) or for *this month*"),
+    ([], "📈 *Consultant Performance — Today*"),
+    (["today"], "📈 *Consultant Performance — Today*"),
+    (["month"], "📈 *Consultant Performance — This Month*"),
+    (["this", "month"], "📈 *Consultant Performance — This Month*"),
+    (["last", "week"], "📈 /performance\\_today and /performance\\_month show the portal's Consultant Performance page"),
+    (["all", "time"], ", and you asked about all time."),
     (["31", "Sep"], "I couldn't read the date there: 31 sep: September has 30 days"),
 ])
 def test_the_performance_alias_reads_its_words(portal, args, expect):
     perf_portal(portal)
-    portal.pages[range_key(MONTH_FIRST, TODAY_ISO)] = month_page()
     text = report_of(run(telegram_bot.performance_command, "/performance " + " ".join(args), args)[0])
     assert expect in text
-    if "Team Performance —" not in expect:
-        assert portal.asked == []                                       # nothing read for a window it cannot give
+    if "Consultant Performance —" not in expect:
+        assert portal.asked == []                                       # nothing read for a period it cannot give
 
 
 # --------------------------------------------------------------------------- free text
 
 @pytest.mark.parametrize("text, topic", [
-    ("performance today", "today"), ("today's performance", "today"), ("How did the team do today?", "today"),
-    ("team performance", "today"), ("how is the team doing", "today"), ("staff activity today", "today"),
+    ("performance today", "today"), ("today's performance", "today"), ("todays performance", "today"),
+    ("How did the team do today?", "today"), ("team performance", "today"), ("how is the team doing", "today"),
+    ("staff activity today", "today"), ("consultant performance", "today"), ("leaderboard", "today"),
+    ("who is the top performer today", "today"),
     ("this month's performance", "month"), ("monthly performance", "month"), ("performance this month", "month"),
     ("how did the team do this month", "month"), ("performance for September", "month"),
     ("team's performance month to date", "month"), ("performance so far this month", "month"),
+    ("who is the top performer this month", "month"), ("this month's leaderboard", "month"),
     # Written without the apostrophe, as the owner writes ("todays", "inquires").
     ("this months performance", "month"), ("current months performance", "month"),
     ("performance this months", "month"), ("this months team performance", "month"),
     ("this months performance for all", "month"),
     ("performance for the month of September", "month"), ("performance for September 2026", "month"),
     ("performance from 1 Sep to 30 Sep", "month"), ("may I see this month's performance", "month"),
-    # The consultants are the team: their performance today is the team's report.
     ("how are the consultants doing today", "today"), ("consultant performance today", "today"),
-    # The team's own stats, report or summary are its performance (not the dashboard, not the brief).
     ("team stats", "today"), ("staff report", "today"), ("team summary today", "today"),
 ])
-def test_performance_questions_route_to_the_report(text, topic):
+def test_performance_questions_route_to_the_page(text, topic):
     route = ask.classify(text, TODAY)
     assert (route.kind, route.topic) == ("performance", topic), text
 
@@ -769,7 +682,7 @@ def test_performance_questions_route_to_the_report(text, topic):
     ("this month's performance for October", date(2025, 10, 1), date(2025, 10, 31), ""),
     ("performance from 1 Sep to 15 Oct", date(2026, 9, 1), date(2026, 10, 15), ""),
 ])
-def test_another_month_or_year_named_with_this_month_is_never_this_months_report(text, first, last, words):
+def test_another_month_or_year_named_with_this_month_is_never_this_months_page(text, first, last, words):
     route = ask.classify(text, TODAY)
     assert route.kind == "performance" and route.topic == "", text
     if first:
@@ -778,9 +691,17 @@ def test_another_month_or_year_named_with_this_month_is_never_this_months_report
         assert route.window is None and route.words == words, text
 
 
-def test_on_the_first_of_a_month_this_month_is_the_month_and_another_month_is_not(monkeypatch):
-    # On 1 Oct "this month" is one day, 1 Oct: still the month's report, and "the month of
-    # August" is still August, never today's report.
+@pytest.mark.parametrize("text, words", [
+    ("all time performance", "all time"), ("overall performance", "overall"), ("weekly performance", "weekly"),
+    ("yearly performance", "yearly"), ("performance custom range", "custom range"),
+    ("all-time leaderboard", "all-time"), ("best performer ever", "ever"),
+])
+def test_the_pages_other_periods_are_never_todays(text, words):
+    route = ask.classify(text, TODAY)
+    assert (route.kind, route.topic, route.words) == ("performance", "", words), text
+
+
+def test_on_the_first_of_a_month_this_month_is_the_month_and_another_month_is_not():
     first = date(2026, 10, 1)
     assert ask.classify("this months performance", first).topic == "month"
     assert ask.classify("performance this month", first).topic == "month"
@@ -792,8 +713,6 @@ def test_on_the_first_of_a_month_this_month_is_the_month_and_another_month_is_no
 
 
 def test_a_past_facing_range_stays_in_the_order_it_was_written():
-    # On 28 Sep, "1 Sep to 30 Sep" is 1-30 Sep 2026, not 30 Sep 2025 - 1 Sep 2026 (the end alone,
-    # still to come, read as last year's).
     window, problem = ask.date_window("from 1 Sep to 30 Sep", TODAY, forward=False)
     assert problem is None and (window.first, window.last) == (date(2026, 9, 1), date(2026, 9, 30))
     window, _ = ask.date_window("from 25 Sep to 5 Oct", TODAY, forward=False)
@@ -807,21 +726,32 @@ def test_a_past_facing_range_stays_in_the_order_it_was_written():
 @pytest.mark.parametrize("text, what", [
     ("performance yesterday", "day"), ("last month's performance", "window"), ("performance last week", "window"),
     ("how did the team do on 12 Sep", "day"), ("performance over the past 3 months", "words"),
-    ("performance on 31 Sep", "problem"),
+    ("performance on 31 Sep", "problem"), ("performance over the last 2 weeks", "window"),
 ])
-def test_performance_questions_about_other_days_get_no_stand_in_window(text, what):
+def test_performance_questions_about_other_days_get_no_stand_in_period(text, what):
     route = ask.classify(text, TODAY)
     assert route.kind == "performance" and route.topic == "", text
     assert getattr(route, what), text
 
 
+def test_this_week_is_the_pages_this_week_never_today_even_on_a_monday():
+    # 28 Sep 2026 is a Monday: "this week" so far is that one day, still not Today's page.
+    route = ask.classify("performance this week", TODAY)
+    assert (route.kind, route.topic, route.window, route.words) == ("performance", "", None, "this week")
+    route = ask.classify("this week's leaderboard", date(2026, 9, 30))
+    assert route.topic == "" and (route.window.first, route.window.last) == (date(2026, 9, 28), date(2026, 9, 30))
+    assert ask.classify("weekly performance", TODAY).words == "weekly"
+    reply = ask.performance_other_reply(ask.classify("performance this week", TODAY))
+    assert ", and you asked about this week." in reply and "This Week, All Time and a custom range" in reply
+
+
 @pytest.mark.parametrize("text, kind", [
     ("consultations today", "inquiries"), ("how many consultations were done today", "inquiries"),
+    ("consultancies done today", "inquiries"), ("consultations this month", "inquiries"),
     ("consultations handled by Arshia Janan", "inquiries"), ("Total verified students today", "verified"),
     ("summary for today", "report"), ("show pending payments", "pending"), ("any deadlines this week", "calendar"),
     ("applications under review", "window_review"), ("students across all programs", "dashboard"),
     ("the team's deadlines this month", "calendar"), ("performing arts", "unknown"), ("pin the menu", "pin"),
-    # A subject the report does not read keeps its own route, "performance" or "the team" or not.
     ("how is the team doing with pending payments", "pending"),
     ("how did the team do on pending payments this week", "pending"),
     ("academic performance of the March 2027 intake", "intake"),
@@ -829,9 +759,9 @@ def test_performance_questions_about_other_days_get_no_stand_in_window(text, wha
     ("how did the team do on window applications under review", "window_review"),
     ("team performance on passport cross-checks today", "crosscheck"),
     ("how is the team doing with missing documents", "missing"),
-    # Another day's consultations (or verifications) have their own one-day answers.
     ("how did the counsellors do yesterday", "inquiries"),
     ("how did the team do on verifications yesterday", "verified"),
+    ("top universities", "dashboard"),
 ])
 def test_other_questions_keep_their_own_routes(text, kind):
     assert ask.classify(text, TODAY).kind == kind, text
@@ -840,7 +770,6 @@ def test_other_questions_keep_their_own_routes(text, kind):
 def test_the_counsellors_yesterday_is_that_days_consultations():
     route = ask.classify("how did the counsellors do yesterday", TODAY)
     assert (route.kind, route.day) == ("inquiries", date(2026, 9, 27))
-    # Today, or this month, it is the team's report; a span still gets what can be read.
     assert ask.classify("how did the counsellors do today", TODAY).topic == "today"
     assert ask.classify("how did the counsellors do this month", TODAY).topic == "month"
     assert ask.classify("how did the counsellors do last week", TODAY).kind == "performance"
@@ -868,6 +797,7 @@ def recorded(monkeypatch):
     ("performance this month", "performance_month_command"),
     ("this months performance", "performance_month_command"),
     ("current months performance", "performance_month_command"),
+    ("who is the top performer this month", "performance_month_command"),
     ("consultations today", "inquiries_today_command"), ("verified students today", "verified_today_command"),
 ])
 def test_free_text_reaches_the_right_command(portal, recorded, said, command):
@@ -875,23 +805,44 @@ def test_free_text_reaches_the_right_command(portal, recorded, said, command):
     assert recorded == [command]
 
 
+def test_free_text_performance_reads_the_page_live(portal):
+    perf_portal(portal)
+    text = report_of(run(telegram_bot.handle_natural_language_message, "this months performance", None)[0])
+    assert text.startswith("📈 *Consultant Performance — This Month*") and portal.asked == [("GET", MONTH_KEY)]
+
+
 def test_free_text_about_another_day_is_told_what_can_be_read(portal, recorded):
     chat, _ = run(telegram_bot.handle_natural_language_message, "how did the team do yesterday", None)
     assert recorded == [] and portal.asked == []
-    assert chat.shown() == ["📈 Team performance is read for *today* (/performance\\_today) or for *this month*, "
-                            "from its 1st to today (/performance\\_month), and you asked about Sun 27 Sep 2026.\n"
-                            "For one day's consultations or payments, use /inquiries\\_date or /verified\\_date."]
+    assert chat.shown() == [
+        "📈 /performance\\_today and /performance\\_month show the portal's Consultant Performance page for "
+        "*today* and for *this month*, and you asked about Sun 27 Sep 2026.\n"
+        "The page itself (Leads › Performance, consult\\_performance.php) also offers This Week, All Time and a "
+        "custom range: open it on the portal for those."]
 
 
 @pytest.mark.parametrize("said, asked", [
     ("performance for the month of august", "you asked about August 2026 (Sat 01 Aug – Mon 31 Aug 2026)"),
     ("month performance 2025", "you asked about 2025."),
     ("this months performance last year", "you asked about last year."),
+    ("all time performance", "you asked about all time."),
+    ("weekly performance", "you asked about weekly."),
 ])
-def test_free_text_about_another_month_is_never_answered_with_this_months_report(portal, recorded, said, asked):
+def test_free_text_about_another_period_is_never_answered_with_this_months_page(portal, recorded, said, asked):
     chat, _ = run(telegram_bot.handle_natural_language_message, said, None)
     assert recorded == [] and portal.asked == []
     assert len(chat.shown()) == 1 and asked in chat.shown()[0], chat.shown()
+    assert "This Week, All Time and a custom range" in chat.shown()[0]
+
+
+# --------------------------------------------------------------------------- what was removed stays removed
+
+def test_the_self_counted_report_and_its_readers_are_gone():
+    for name in ("tally", "Person", "Tally", "Reads", "read_performance", "window"):
+        assert not hasattr(performance, name), name
+    for name in ("read_consultation_range", "read_verified_window", "ensure_session"):
+        assert not hasattr(client_module.HangeulAdminClient, name), name
+    assert not hasattr(parsers, "verified_between") and not hasattr(client_module, "CONSULT_RANGE_MAX_READS")
 
 
 # --------------------------------------------------------------------------- the staging copy (R24)

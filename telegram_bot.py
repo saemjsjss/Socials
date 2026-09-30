@@ -64,8 +64,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "8️⃣ `/sendmail` — Email a student: ask ID → subject → brief; AI writes it; you approve\n"
         "9️⃣ `/missing` — Progress sheet missing information (KLP / EAP / Bachelor's / Master's)\n"
         "🔟 `/stage` — Student stages: choose program → intake\n"
-        "1️⃣1️⃣ `/performance_today` — Whole team's performance today: consultations & payments verified, per person\n"
-        "1️⃣2️⃣ `/performance_month` — Whole team's performance this month (1st → today), per person\n\n"
+        "1️⃣1️⃣ `/performance_today` — Today on the portal's Consultant Performance page: tiles, top performer, leaderboard\n"
+        "1️⃣2️⃣ `/performance_month` — This month on the portal's Consultant Performance page: tiles, top performer, leaderboard\n\n"
         "💡 *Natural Language Assistant:*\n"
         "You can also ask directly or specify dates:\n"
         "• _'Total consultancy inquires and how many were done today'_\n"
@@ -300,9 +300,9 @@ def get_commands_cheatsheet_text() -> str:
         "🔟 `/stage`\n"
         "└ *Student stages — tap a program, then an intake*\n\n"
         "1️⃣1️⃣ `/performance_today`\n"
-        "└ *Whole team's performance today — consultations & payments verified, per person*\n\n"
+        "└ *Today: the portal's Consultant Performance page — tiles, top performer, leaderboard*\n\n"
         "1️⃣2️⃣ `/performance_month`\n"
-        "└ *Whole team's performance this month (1st → today), per person*\n"
+        "└ *This month: the portal's Consultant Performance page — tiles, top performer, leaderboard*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "💡 *Interactive Date Asking:*\n"
         "Whenever clicking a date command from the menu without arguments, the bot will ask you for the date and automatically process your reply!\n\n"
@@ -692,19 +692,16 @@ async def crosscheck_date_command(update: Update, context: ContextTypes.DEFAULT_
     await crosscheck_command(update, context)
 
 async def _send_performance_report(update: Update, kind: str) -> None:
-    """The whole team's performance for `kind` ("today", or "month": this month's 1st to today),
-    read live (src.bot.performance), as a reply split under Telegram's limit: the "⏳" message
-    becomes its first piece (src.bot.replies.reply_long)."""
+    """The portal's Consultant Performance page for `kind` ("today" or "month"), read live
+    (src.bot.performance: only that page's tiles, top performer and leaderboard), as a reply split
+    under Telegram's limit: the "⏳" message becomes its first piece (src.bot.replies.reply_long)."""
     from src.bot import performance
     from src.bot.brief import esc
     from src.bot.replies import reply_long
-    from src.dates import local_today
     from src.scraper.client import portal_error_reason
-    today = local_today()
-    first, last = performance.window(kind, today)
-    status_msg = await update.message.reply_text(performance.waiting_text(kind, first, last), parse_mode="Markdown")
+    status_msg = await update.message.reply_text(performance.waiting_text(kind), parse_mode="Markdown")
     try:
-        report = await performance.build_performance_report(kind, today)
+        report = await performance.build_performance_report(kind)
     except Exception as e:
         logger.error(f"Error building the {kind} performance report: {type(e).__name__}: {e}")
         report = f"❌ Error building the performance report: {esc(portal_error_reason(e))}"
@@ -712,8 +709,8 @@ async def _send_performance_report(update: Update, kind: str) -> None:
 
 
 async def performance_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menu 12: the whole team's performance today: the consultation requests received today and
-    what became of them, the payments verified, and each staff member's share."""
+    """Menu 12: today on the portal's Consultant Performance page (consult_performance.php?period=today):
+    its tiles, top performer and leaderboard, as the portal shows them."""
     if not is_authorized(update):
         await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{update.effective_chat.id}`",
                                         parse_mode="Markdown")
@@ -722,7 +719,8 @@ async def performance_today_command(update: Update, context: ContextTypes.DEFAUL
 
 
 async def performance_month_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Menu 13: the whole team's performance this month, from its 1st to today (both included)."""
+    """Menu 13: this month on the portal's Consultant Performance page (consult_performance.php?period=month):
+    its tiles, top performer and leaderboard, as the portal shows them."""
     if not is_authorized(update):
         await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{update.effective_chat.id}`",
                                         parse_mode="Markdown")
@@ -731,9 +729,10 @@ async def performance_month_command(update: Update, context: ContextTypes.DEFAUL
 
 
 async def performance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/performance [today | month]: today's report, or this month's when the words say so
-    (src.bot.ask.performance_route, the free-text rule). Any other day or span is said to be
-    unavailable, with the commands that can answer: never a stand-in window."""
+    """/performance [today | month]: the Consultant Performance page for today, or for this month
+    when the words say so (src.bot.ask.performance_route, the free-text rule). Any other day,
+    span or month is told what the commands cover and what the portal page itself offers
+    (This Week, All Time, a custom range): never a stand-in period."""
     if not is_authorized(update):
         await update.message.reply_text(f"⛔ Unauthorized access. Your Chat ID is: `{update.effective_chat.id}`",
                                         parse_mode="Markdown")
@@ -1978,7 +1977,8 @@ async def handle_natural_language_message(update: Update, context: ContextTypes.
     if kind == "pin":
         await pin_command(update, context)
         return
-    # The whole team's performance: today, or this month; another day or span says what can be read.
+    # Performance = the portal's Consultant Performance page, today or this month; another day,
+    # span or month is told what the commands cover and what the page itself offers.
     if kind == "performance":
         if route.topic == "month":
             await performance_month_command(update, context)
@@ -2271,8 +2271,8 @@ async def post_init(application: Application):
         BotCommand("brief", "Run today's full 6:05 PM operational brief now"),
         BotCommand("missing", "Progress sheet missing information (KLP / EAP / Bachelor's / Master's)"),
         BotCommand("stage", "Student stages — choose program → intake"),
-        BotCommand("performance_today", "Whole team's performance today: consultations & payments verified, per person"),
-        BotCommand("performance_month", "Whole team's performance this month (1st → today), per person"),
+        BotCommand("performance_today", "Today: the portal's Consultant Performance page: tiles, top performer, leaderboard"),
+        BotCommand("performance_month", "This month: the portal's Consultant Performance page: tiles, top performer, leaderboard"),
     ]
     try:
         await application.bot.set_my_commands(commands)
