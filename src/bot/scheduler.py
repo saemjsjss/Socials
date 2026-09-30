@@ -369,8 +369,9 @@ FULL_PICTURE_FIRST_MINUTES = 7.5
 async def run_full_picture():
     """The full picture for Supabase (src/cloud/full_picture.py, its own CPU-only process): every
     page of students.php and of students.php?status=pending, the consultation requests of today
-    and yesterday and the all-time counts, the window applications under review, index.php and
-    calendar.php, read (GET only) and published, so Jeannie is complete even on a day nobody
+    and yesterday and the all-time counts, the window applications under review, index.php,
+    calendar.php and the Consultant Performance page for today and this month, read (GET only)
+    and published, so Jeannie is complete even on a day nobody
     asks the bot anything. Nothing at all while publishing is off; skipped in (and just before)
     the quiet windows of the scheduled jobs (18:00-18:10, 08:25-08:40, 09:00-09:10) and while a
     portal sync runs (the process checks again when it starts). It sends nothing to Telegram."""

@@ -22,7 +22,9 @@ and skipped; a partial read deletes nothing. Refuses to start in the quiet windo
 The collect_* functions return records.batch()es and the failed reads' reasons, so the hourly
 "full picture" job reads the same way (collect_students, collect_pending, collect_consultations
 for today and yesterday, collect_totals, collect_window_applications, collect_dashboard,
-collect_calendar), then hands them to src.cloud.handoff.submit("full_picture", ...).
+collect_calendar, and collect_performance: the Consultant Performance page for today and this
+month, which only the hourly job reads, as the page shows only those live periods), then
+publishes them (publish.publish_batches, job "full_picture").
 """
 from __future__ import annotations
 
@@ -287,6 +289,28 @@ async def collect_calendar(client, today: date) -> Tuple[Batches, List[str]]:
     if not ok:
         return [], ["calendar.php: layout not recognised"]
     return [records.batch("calendar_item", "all", records.calendar_items(items), False)], []
+
+
+async def collect_performance(client, periods: Sequence[str] = ("today", "month")) -> Tuple[Batches, List[str]]:
+    """consult_performance.php?period=<period> for each period (one GET each, the page's own period
+    links: client.read_consult_performance, which refuses a page of another period or layout) ->
+    one consultant_performance batch per period, in the page's own window (complete only for a
+    whole read: records.performance_complete). Stops at the first unreachable answer."""
+    out: Batches = []
+    failed: List[str] = []
+    for period in periods:
+        try:
+            page = await client.read_consult_performance(period)
+        except Exception as e:
+            failed.append(f"{records.performance_source(period)}: {_why(e)}")
+            if getattr(e, "unreachable", False):
+                break
+            continue
+        b, why = records.consultant_performance_batch(period, page, records.as_read_at(None))
+        if b is not None:
+            out.append(b)
+        failed += why
+    return out, failed
 
 
 # --------------------------------------------------------------------------- disk collectors

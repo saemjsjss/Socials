@@ -720,19 +720,23 @@ async def _send_performance_report(update: Update, kind: str) -> None:
     (src.bot.performance: only that page's tiles, top performer and leaderboard), as a reply split
     under Telegram's limit between whole records only (performance.message_pieces: a consultant's
     lines never straddle two messages); the "⏳" message becomes the first piece, and a piece whose
-    Markdown Telegram refuses goes as plain text (src.bot.replies.reply_long)."""
+    Markdown Telegram refuses goes as plain text (src.bot.replies.reply_long). After the reply, the
+    page read goes to Supabase as consultant_performance (src.cloud.command_hooks, not awaited)."""
     from src.bot import performance
     from src.bot.brief import esc
     from src.bot.replies import reply_long
+    from src.cloud import command_hooks as cloud
     from src.scraper.client import portal_error_reason
+    reads: Dict[str, Any] = {}
     status_msg = await update.message.reply_text(performance.waiting_text(kind), parse_mode="Markdown")
     try:
-        report = await performance.build_performance_report(kind)
+        report = await performance.build_performance_report(kind, reads=reads)
     except Exception as e:
         logger.error(f"Error building the {kind} performance report: {type(e).__name__}: {e}")
         report = f"❌ Error building the performance report: {esc(portal_error_reason(e))}"
     for i, piece in enumerate(performance.message_pieces(report)):
         await reply_long(update.message, piece, edit=status_msg if i == 0 else None)
+    cloud.publish(reads)                           # after the reply, not awaited (src/cloud/command_hooks.py)
 
 
 async def performance_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

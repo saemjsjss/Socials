@@ -43,7 +43,7 @@ CLOUD_KINDS = (
     "verification", "consultation", "consultation_day", "consultation_totals", "pending_payment",
     "window_application", "dashboard_fact", "calendar_item", "passport_audit", "passport_alert",
     "passport_issue", "doc_verdict", "doc_check", "field_check", "field_correction", "doc_page_text",
-    "report", "report_section", "brief_fact", "notification",
+    "report", "report_section", "brief_fact", "notification", "consultant_performance",
 )
 
 # students.php fields that change without the student changing: the list's row number (every new
@@ -791,6 +791,164 @@ def consultation_totals(totals: Mapping[str, Any], read_at: Any = None) -> Optio
                      + "; ".join(f"{k} {v}" for k, v in totals.items()))
     return make("consultation_totals", "all", "all", {"counts": totals}, text,
                 "consult_requests.php?status=file_opened", read_at)
+
+
+# --------------------------------------------------------------------------- consult_performance.php
+
+PERFORMANCE_KIND = "consultant_performance"
+PERFORMANCE_SUMMARY = "summary"            # the key's last part of a period window's summary record
+# The leaderboard's figures (parsers.parse_consult_performance's keys), in the text form's order,
+# each with the words the text says it by.
+PERFORMANCE_FIGURES = (("score", "score"), ("conversion", "conversion"), ("files_opened", "files opened"),
+                       ("consultancies", "consultancies"), ("points", "points"), ("docs_ready", "docs ready"))
+_TOP_FIGURES = PERFORMANCE_FIGURES[:4]     # the top performer card shows these four
+
+
+def performance_source(period: str) -> str:
+    """The page a period is read from: "consult_performance.php?period=month"."""
+    return f"consult_performance.php?period={period}"
+
+
+def performance_window(page: Mapping[str, Any]) -> Optional[Tuple[str, str]]:
+    """The page's own range ("01 Sep – 30 Sep 2026") as (first, last) ISO days, read the way the
+    reply reads it (src.bot.performance._range_dates); None when the page shows no range or it
+    cannot be read as two days in order. Never a stand-in day (R4)."""
+    from src.bot.performance import _range_dates
+    span = _range_dates(str(page.get("range_text") or ""))
+    if span is None or span[0] > span[1]:
+        return None
+    return span[0].isoformat(), span[1].isoformat()
+
+
+def performance_scope(period: str, window: Tuple[str, str]) -> str:
+    """The unit one complete read of a period covers: "<period>|<first ISO day>|<last ISO day>"."""
+    return f"{period}|{window[0]}|{window[1]}"
+
+
+def _performance_title(period: str, page: Mapping[str, Any]) -> str:
+    """"Today" / "This Month" (the page's own words for the period), else the period the page says."""
+    from src.scraper.client import PERFORMANCE_PERIODS
+    return PERFORMANCE_PERIODS.get(period) or str(page.get("period_label") or period)
+
+
+def _figures_text(values: Mapping[str, Any], figures: Sequence[Tuple[str, str]],
+                  extra: Optional[Mapping[str, Any]] = None) -> str:
+    """"score 17.9, conversion 18%, ..." for the figures that have a value (a blank is left out),
+    then any other column the page showed, by its own header."""
+    parts = [f"{word} {values.get(key)}" for key, word in figures if str(values.get(key) or "").strip()]
+    parts += [f"{label} {v}" for label, v in (extra or {}).items() if str(v or "").strip()]
+    return ", ".join(parts)
+
+
+def consultant_performance(period: str, page: Mapping[str, Any], read_at: Any = None) -> List[Dict[str, Any]]:
+    """kind consultant_performance (added: parsed data no other kind holds), the portal's
+    Consultant Performance page for one period ("today", "month") as
+    client.read_consult_performance returns it (parsers.parse_consult_performance):
+
+      one record per leaderboard row: key "<period>|<first ISO day>|<consultant's name>" ("#2" for
+        a repeated name), data = the row's figures exactly as printed (rank, name, score,
+        conversion, files_opened, consultancies, points, docs_ready; "extra" for another column,
+        by its header) with the period, the page's period words, the range and top (the row's own
+        crown) true or false
+      one summary record: key "<period>|<first ISO day>|summary", data = the tiles, the top
+        performer card, the sort note, the Score and Points help texts, the leaderboard's own
+        count (and its empty-state words, when it shows no one)
+
+    scope "<period>|<first ISO day>|<last ISO day>" and day = the range's last day for all of
+    them; the summary comes first. The portal's "—" for no figure is "" and named in
+    blank_on_portal (R1); a row whose name is a stand-in (Cloudflare's "[email protected]") has
+    no identity and is left out (R11: performance_complete then says the read is not whole).
+    [] when the page's range cannot be read as days: no key can be made without a stand-in (R4)."""
+    window = performance_window(page)
+    if window is None:
+        return []
+    first, last = window
+    scope = performance_scope(period, window)
+    title = _performance_title(period, page)
+    shown = str(page.get("range_text") or "").strip()
+    head = f"Consultant performance, {title} ({shown})"
+    base = {"period": period, "period_label": page.get("period_label") or "", "range": shown,
+            "first_day": first, "last_day": last}
+    source = performance_source(period)
+
+    tiles, blanked = _blank_cells({str(k): v for k, v in dict(page.get("tiles") or {}).items()}, "tiles.")
+    top = page.get("top")
+    top_data = None
+    if isinstance(top, Mapping) and not is_filler(top.get("name")):
+        top_data, more = _blank_cells({k: v for k, v in top.items() if k != "metrics"}, "top.")
+        top_data["metrics"] = [[str(label), "" if is_filler(value) else value]
+                               for label, value in top.get("metrics") or []]
+        blanked += more
+    rows = list(page.get("leaderboard") or [])
+    summary = dict(base, tiles=tiles, top=top_data, sort_note=page.get("sort_note") or "",
+                   score_help=page.get("score_help") or "", points_help=page.get("points_help") or "",
+                   count=page.get("count"))
+    if page.get("empty_text"):
+        summary["empty_text"] = page["empty_text"]
+    listed = page.get("count") if page.get("count") is not None else len(rows)
+    said_tiles = "; ".join(f"{k} {v}" for k, v in tiles.items() if str(v or "").strip())
+    text = _paragraph(
+        _sentence(f"{head}: {said_tiles}" if said_tiles else head),
+        _sentence(f"Top performer: {top_data['name']}"
+                  + (f" — {_figures_text(top_data, _TOP_FIGURES)}" if _figures_text(top_data, _TOP_FIGURES) else ""))
+        if top_data else "",
+        _sentence(f"Leaderboard: {listed} consultant{'s' if listed != 1 else ''}"
+                  + (f"; the page says: {page['empty_text']}" if page.get("empty_text") else "")),
+        _sentence(str(page.get("sort_note"))) if page.get("sort_note") else "",
+        _sentence(f"Score: {page.get('score_help')}") if page.get("score_help") else "",
+        _sentence(f"Points: {page.get('points_help')}") if page.get("points_help") else "")
+    out = [make(PERFORMANCE_KIND, f"{period}|{first}|{PERFORMANCE_SUMMARY}", scope, _mark_blank(summary, blanked),
+                text, source, read_at, day=last)]
+
+    for row in rows:
+        name = str(row.get("name") or "").strip()
+        if not name or is_filler(name):
+            continue
+        figures, blanked = _blank_cells({k: row.get(k, "") for k in ("rank",) + tuple(k for k, _ in PERFORMANCE_FIGURES)})
+        data = dict(base, name=name, top=bool(row.get("top")), **figures)
+        extra = row.get("extra") or {}
+        if extra:
+            extra, more = _blank_cells({str(k): v for k, v in extra.items()}, "extra.")
+            data["extra"], blanked = extra, blanked + more
+        said = _figures_text(figures, PERFORMANCE_FIGURES, extra)
+        out.append(make(PERFORMANCE_KIND, f"{period}|{first}|{name}", scope, _mark_blank(data, blanked),
+                        _sentence(f"{head}: {name}" + (f" — {said}" if said else "")), source, read_at, day=last))
+    return unique_keys(out)
+
+
+def performance_complete(period: str, page: Mapping[str, Any], recs: Sequence[Mapping[str, Any]]) -> Tuple[bool, str]:
+    """Whether a read of the page for `period` may delete the records of its window it no longer
+    shows (p_all_keys) -> (complete, why not). The read must be the page's own for that period
+    (client.read_consult_performance raises for any other page, layout or period, so a page that
+    reached here is layout-recognised), its range must be readable, the leaderboard's own count
+    must be there and equal its rows (R2: parse_consult_performance refuses a count that does not),
+    and every row must have become a record (a stand-in name has none)."""
+    what = performance_source(period)
+    if page.get("period") not in (None, period):
+        return False, f"{what}: the page shows another period (layout not recognised)"
+    if performance_window(page) is None:
+        return False, f"{what}: its range could not be read as days (layout not recognised)"
+    rows = list(page.get("leaderboard") or [])
+    if page.get("count") is None:
+        return False, f"{what}: the leaderboard shows no count to check its rows by"
+    if page.get("count") != len(rows):
+        return False, f"{what}: the leaderboard counts {page.get('count')} but {len(rows)} rows were read"
+    made = sum(1 for r in recs if not str(r.get("key", "")).endswith(f"|{PERFORMANCE_SUMMARY}"))
+    if made != len(rows):
+        return False, f"{what}: {len(rows) - made} leaderboard row(s) show no name to key them by"
+    return True, ""
+
+
+def consultant_performance_batch(period: str, page: Mapping[str, Any],
+                                 read_at: Any = None) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """One read of the page for `period` -> (its batch in its window's scope, complete only for a
+    whole read: performance_complete; the failed reads). (None, [why]) when the range cannot be
+    read, so nothing is published for a window the bot cannot name."""
+    recs = consultant_performance(period, page, read_at)
+    complete, why = performance_complete(period, page, recs)
+    if not recs:                                   # no readable range: performance_complete says so
+        return None, [why]
+    return batch(PERFORMANCE_KIND, recs[0]["scope"], recs, complete), ([] if complete else [why])
 
 
 # --------------------------------------------------------------------------- other portal pages

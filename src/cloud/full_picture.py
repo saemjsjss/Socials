@@ -15,6 +15,8 @@ the only other request), it reads
   window_applications.php?status=under_review   window_application
   index.php                                     dashboard_fact (its tiles and cards)
   calendar.php                                  calendar_item (never complete)
+  consult_performance.php?period=today, month   consultant_performance (per period window: each
+                                                leaderboard row and the page's summary)
 
 with the backfill's own readers (src.cloud.backfill.collect_*), then publishes them in one run
 (publish.publish_batches, job "full_picture"): only what changed is embedded and sent, and only a
@@ -104,7 +106,8 @@ async def collect(client, today: date, may_read: Optional[Callable[[], Optional[
              lambda: backfill.collect_totals(client),
              lambda: backfill.collect_window_applications(client),
              lambda: backfill.collect_dashboard(client),
-             lambda: backfill.collect_calendar(client, today)]
+             lambda: backfill.collect_calendar(client, today),
+             lambda: backfill.collect_performance(client, ("today", "month"))]
     for n, step in enumerate(steps):
         stop = may_read() if may_read is not None else None
         if stop:

@@ -13,7 +13,8 @@ What is pinned here:
   both                  Supabase down, a slow handoff or a bug in the records never changes what the
                         job sends or remembers, and costs one log line; the records are built off
                         the event loop; nothing happens while publishing is off or in mock mode
-  the full picture      the hourly job: every page of spec step 4, GET only, with the right kind,
+  the full picture      the hourly job: every page of spec step 4 and the Consultant Performance page
+                        for today and this month, GET only, with the right kind,
                         scope and complete flag; a partial read deletes nothing; once the portal does
                         not answer the other pages are not tried; nothing is read while publishing
                         is off, in mock mode, in a quiet window or while another publisher runs; its
@@ -480,7 +481,10 @@ def test_nothing_is_built_while_publishing_is_off():
 
 def full_picture_pages():
     from test_freetext import calendar_html, dashboard_page, pending_pages, window_page
+    from test_cloud_performance import MONTH_KEY, TODAY_KEY, month_html, today_html
     return {
+        TODAY_KEY: today_html(),                                        # consult_performance.php?period=today
+        MONTH_KEY: month_html(),                                        # and ?period=month
         "students.php": page(verified(425, 1, "TEST STUDENT ONE", "27 Sep, 17:19", applied="12 Sep 2026"),
                              row(426, 2, "TEST STUDENT TWO"), pg=1, pages=2, total=3),
         "students.php?pg=2": page(row(427, 3, "TEST STUDENT THREE"), pg=2, pages=2, total=3),
@@ -497,7 +501,9 @@ def full_picture_pages():
 FULL_SHAPE = [("student", "all", True), ("verification", None, True), ("pending_payment", "all", True),
               ("consultation", "2026-09-27", True), ("consultation", "2026-09-28", True),
               ("consultation_day", "all", False), ("consultation_totals", "all", True),
-              ("window_application", "all", True), ("dashboard_fact", "all", True), ("calendar_item", "all", False)]
+              ("window_application", "all", True), ("dashboard_fact", "all", True), ("calendar_item", "all", False),
+              ("consultant_performance", "today|2026-09-28|2026-09-28", True),
+              ("consultant_performance", "month|2026-09-01|2026-09-30", True)]
 
 
 def test_the_full_picture_reads_every_page_of_step_4_get_only(portal):
@@ -522,6 +528,8 @@ def test_the_full_picture_publishes_them_in_one_run(cloud, portal, monkeypatch):
     assert cloud.fake.keys("pending_payment") == ["501", "577", "579"]
     assert len(cloud.fake.keys("consultation", "2026-09-28")) == 1 and cloud.fake.keys("consultation_totals") == ["all"]
     assert cloud.fake.keys("window_application") == ["Student 0|Window 0"] and cloud.fake.keys("calendar_item")
+    assert len(cloud.fake.keys("consultant_performance", "today|2026-09-28|2026-09-28")) == 3
+    assert len(cloud.fake.keys("consultant_performance", "month|2026-09-01|2026-09-30")) == 4
     (run,) = cloud.fake.runs.values()
     assert run["job"] == "full_picture" and run["status"] == "ok"
     # A student gone from a later complete read is deleted (and their verification's day emptied);
@@ -548,7 +556,8 @@ def test_a_partial_read_in_the_full_picture_is_never_complete(portal):
     assert failed == ["students.php: students.php: the portal answered HTTP 404",
                       "students.php?status=pending: students.php: the portal answered HTTP 404"]
     assert kinds == ["consultation", "consultation", "consultation_day", "consultation_totals",
-                     "window_application", "dashboard_fact", "calendar_item"]
+                     "window_application", "dashboard_fact", "calendar_item",
+                     "consultant_performance", "consultant_performance"]
 
 
 def test_once_the_portal_does_not_answer_the_other_pages_are_not_tried():
@@ -563,7 +572,9 @@ def test_once_the_portal_does_not_answer_the_other_pages_are_not_tried():
     batches, failed = asyncio.run(full_picture.collect(client, TODAY))
     assert batches == [] and asked == ["students.php"]
     assert failed[0] == "students.php: students.php: the portal did not answer in time (ConnectTimeout)"
-    assert len(failed) == 7 and all("not read: the portal did not answer" in f for f in failed[1:])
+    assert len(failed) == 8 and all("not read: the portal did not answer" in f for f in failed[1:])
+    assert failed[-1] == ("consult_performance.php?period=today: consult_performance.php: not read: "
+                          "the portal did not answer")                    # month is not tried either
 
 
 def test_the_full_picture_reads_nothing_when_it_may_not_run(cloud, portal, monkeypatch, caplog):

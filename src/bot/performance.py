@@ -23,6 +23,10 @@ disagrees with itself (the top card and the leaderboard's crowned row, a tile an
 total, a range that does not end today in Dhaka) a ⚠️ line says so; nothing is corrected. A page
 that cannot be read, or whose layout is not recognised, is said plainly ("Couldn't read the
 portal: ..."), never shown as zeros.
+
+After the reply, the page read is also published to Supabase as kind consultant_performance
+(src.cloud.records.consultant_performance, through src.cloud.command_hooks; nothing while
+publishing is off), and the hourly full picture reads both periods too.
 """
 import calendar
 import logging
@@ -274,11 +278,15 @@ def message_pieces(text: str, limit: Optional[int] = None) -> List[str]:
     return [p for p in pieces if p.strip()]
 
 
-async def build_performance_report(kind: str, today: Optional[date] = None) -> str:
+async def build_performance_report(kind: str, today: Optional[date] = None,
+                                   reads: Optional[Dict[str, Any]] = None) -> str:
     """The reply for /performance_today ("today") or /performance_month ("month"), read live from
     the portal's Consultant Performance page. Never raises: a page that cannot be read, or whose
-    layout is not recognised, gives the stock "Couldn't read the portal" reply (never zeros)."""
+    layout is not recognised, gives the stock "Couldn't read the portal" reply (never zeros).
+    `reads` (a dict, when given) keeps the page read, for src.cloud.command_hooks.publish (a page
+    that was not read keeps nothing)."""
     from src.bot.replies import portal_error_reply
+    from src.cloud import command_hooks as cloud
     from src.dates import local_today
     from src.scraper.client import admin_client, portal_error_reason
     started = time.perf_counter()
@@ -288,6 +296,7 @@ async def build_performance_report(kind: str, today: Optional[date] = None) -> s
     except Exception as e:                           # the portal down, a layout change, a timeout...
         logger.error(f"Consultant performance {kind}: not read ({portal_error_reason(e)})")
         return portal_error_reply(what, e)
+    cloud.seen(reads, performance=(kind, page))      # nothing while publishing is off
     text = format_consult_performance(kind, page, today or local_today())
     logger.info(f"Consultant performance {kind}: read in {time.perf_counter() - started:.1f} s, "
                 f"{len(page['leaderboard'])} leaderboard row(s); {len(text)} characters.")

@@ -362,7 +362,7 @@ def test_the_full_picture_stops_reading_once_a_quiet_window_is_near(portal):
     answers = iter([None, "18:00-18:10 is a quiet window (a scheduled job runs then), less than 5 minutes from now"])
     batches, failed = asyncio.run(full_picture.collect(admin_client, TODAY, lambda: next(answers, "x")))
     assert [b["kind"] for b in batches] == ["student", "verification"]
-    assert failed == ["the full picture's last 6 page read(s): not read (18:00-18:10 is a quiet window (a scheduled "
+    assert failed == ["the full picture's last 7 page read(s): not read (18:00-18:10 is a quiet window (a scheduled "
                       "job runs then), less than 5 minutes from now)"]
     assert {key.split("?")[0] for _, key in portal.asked} == {"students.php"}
 

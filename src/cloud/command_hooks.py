@@ -42,6 +42,11 @@ What seen() keeps, and what it becomes (one handoff per command, job "command"):
                  records.pending_complete: a renamed Payment header reads as nobody pending)
   calendar       ask.calendar_items of calendar.php (layout recognised): calendar_item (never
                  complete: the page shows only this month and the next 45 days)
+  performance    (period, client.read_consult_performance(period)), /performance_today and
+                 /performance_month (their aliases and free-text routes too): consultant_performance
+                 in the page's window (scope "<period>|<first day>|<last day>": one record per
+                 leaderboard row and one summary), complete only for a whole read
+                 (records.performance_complete); a range it cannot read publishes nothing and says why
   cards          cross-check cards audited by telegram_bot._audit_cards (audited() adds each
                  card's full audit result, the form compared, the time and the profile it read):
                  passport_audit (scope all, partial; audits that checked nothing are left out) and
@@ -233,6 +238,12 @@ def build(reads: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
                                  False))
     if reads.get("cards") is not None:
         out += audit_batches(reads["cards"], students or [])
+    if reads.get("performance") is not None:
+        period, page = reads["performance"]
+        b, why = records.consultant_performance_batch(period, page, at.get("performance"))
+        if b is not None:
+            out.append(b)
+        failed += why
     return [b for b in out if b["rows"] or b["complete"]], failed
 
 
