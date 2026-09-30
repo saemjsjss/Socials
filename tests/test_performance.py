@@ -7,10 +7,16 @@ ONCE for the window; each person's consultations done and follow-ups are counted
 "Last updated by", requests assigned from the Consultant column, payments verified from the stamp's
 name (names matched without regard to case); a month whose requests are more than the list shows is
 read again in parts, never double-counted; a yearless stamp that cannot be this year's is never
-counted; a part that cannot be read says so while the other part is still shown (never a 0); the
-reply is split under Telegram's limit and resent as plain text when its Markdown is refused; both
-commands are in the menu and the cheat-sheet; the free-text routes are whole words and do not take
-other routes' questions; and the root staging copy of telegram_bot.py is byte-identical.
+counted; a request still New is nobody's activity; what no name is on is said, never credited; each
+person's amount is the verified income, else what was paid; the range reader refuses a filter not
+echoed, a row from outside the window, statuses that do not match the tabs, and more than
+CONSULT_RANGE_MAX_READS reads; a part that cannot be read says so while the other part is still
+shown (never a 0), and the last line names only what was read; "—" in the Consultant column is a
+count, a missing column "not available"; the reply is split under Telegram's limit and resent as
+plain text when its Markdown is refused; both commands are in the menu and the cheat-sheet; the
+free-text routes are whole words ("this months performance" is this month's), never answer another
+month or year with this month's report, and do not take other routes' questions ("how is the team
+doing with pending payments"); and the root staging copy of telegram_bot.py is byte-identical.
 
 Every portal page is synthetic (laid out like the live pages, Sep 2026); today is 28 Sep 2026 in
 Dhaka. Nothing reaches the network or Telegram.
@@ -20,6 +26,7 @@ Run from the BOT folder:
 """
 import asyncio
 import filecmp
+from collections import Counter
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,8 +41,8 @@ from test_foundation import (  # noqa: F401  (the portal fixture is used by name
 )
 from src.bot import ask, performance, replies, telegram_bot
 from src.config import settings
-from src.scraper import parsers
-from src.scraper.client import admin_client
+from src.scraper import client as client_module, parsers
+from src.scraper.client import PortalUnavailable, admin_client
 
 BOT_ROOT = Path(__file__).resolve().parent.parent
 MONTH_FIRST = "2026-09-01"
@@ -242,9 +249,10 @@ def test_a_window_a_year_back_is_not_available_for_payments(portal):
 
 # --------------------------------------------------------------------------- more requests than the list shows
 
-def cut_month(changed=False):
+def cut_month(changed=False, r3="No Answer"):
     """The month's requests, 10 in all, of which the list shows the newest 6 (down into 15 Sep); the
-    days from 1 Sep to 15 Sep read on their own hold the other 5 (6 when the list `changed`)."""
+    days from 1 Sep to 15 Sep read on their own hold the other 5 (6 when the list `changed`; `r3`:
+    the status one of them has by the time they are read)."""
     first_rows = (consult_row("K1", "Consulted", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),
                   consult_row("K2", "Consulted", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),
                   consult_row("K3", "New", "28 Sep 2026", consultant="Fahmid Kaisar"),
@@ -259,7 +267,7 @@ def cut_month(changed=False):
                  consult_row("R1", "Consulted", "03 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),
                  consult_row("R2", "Consulted", "03 Sep 2026", by="Firoza Ara Shampa",
                              consultant="Firoza Ara Shampa"),
-                 consult_row("R3", "No Answer", "03 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"))
+                 consult_row("R3", r3, "03 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"))
     if changed:                                   # a request came in for 3 Sep between the two reads
         rest_rows += (consult_row("R4", "Consulted", "03 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),)
     return {range_key(MONTH_FIRST, TODAY_ISO): range_page(MONTH_FIRST, TODAY_ISO, *first_rows, counts=counts),
@@ -334,16 +342,37 @@ def test_a_failed_student_read_still_shows_the_consultations_and_says_so(portal)
     assert "• *Received:* `8`" in text and blocks(text)["Arshia Janan"][0] == "├ ✅ Consultations done: `2`"
 
 
-def test_a_consultant_column_that_names_nobody_is_not_available_not_zero(portal):
+def test_requests_the_consultant_column_assigns_to_nobody_are_counted_as_such(portal):
+    # Early in the day every new request may still be "—": the column was read, and nobody is
+    # assigned to them. That is a count, not a column that could not be read.
     portal.pages.update(student_pages())
     rows = [consult_row(f"S{i}", "Consulted", "28 Sep 2026", by="Arshia Janan", consultant="—") for i in range(3)]
     portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = range_page(TODAY_ISO, TODAY_ISO, *rows)
     text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
-    assert "• Requests assigned: not available (no request names a consultant; the column was not read)" in text
-    assert "📋" not in text and "assigned to no consultant" not in text
+    assert "• Requests assigned to no consultant: `3`" in text
+    assert "not available" not in text and "Unassigned" not in text
     assert blocks(text)["Arshia Janan"] == ["├ ✅ Consultations done: `3`",
                                               "├ 📵 Follow-ups: No Answer `0` · Wrong Number `0`",
+                                              "├ 📋 Requests assigned: `0`",
                                               "└ 💳 Payments verified: `0`"]
+    assert "assigned by its Consultant" in text
+
+
+def test_a_page_without_a_consultant_column_says_assigned_is_not_available(portal):
+    portal.pages.update(student_pages())
+    rows = [consult_row(f"S{i}", "Consulted", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan")
+            for i in range(2)]
+    html = range_page(TODAY_ISO, TODAY_ISO, *rows).replace("<th>Consultant</th>", "<th>Owner</th>")
+    portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = html
+    got = asyncio.run(admin_client.read_consultation_range(TODAY, TODAY))
+    assert got["consultant_column"] is False and len(got["rows"]) == 2
+    text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
+    assert "• Requests assigned: not available (the consultation page shows no Consultant column)" in text
+    assert "📋" not in text and "assigned to no consultant" not in text and "assigned by its Consultant" not in text
+    assert blocks(text)["Arshia Janan"][0] == "├ ✅ Consultations done: `2`"
+    columns = parsers.consultation_view(html)["columns"]
+    assert "consultant" not in columns and {"name", "status", "received"} <= set(columns)
+    assert "consultant" in parsers.consultation_view(range_page(TODAY_ISO, TODAY_ISO, *rows))["columns"]
 
 
 @pytest.mark.parametrize("failure, reason", [
@@ -365,6 +394,219 @@ def test_a_portal_that_cannot_be_read_says_so_for_both_parts_never_zero(portal, 
     assert text.count(reason) == 2
     assert "• ❌ Consultations: couldn't read the portal:" in text and "• ❌ Payments verified: couldn't read" in text
     assert "• not available (neither part could be read)" in text and "`0`" not in text
+    # Nothing was read, so the report claims no reading (R22): no "Read live just now" line.
+    assert "Read live" not in text and "date filter" not in text and "Sorted by" not in text
+    assert text.rstrip().endswith("• not available (neither part could be read)")
+
+
+def _reads(consultations=None, verified=None, error=None, problem=None):
+    error = error or PortalUnavailable("could not connect to the portal (ConnectError)", unreachable=True)
+    return performance.Reads(consultations, None if consultations is not None else error,
+                             verified, None if verified is not None or problem else error, problem)
+
+
+def _consults(*rows, **kw):
+    rows = [dict(r) for r in rows]
+    counts = Counter(r["status"] for r in rows)
+    counts["All"] = len(rows)
+    return {"counts": counts, "rows": rows, "complete": True, "reads": 1, **kw}
+
+
+def test_the_last_line_names_only_the_parts_that_were_read():
+    one = {"status": "Consulted", "handled_by": "Arshia Janan", "consultant": "Arshia Janan"}
+    pay = {"verified_by": "SUMONA HALDER", "amount": "8,000.00 BDT", "verified_income": "8,000.00 BDT",
+           "paid": "8,000.00 BDT"}
+    both = performance.format_performance_report("today", TODAY, TODAY,
+                                                 _reads(_consults(one), {"verified": [pay], "students": 330}))
+    assert both.endswith("_Read live just now, read-only: the consultation page's own date filter for the window "
+                         "(statuses as they are now; done and follow-ups by each request's own \"Last updated by\", "
+                         "assigned by its Consultant), and all 330 students of the student list by their own "
+                         "\"Payment verified by\" stamp. Sorted by consultations done + follow-ups + other status "
+                         "updates + payments verified._")
+    only_payments = performance.format_performance_report("today", TODAY, TODAY,
+                                                          _reads(None, {"verified": [pay], "students": 330}))
+    assert only_payments.endswith("_Read live just now, read-only: all 330 students of the student list by their "
+                                  "own \"Payment verified by\" stamp. Sorted by payments verified._")
+    assert "date filter" not in only_payments and "Last updated by" not in only_payments
+    only_requests = performance.format_performance_report("today", TODAY, TODAY, _reads(_consults(one), None))
+    assert only_requests.endswith("_Read live just now, read-only: the consultation page's own date filter for the "
+                                  "window (statuses as they are now; done and follow-ups by each request's own "
+                                  "\"Last updated by\", assigned by its Consultant). Sorted by consultations done + "
+                                  "follow-ups + other status updates._")
+    assert "students of the student list" not in only_requests
+    # A window the stamps cannot answer (a year back): the student list was not read, nor named.
+    year_back = performance.format_performance_report(
+        "month", date(2025, 9, 1), date(2025, 9, 28), _reads(_consults(), None, problem="no year on the stamps"))
+    assert "students of the student list" not in year_back and "date filter for the window" in year_back
+    for text in (both, only_payments, only_requests, year_back):
+        assert parse_legacy_markdown(text)[0], text
+
+
+def test_nobody_named_says_only_what_was_read():
+    no_requests = performance.format_performance_report("today", TODAY, TODAY,
+                                                        _reads(None, {"verified": [], "students": 5}))
+    assert "• Nobody's name is on a payment verification in this window." in no_requests
+    assert "on a request" not in no_requests
+    no_payments = performance.format_performance_report("today", TODAY, TODAY, _reads(_consults(), None))
+    assert "• Nobody's name is on a request in this window." in no_payments
+    assert "payment verification in this window" not in no_payments
+    both = performance.format_performance_report("today", TODAY, TODAY,
+                                                 _reads(_consults(), {"verified": [], "students": 5}))
+    assert "• Nobody's name is on a request or a payment verification in this window." in both
+
+
+# --------------------------------------------------------------------------- the counting rules
+
+def no_verification_today():
+    """students.php with one verification, on another day: today's payments verified are a real 0."""
+    return {"students.php": page(verified(917, 1, "RAHIM UDDIN", "27 Sep, 10:00", by="MAHIRA JANAN",
+                                          applied="20 Sep 2026"))}
+
+
+def test_a_request_still_new_is_nobodys_activity_even_with_a_name_on_it(portal):
+    # A request still New has no outcome: the name on it ("Last updated by", e.g. who assigned it)
+    # is no consultation done, follow-up or other update, and requests assigned are shown, never
+    # counted as activity. So Fahmid (1 done) ranks above Arshia (0 done, 2 assigned).
+    portal.pages.update(no_verification_today())
+    rows = (consult_row("N1", "New", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),
+            consult_row("N2", "New", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan"),
+            consult_row("D1", "Consulted", "28 Sep 2026", by="Fahmid Kaisar", consultant="—"))
+    portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = range_page(TODAY_ISO, TODAY_ISO, *rows)
+    text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
+    assert "• *Still New:* `2`" in text and "• *Students Verified:* `0`" in text
+    people = blocks(text)
+    assert list(people) == ["Fahmid Kaisar", "Arshia Janan"]
+    assert people["Arshia Janan"] == ["├ ✅ Consultations done: `0`",
+                                        "├ 📵 Follow-ups: No Answer `0` · Wrong Number `0`",
+                                        "├ 📋 Requests assigned: `2`",
+                                        "└ 💳 Payments verified: `0`"]
+    assert "Other status updates" not in text and "no name on the portal" not in text
+    t = performance.tally(parsers.consultation_rows(range_page(TODAY_ISO, TODAY_ISO, *rows)), [])
+    assert [(p.name, p.activity, p.assigned) for p in t.people] == [("Fahmid Kaisar", 1, 0), ("Arshia Janan", 0, 2)]
+
+
+def test_requests_and_payments_no_name_is_on_are_said_never_credited(portal):
+    portal.pages.update(no_verification_today())
+    rows = (consult_row("U1", "No Answer", "28 Sep 2026", consultant="Sumona Halder"),
+            consult_row("U2", "Wrong Number", "28 Sep 2026", consultant="Sumona Halder"),
+            consult_row("U3", "Consulted", "28 Sep 2026", consultant="Sumona Halder"),
+            consult_row("U4", "No Answer", "28 Sep 2026", by="Fahmid Kaisar", consultant="Fahmid Kaisar"))
+    portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = range_page(TODAY_ISO, TODAY_ISO, *rows)
+    text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
+    assert "• Done with no name on the portal: `1`" in text
+    assert "• No Answer / Wrong Number with no name on the portal: `2`" in text
+    people = blocks(text)
+    assert people["Sumona Halder"][:3] == ["├ ✅ Consultations done: `0`",
+                                           "├ 📵 Follow-ups: No Answer `0` · Wrong Number `0`",
+                                           "├ 📋 Requests assigned: `3`"]
+    assert people["Fahmid Kaisar"][1] == "├ 📵 Follow-ups: No Answer `1` · Wrong Number `0`"
+    # Another status nobody's name is on, and a verification with no name on its stamp.
+    other = {"status": "Rescheduled", "handled_by": "", "consultant": "Unassigned"}
+    nameless = {"verified_by": "", "amount": "5,000.00 BDT", "verified_income": "5,000.00 BDT", "paid": "5,000.00 BDT"}
+    named = {"verified_by": "FAHMID KAISAR", "amount": "3,000.00 BDT", "verified_income": "3,000.00 BDT",
+             "paid": "3,000.00 BDT"}
+    text = performance.format_performance_report(
+        "today", TODAY, TODAY, _reads(_consults(other), {"verified": [nameless, named], "students": 9}))
+    assert "• Other status updates with no name on the portal: `1`" in text
+    assert "• Payments verified with no name on the portal: `1`" in text
+    assert "• *Students Verified:* `2`" in text and "• *Total:* `৳ 8,000.00 BDT` (verified income)" in text
+    assert blocks(text) == {"FAHMID KAISAR": ["├ ✅ Consultations done: `0`",
+                                            "├ 📵 Follow-ups: No Answer `0` · Wrong Number `0`",
+                                            "├ 📋 Requests assigned: `0`",
+                                            "└ 💳 Payments verified: `1` (৳ 3,000.00 BDT)"]}
+
+
+def test_each_persons_amount_is_the_verified_income_else_what_was_paid(portal):
+    # Paid 8,160 but verified income 8,000: the income counts, per person and in the total (as the
+    # daily brief adds them); a row with no income shown counts what was paid.
+    portal.pages[range_key(TODAY_ISO, TODAY_ISO)] = range_page(TODAY_ISO, TODAY_ISO)
+    portal.pages["students.php"] = page(
+        row(501, 1, "PAID MORE", hng="HNG-2026-501", by="MAHIRA JANAN", when="28 Sep, 10:00", paid="8,160.00 BDT",
+            method="bKash", income="8,000.00 BDT", applied="27 Sep 2026"),
+        row(502, 2, "PAID ONLY", hng="HNG-2026-502", by="Mahira Janan", when="28 Sep, 11:00", paid="5,000.00 BDT",
+            method="Cash", applied="27 Sep 2026"))
+    text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
+    assert "• *Students Verified:* `2`" in text
+    assert "• *Total:* `৳ 13,000.00 BDT` (verified income, or the amount paid where no income is shown)" in text
+    assert blocks(text)["Mahira Janan"][-1] == "└ 💳 Payments verified: `2` (৳ 13,000.00 BDT)"
+    assert "13,160" not in text and "8,160" not in text
+    assert "• *Received:* `0`" in text and "• Nobody" not in text
+
+
+# --------------------------------------------------------------------------- the range reader's guards
+
+def test_a_window_the_page_did_not_filter_on_is_not_read(portal):
+    rows = (consult_row("A", "Consulted", "20 Sep 2026", by="Arshia Janan"),)
+    # Asked for 1-28 Sep, the page's search form says 1-27 Sep: its tabs count another window.
+    portal.pages[range_key(MONTH_FIRST, TODAY_ISO)] = range_page(MONTH_FIRST, "2026-09-27", *rows)
+    with pytest.raises(PortalUnavailable, match=r"did not apply the date filter for 01 Sep 2026 – 28 Sep 2026"):
+        asyncio.run(admin_client.read_consultation_range(date(2026, 9, 1), TODAY))
+
+
+def test_a_request_from_outside_the_window_is_not_counted(portal):
+    rows = (consult_row("A", "Consulted", "20 Sep 2026", by="Arshia Janan"),
+            consult_row("B", "Consulted", "28 Aug 2026", by="Arshia Janan"))
+    portal.pages[range_key(MONTH_FIRST, TODAY_ISO)] = range_page(MONTH_FIRST, TODAY_ISO, *rows)
+    with pytest.raises(PortalUnavailable, match=r"listed 1 request\(s\) from outside it"):
+        asyncio.run(admin_client.read_consultation_range(date(2026, 9, 1), TODAY))
+
+
+def test_statuses_that_do_not_match_the_tabs_are_not_counted(portal):
+    rows = (consult_row("A", "Consulted", "20 Sep 2026", by="Arshia Janan"),
+            consult_row("B", "No Answer", "12 Sep 2026", by="Arshia Janan"))
+    counts = {"All": 2, "New": 1, "No Answer": 0, "Wrong Number": 0, "Consulted": 1, "File Opened": 0}
+    portal.pages[range_key(MONTH_FIRST, TODAY_ISO)] = range_page(MONTH_FIRST, TODAY_ISO, *rows, counts=counts)
+    with pytest.raises(PortalUnavailable, match=r"do not match its own status counts \(layout not recognised\)"):
+        asyncio.run(admin_client.read_consultation_range(date(2026, 9, 1), TODAY))
+    assert len(consult_reads(portal.asked)) == 1                        # one read: the layout, not a change
+
+
+def test_parts_whose_statuses_do_not_match_the_tabs_are_read_again_then_said_honestly(portal):
+    # The 3 Sep "No Answer" became "Consulted" between the reads: the counts add up, the statuses not.
+    portal.pages.update(cut_month(r3="Consulted"))
+    with pytest.raises(PortalUnavailable, match=r"do not match its own status counts \(the list changed while it was read\)"):
+        asyncio.run(admin_client.read_consultation_range(date(2026, 9, 1), TODAY))
+    assert len(consult_reads(portal.asked)) == 4                        # read once more before giving up
+
+
+def test_a_window_that_needs_too_many_reads_stops_and_says_so(portal):
+    # Each read lists only its newest request (its last day holds more than the list shows), so
+    # 1-20 Sep would take 20 reads: the reader stops at CONSULT_RANGE_MAX_READS.
+    for d in range(1, 21):
+        last = f"2026-09-{d:02d}"
+        counts = {"All": d, "New": 0, "No Answer": 0, "Wrong Number": 0, "Consulted": d, "File Opened": 0}
+        portal.pages[range_key(MONTH_FIRST, last)] = range_page(
+            MONTH_FIRST, last, consult_row(f"D{d}", "Consulted", f"{d:02d} Sep 2026", by="Arshia Janan"),
+            counts=counts)
+    with pytest.raises(PortalUnavailable, match=r"took more than 16 pages"):
+        asyncio.run(admin_client.read_consultation_range(date(2026, 9, 1), date(2026, 9, 20)))
+    assert client_module.CONSULT_RANGE_MAX_READS == 16
+    assert consult_reads(portal.asked) == [range_key(MONTH_FIRST, f"2026-09-{d:02d}") for d in range(20, 4, -1)]
+
+
+def test_a_last_day_longer_than_the_list_keeps_the_earlier_days(portal):
+    # 1-28 Sep holds 10 requests; the list shows 6, all of 28 Sep (which alone holds more), so the
+    # days before it are read on their own: their 2 requests are kept, and 8 of 10 are listed.
+    portal.pages.update(no_verification_today())
+    last_day = [consult_row(f"L{i}", "Consulted", "28 Sep 2026", by="Arshia Janan", consultant="Arshia Janan")
+                for i in range(6)]
+    counts = {"All": 10, "New": 0, "No Answer": 1, "Wrong Number": 0, "Consulted": 9, "File Opened": 0}
+    portal.pages[range_key(MONTH_FIRST, TODAY_ISO)] = range_page(MONTH_FIRST, TODAY_ISO, *last_day, counts=counts)
+    portal.pages[range_key(MONTH_FIRST, "2026-09-27")] = range_page(
+        MONTH_FIRST, "2026-09-27",
+        consult_row("E1", "Consulted", "20 Sep 2026", by="Fahmid Kaisar", consultant="Fahmid Kaisar"),
+        consult_row("E2", "No Answer", "03 Sep 2026", by="Fahmid Kaisar", consultant="Fahmid Kaisar"))
+    got = asyncio.run(admin_client.read_consultation_range(date(2026, 9, 1), TODAY))
+    assert (len(got["rows"]), got["complete"], got["reads"], got["counts"]["All"]) == (8, False, 2, 10)
+    assert [r["name"] for r in got["rows"]][-2:] == ["E1", "E2"]
+    portal.asked.clear()
+    text = report_of(run(telegram_bot.performance_month_command, "/performance_month", [])[0])
+    assert "• *Received:* `10`" in text
+    assert "⚠️ _The portal lists 8 of the 10 requests (one day holds more than its list shows)" in text
+    people = blocks(text)
+    assert people["Fahmid Kaisar"][:2] == ["├ ✅ Consultations done: `1`",
+                                          "├ 📵 Follow-ups: No Answer `1` · Wrong Number `0`"]
+    assert people["Arshia Janan"][0] == "├ ✅ Consultations done: `6`"
 
 
 # --------------------------------------------------------------------------- Telegram
@@ -501,10 +743,65 @@ def test_the_performance_alias_reads_its_words(portal, args, expect):
     ("this month's performance", "month"), ("monthly performance", "month"), ("performance this month", "month"),
     ("how did the team do this month", "month"), ("performance for September", "month"),
     ("team's performance month to date", "month"), ("performance so far this month", "month"),
+    # Written without the apostrophe, as the owner writes ("todays", "inquires").
+    ("this months performance", "month"), ("current months performance", "month"),
+    ("performance this months", "month"), ("this months team performance", "month"),
+    ("this months performance for all", "month"),
+    ("performance for the month of September", "month"), ("performance for September 2026", "month"),
+    ("performance from 1 Sep to 30 Sep", "month"), ("may I see this month's performance", "month"),
+    # The consultants are the team: their performance today is the team's report.
+    ("how are the consultants doing today", "today"), ("consultant performance today", "today"),
+    # The team's own stats, report or summary are its performance (not the dashboard, not the brief).
+    ("team stats", "today"), ("staff report", "today"), ("team summary today", "today"),
 ])
 def test_performance_questions_route_to_the_report(text, topic):
     route = ask.classify(text, TODAY)
     assert (route.kind, route.topic) == ("performance", topic), text
+
+
+@pytest.mark.parametrize("text, first, last, words", [
+    ("performance for the month of august", date(2026, 8, 1), date(2026, 8, 31), ""),
+    ("performance of the month of september 2025", date(2025, 9, 1), date(2025, 9, 30), ""),
+    ("month performance 2025", None, None, "2025"),
+    ("performance this month 2025", None, None, "2025"),
+    ("performance this month last year", None, None, "last year"),
+    ("performance for the month of may", date(2026, 5, 1), date(2026, 5, 31), ""),
+    ("this month's performance for October", date(2025, 10, 1), date(2025, 10, 31), ""),
+    ("performance from 1 Sep to 15 Oct", date(2026, 9, 1), date(2026, 10, 15), ""),
+])
+def test_another_month_or_year_named_with_this_month_is_never_this_months_report(text, first, last, words):
+    route = ask.classify(text, TODAY)
+    assert route.kind == "performance" and route.topic == "", text
+    if first:
+        assert (route.window.first, route.window.last) == (first, last), text
+    else:
+        assert route.window is None and route.words == words, text
+
+
+def test_on_the_first_of_a_month_this_month_is_the_month_and_another_month_is_not(monkeypatch):
+    # On 1 Oct "this month" is one day, 1 Oct: still the month's report, and "the month of
+    # August" is still August, never today's report.
+    first = date(2026, 10, 1)
+    assert ask.classify("this months performance", first).topic == "month"
+    assert ask.classify("performance this month", first).topic == "month"
+    assert ask.classify("performance today", first).topic == "today"
+    route = ask.classify("performance for the month of august", first)
+    assert route.topic == "" and (route.window.first, route.window.last) == (date(2026, 8, 1), date(2026, 8, 31))
+    assert ask.classify("performance for September", first).topic == ""        # last month by then
+    assert ask.classify("performance this month 2025", first).topic == ""
+
+
+def test_a_past_facing_range_stays_in_the_order_it_was_written():
+    # On 28 Sep, "1 Sep to 30 Sep" is 1-30 Sep 2026, not 30 Sep 2025 - 1 Sep 2026 (the end alone,
+    # still to come, read as last year's).
+    window, problem = ask.date_window("from 1 Sep to 30 Sep", TODAY, forward=False)
+    assert problem is None and (window.first, window.last) == (date(2026, 9, 1), date(2026, 9, 30))
+    window, _ = ask.date_window("from 25 Sep to 5 Oct", TODAY, forward=False)
+    assert (window.first, window.last) == (date(2026, 9, 25), date(2026, 10, 5))
+    window, _ = ask.date_window("from 20 Dec to 5 Jan", TODAY, forward=False)   # both gone: unchanged
+    assert (window.first, window.last) == (date(2025, 12, 20), date(2026, 1, 5))
+    reply = ask.performance_other_reply(ask.classify("performance from 1 Sep to 15 Oct", TODAY))
+    assert "you asked about 01 Sep to 15 Oct 2026" in reply
 
 
 @pytest.mark.parametrize("text, what", [
@@ -524,9 +821,29 @@ def test_performance_questions_about_other_days_get_no_stand_in_window(text, wha
     ("summary for today", "report"), ("show pending payments", "pending"), ("any deadlines this week", "calendar"),
     ("applications under review", "window_review"), ("students across all programs", "dashboard"),
     ("the team's deadlines this month", "calendar"), ("performing arts", "unknown"), ("pin the menu", "pin"),
+    # A subject the report does not read keeps its own route, "performance" or "the team" or not.
+    ("how is the team doing with pending payments", "pending"),
+    ("how did the team do on pending payments this week", "pending"),
+    ("academic performance of the March 2027 intake", "intake"),
+    ("how is the team doing with the deadlines this week", "calendar"),
+    ("how did the team do on window applications under review", "window_review"),
+    ("team performance on passport cross-checks today", "crosscheck"),
+    ("how is the team doing with missing documents", "missing"),
+    # Another day's consultations (or verifications) have their own one-day answers.
+    ("how did the counsellors do yesterday", "inquiries"),
+    ("how did the team do on verifications yesterday", "verified"),
 ])
 def test_other_questions_keep_their_own_routes(text, kind):
     assert ask.classify(text, TODAY).kind == kind, text
+
+
+def test_the_counsellors_yesterday_is_that_days_consultations():
+    route = ask.classify("how did the counsellors do yesterday", TODAY)
+    assert (route.kind, route.day) == ("inquiries", date(2026, 9, 27))
+    # Today, or this month, it is the team's report; a span still gets what can be read.
+    assert ask.classify("how did the counsellors do today", TODAY).topic == "today"
+    assert ask.classify("how did the counsellors do this month", TODAY).topic == "month"
+    assert ask.classify("how did the counsellors do last week", TODAY).kind == "performance"
 
 
 @pytest.fixture
@@ -549,6 +866,8 @@ def recorded(monkeypatch):
     ("how did the team do today", "performance_today_command"),
     ("this month's performance", "performance_month_command"), ("monthly performance", "performance_month_command"),
     ("performance this month", "performance_month_command"),
+    ("this months performance", "performance_month_command"),
+    ("current months performance", "performance_month_command"),
     ("consultations today", "inquiries_today_command"), ("verified students today", "verified_today_command"),
 ])
 def test_free_text_reaches_the_right_command(portal, recorded, said, command):
@@ -562,6 +881,17 @@ def test_free_text_about_another_day_is_told_what_can_be_read(portal, recorded):
     assert chat.shown() == ["📈 Team performance is read for *today* (/performance\\_today) or for *this month*, "
                             "from its 1st to today (/performance\\_month), and you asked about Sun 27 Sep 2026.\n"
                             "For one day's consultations or payments, use /inquiries\\_date or /verified\\_date."]
+
+
+@pytest.mark.parametrize("said, asked", [
+    ("performance for the month of august", "you asked about August 2026 (Sat 01 Aug – Mon 31 Aug 2026)"),
+    ("month performance 2025", "you asked about 2025."),
+    ("this months performance last year", "you asked about last year."),
+])
+def test_free_text_about_another_month_is_never_answered_with_this_months_report(portal, recorded, said, asked):
+    chat, _ = run(telegram_bot.handle_natural_language_message, said, None)
+    assert recorded == [] and portal.asked == []
+    assert len(chat.shown()) == 1 and asked in chat.shown()[0], chat.shown()
 
 
 # --------------------------------------------------------------------------- the staging copy (R24)

@@ -104,6 +104,23 @@ _PERFORMANCE_RE = _re(r"performance|productivity|leaderboard"
                       r"|(?:team|staff)(?:'s)?\s+(?:activity|stats|statistics|report|summary|scores?|results?)")
 _OTHER_MONTH_RE = _re(r"(?:last|previous|past|next|coming|following)\s+(?:\w+\s+)?months?(?:'s)?|months")
 _THIS_MONTH_RE = _re(r"monthly|month(?:'s)?|mtd")
+# "this months performance": the owner writes without apostrophes ("todays", "inquires"), so "this
+# months" and "current months" are this month's, never "another month".
+_THIS_MONTHS_RE = re.compile(r"\b(this|current)\s+months\b")
+# The words that say "this month" ("the month of"): taken out to see which month, if another one,
+# the words name ("performance for the month of august" asks about August).
+_THE_MONTH_RE = re.compile(r"\b(?:this|the|current)\s+month(?:'s)?(?:\s+of)?\b")
+# A year on its own ("month performance 2025"), not inside an id or a date ("HNG-2025-001", "2025-09-01").
+_YEAR_WORD_RE = re.compile(r"(?<![\w/.:-])(?:19|20)\d\d(?![\w/:-]|\.\d)")
+# Another year in words ("this month last year", "a year ago").
+_OTHER_YEAR_RE = re.compile(r"\b(?:(?:last|previous|past|next|coming|following)\s+years?|years?\s+ago"
+                            r"|a\s+year\s+(?:ago|back))\b")
+# Subjects the team-performance report does not read (it reads consultations and payment
+# verifications only): a question that names one of them is that subject's, even when it also says
+# "how is the team doing" or "performance" ("how is the team doing with pending payments",
+# "academic performance of the March 2027 intake").
+_CROSS_WORD_RE = _re(r"cross[\s-]*check(?:ed|ing|s)?|crosscheck(?:ed|ing|s)?")
+_CALENDAR_TOPIC_RE = _re(r"calendar|events?|deadlines?|dhl|shipping|shipments?|courier|reminders?")
 
 # The words any question may have around what it asks about.
 _FILLER = set("""
@@ -239,6 +256,12 @@ def date_window(text: str, today: Optional[date] = None, *, forward: bool = True
     if m and re.search(r"\b(?:from|between)\b|\b(?:to|until|till|through|thru)\b|–|—|\s-\s", low):
         a = parse_user_date(m.group("a"), today, prefer_past=prefer_past)
         b = parse_user_date(m.group("b"), today, prefer_past=prefer_past)
+        if a and b and prefer_past and b < a:
+            # A range read past-facing stays in one year: on 29 Sep, "1 Sep to 30 Sep" is 1-30 Sep
+            # 2026, not 30 Sep 2025 - 1 Sep 2026 (the end alone read as the one just gone).
+            ahead = parse_user_date(m.group("b"), today)
+            if ahead and ahead >= a:
+                b = ahead
         if a and b:
             first, last = min(a, b), max(a, b)
             return Window(first, last, f"{first:%d %b} to {last:%d %b %Y}"), None
@@ -345,25 +368,87 @@ def performance_route(text: str, today: Optional[date] = None) -> Route:
     "month" (this month, from its 1st to today: "this month", "monthly", "month's", the month's
     own name). Anything else, another day or span or month, has no topic, with the `day`,
     `window` or `words` it named, or the `problem` of a date that cannot be read: it is answered
-    with performance_other_reply, never with a stand-in window."""
+    with performance_other_reply, never with a stand-in window. "This month" is given only when
+    the words name no other month and no other year ("performance for the month of august" and
+    "month performance 2025" ask about another month)."""
     today = today or local_today()
     low = re.sub(r"\s+", " ", (text or "").lower().replace("’", "'")).strip()
+    low = _THIS_MONTHS_RE.sub(r"\1 month's", low)
     if _OTHER_MONTH_RE.search(low):
         window, _ = date_window(low, today, forward=False)
         return Route("performance", window=window, words="" if window else "another month")
     window, problem = date_window(low, today, forward=False)
+    if (window is not None and window.first == today.replace(day=1) and window.last is not None
+            and window.last >= today and (window.first != window.last or _THIS_MONTH_RE.search(low))):
+        # This month so far ("this month", "September", "1 Sep to 30 Sep"; on the 1st, "this month"
+        # is that one day): unless the words also name another month or year.
+        return _this_month_route(low, today, window)
     if window is not None and window.first == window.last:
         return Route("performance", day=window.first, topic="today" if window.first == today else "")
     if window is not None:
-        month = window.first == today.replace(day=1) and window.last is not None and window.last >= today
-        return Route("performance", window=window, topic="month" if month else "")
+        return Route("performance", window=window)
     # "month's performance", "month to date": the word "month" is the only date-like part.
     named_date = problem and (":" in problem or problem.startswith("it names"))
     if _THIS_MONTH_RE.search(low) and not named_date:
-        return Route("performance", topic="month")
+        return _this_month_route(low, today)
     if problem:
         return Route("performance", problem=problem)
     return Route("performance", topic="today")
+
+
+def _other_period_named(low: str, today: date) -> str:
+    """The words of `low` that name a month or a year other than today's ("august", "september
+    2025", "2025", "last year"), joined by ", ", or "" when it names none. "May" is a month only as
+    "May 2026", "in / during / for May" or "the month of May" (else it is a word, or a name)."""
+    named, taken = [], []
+    for m in _MONTH_ALONE_RE.finditer(low):
+        word = m.group("month").lower()
+        if word == "may" and not (m.group("year") or re.search(r"\b(?:in|during|for|month\s+of)\s+$",
+                                                                 low[:m.start()])):
+            continue
+        taken.append(m.span())
+        if _MONTH_NUMBER[word] != today.month or (m.group("year") and int(m.group("year")) != today.year):
+            named.append(m.group(0).strip())
+    for m in _YEAR_WORD_RE.finditer(low):
+        if int(m.group(0)) != today.year and not any(a <= m.start() < b for a, b in taken):
+            named.append(m.group(0))
+    named += [m.group(0) for m in _OTHER_YEAR_RE.finditer(low)]
+    return ", ".join(dict.fromkeys(named))
+
+
+def _this_month_route(low: str, today: date, window: Optional[Window] = None) -> Route:
+    """Topic "month" for words that ask about this month, unless they also name another month or
+    year: then the day or span those words name without "this / the month", else the words
+    themselves, with no topic, so the report is never given for a month that was not asked about
+    ("performance for the month of august" is August; "performance this month 2025" is "2025")."""
+    other = _other_period_named(low, today)
+    if not other:
+        return Route("performance", window=window, topic="month")
+    asked, _ = date_window(_THE_MONTH_RE.sub(" ", low), today, forward=False)
+    if asked is not None and asked.first == asked.last:
+        return Route("performance", day=asked.first)
+    if asked is not None and (asked.first != today.replace(day=1) or asked.last is None
+                              or asked.last > _month_end(today)):
+        return Route("performance", window=asked)
+    return Route("performance", words=other)
+
+
+def _names_another_topic(low: str) -> bool:
+    """Whether the words name a subject the team-performance report does not read (it reads the
+    consultation requests and the payment verifications only): pending payments, window
+    applications, intakes, programs, universities, stages, documents, missing information,
+    admitted students, visas, the calendar, passports, cross-checks or registrations. Such a
+    question keeps that subject's own route even with "performance" or "how is the team doing" in
+    it. "March 2027" alone is no intake here ("performance for September 2026" is a month)."""
+    return bool(
+        _UNPAID_RE.search(low) or (_PAY_RE.search(low) and _PENDING_WORD_RE.search(low))
+        or _UNDER_REVIEW_RE.search(low) or _WINDOW_APP_RE.search(low) or _OPEN_WINDOWS_RE.search(low)
+        or _INTAKE_WORD_RE.search(low) or _PROGRAM_RE.search(low) or _UNIVERSITY_RE.search(low)
+        or _stage_named(low) or _STAGE_RE.search(low) or _PIPELINE_RE.search(low)
+        or (_DOCS_RE.search(low) and (_DOC_STATE_RE.search(low) or _UNDER_REVIEW_RE.search(low)))
+        or _MISSING_RE.search(low) or _ADMIT_RE.search(low) or _VISA_RE.search(low)
+        or _CALENDAR_TOPIC_RE.search(low) or _PASSPORT_RE.search(low) or _CROSS_WORD_RE.search(low)
+        or _CROSS_FIELD_RE.search(low) or _APPLIED_RE.search(low))
 
 
 def performance_other_reply(route: Route) -> str:
@@ -392,7 +477,10 @@ def classify(text: str, today: Optional[date] = None) -> Route:
       hello          a greeting or thanks
       pin            the command cheat-sheet ("pin", "menu", "commands")
       performance    the whole team's performance today or this month (performance_route: topic
-                     "today" or "month"; another day or span has no topic)
+                     "today" or "month"; another day or span has no topic), unless the words name
+                     a subject the report does not read (_names_another_topic: pending payments,
+                     an intake...), or name another single day and consultations or verifications
+                     ("how did the counsellors do yesterday": that day's own answer)
       crosscheck     a cross-check: a day, a student, a range (window: "cross-check last week")
       passports      passport problems: the live passport cross-check for the day named
       pending        pending payments
@@ -421,8 +509,12 @@ def classify(text: str, today: Optional[date] = None) -> Route:
         return Route("report")
     if _PIN_RE.search(low):
         return Route("pin")
-    if _PERFORMANCE_RE.search(low):
-        return performance_route(low, today)
+    if _PERFORMANCE_RE.search(low) and not _names_another_topic(low):
+        route = performance_route(low, today)
+        # "How did the counsellors do yesterday": another day's consultations (or payments
+        # verified) have their own one-day answers, which name who handled each.
+        if route.topic or route.day is None or not (_CONSULT_RE.search(low) or _VERIFY_RE.search(low)):
+            return route
 
     if _CROSS_RE.search(low) or _CROSS_FIELD_RE.search(low) or (_CHECK_RE.search(low) and _VERIFY_RE.search(low)):
         window = None

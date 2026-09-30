@@ -18,11 +18,13 @@ lines per person are counted in code from the rows, the way the daily brief coun
   payments verified   by the stamp's name, with the total of the verified income (else the amount paid)
 Names are matched without regard to case ("MAHIRA JANAN" on a stamp is "Mahira Janan" on a
 request). A request no name is on is said as such ("no name on the portal", "assigned to no
-consultant"), never credited to anybody.
+consultant" for the portal's "—"), never credited to anybody; a page with no Consultant column makes
+requests assigned "not available".
 
 A part that cannot be read says which ("Consultations: couldn't read the portal: ..."), and the part
-that was read is still shown: a figure that was not read is never a 0. The two reads run side by
-side on one session (it is opened first), each within PART_TIMEOUT.
+that was read is still shown: a figure that was not read is never a 0, and the report's last line
+names only the parts that were read. The two reads run side by side on one session (it is opened
+first), each within PART_TIMEOUT.
 """
 import asyncio
 import logging
@@ -106,14 +108,17 @@ class Person:
 class Tally(NamedTuple):
     people: List[Person]            # sorted by activity, then requests assigned, then name
     unnamed: Counter                # figures no name is on: "done", "follow_up", "other", "verified"
-    unassigned: int                 # the window's requests whose Consultant column names nobody
-    consultants_shown: bool         # False when no request names any consultant (the column not read)
+    unassigned: int                 # the window's requests whose Consultant column names nobody ("—")
+    consultant_column: bool         # False when the requests were read without a Consultant column
 
 
-def tally(rows: Optional[List[Dict[str, Any]]], verified: Optional[List[Dict[str, Any]]]) -> Tally:
+def tally(rows: Optional[List[Dict[str, Any]]], verified: Optional[List[Dict[str, Any]]],
+          consultant_column: bool = True) -> Tally:
     """Per person, from the window's request rows (None: not read) and its verifications (None: not
-    read). A name that differs only in case or spacing is one person; the name shown is the one the
-    portal writes in mixed case when it has one ("Mahira Janan" rather than "MAHIRA JANAN")."""
+    read). `consultant_column`: whether the rows were read from a page with a Consultant column
+    (without one, nothing is counted as assigned, to anybody or to nobody). A name that differs only
+    in case or spacing is one person; the name shown is the one the portal writes in mixed case
+    when it has one ("Mahira Janan" rather than "MAHIRA JANAN")."""
     people: Dict[str, Person] = {}
     unnamed: Counter = Counter()
 
@@ -126,16 +131,15 @@ def tally(rows: Optional[List[Dict[str, Any]]], verified: Optional[List[Dict[str
             p.name = name
         return p
 
-    consultants_shown = False
     unassigned = 0
     for r in rows or []:
         status, by = r.get("status") or "", (r.get("handled_by") or "").strip()
         consultant = (r.get("consultant") or "").strip()
-        if consultant and consultant != "Unassigned":
-            person(consultant).assigned += 1
-            consultants_shown = True
-        else:
-            unassigned += 1
+        if consultant_column:                       # else the page shows no Consultant column
+            if consultant and consultant != "Unassigned":
+                person(consultant).assigned += 1
+            else:
+                unassigned += 1                     # the portal's "—"
         if status == "New":
             continue                                # nobody has an outcome for a request still new
         bucket = ("done" if status in DONE else "follow_up" if status in FOLLOW_UPS else "other")
@@ -165,7 +169,7 @@ def tally(rows: Optional[List[Dict[str, Any]]], verified: Optional[List[Dict[str
             p.amount += amount
             p.with_amount += 1
     ranked = sorted(people.values(), key=lambda p: (-p.activity, -p.assigned, p.name.casefold()))
-    return Tally(ranked, unnamed, unassigned, consultants_shown or not rows)
+    return Tally(ranked, unnamed, unassigned, consultant_column)
 
 
 class Reads(NamedTuple):
@@ -286,7 +290,8 @@ def _people_lines(reads: Reads) -> List[str]:
     if not consult_read and not verified_read:
         return lines + ["• not available (neither part could be read)"]
     t = tally(reads.consultations["rows"] if consult_read else None,
-              reads.verified["verified"] if verified_read else None)
+              reads.verified["verified"] if verified_read else None,
+              consultant_column=_consultant_column(reads))
     if not consult_read:
         lines.append("_Consultation figures per person: not available (the consultation requests could not be read)._")
     if not verified_read:
@@ -297,9 +302,12 @@ def _people_lines(reads: Reads) -> List[str]:
                      f"{reads.consultations['counts']['All']} requests (one day holds more than its list shows): "
                      "the consultation figures per person count those._")
     if not t.people:
-        lines.append("• Nobody's name is on a request or a payment verification in this window.")
+        # Only about what was read: a request list that was not read says nothing about requests.
+        what = " or ".join(w for w, read in (("a request", consult_read), ("a payment verification", verified_read))
+                           if read)
+        lines.append(f"• Nobody's name is on {what} in this window.")
     for n, p in enumerate(t.people, 1):
-        lines += _person_lines(n, p, consult_read, verified_read, t.consultants_shown)
+        lines += _person_lines(n, p, consult_read, verified_read, t.consultant_column)
     extra = []
     if consult_read:
         if t.unnamed["done"]:
@@ -308,8 +316,8 @@ def _people_lines(reads: Reads) -> List[str]:
             extra.append(f"• No Answer / Wrong Number with no name on the portal: `{t.unnamed['follow_up']}`")
         if t.unnamed["other"]:
             extra.append(f"• Other status updates with no name on the portal: `{t.unnamed['other']}`")
-        if not t.consultants_shown:
-            extra.append("• Requests assigned: not available (no request names a consultant; the column was not read)")
+        if not t.consultant_column:
+            extra.append("• Requests assigned: not available (the consultation page shows no Consultant column)")
         elif t.unassigned:
             extra.append(f"• Requests assigned to no consultant: `{t.unassigned}`")
     if verified_read and t.unnamed["verified"]:
@@ -319,20 +327,40 @@ def _people_lines(reads: Reads) -> List[str]:
     return lines
 
 
+def _consultant_column(reads: Reads) -> bool:
+    """Whether the consultation requests were read from pages with a Consultant column."""
+    return reads.consultations is not None and reads.consultations.get("consultant_column", True)
+
+
+def _source_line(reads: Reads) -> Optional[str]:
+    """The report's last line: what was read, and how the people are sorted. Only the parts that
+    were read are named (a part that could not be read is claimed as nothing); None when neither
+    part was read."""
+    parts, sorted_by = [], []
+    if reads.consultations is not None:
+        how = "done and follow-ups by each request's own \"Last updated by\""
+        if _consultant_column(reads):
+            how += ", assigned by its Consultant"
+        parts.append(f"the consultation page's own date filter for the window (statuses as they are now; {how})")
+        sorted_by.append("consultations done + follow-ups + other status updates")
+    if reads.verified is not None:
+        parts.append(f"all {reads.verified['students']} students of the student list by their own "
+                     "\"Payment verified by\" stamp")
+        sorted_by.append("payments verified")
+    if not parts:
+        return None
+    return f"_Read live just now, read-only: {', and '.join(parts)}. Sorted by {' + '.join(sorted_by)}._"
+
+
 def format_performance_report(kind: str, first: date, last: date, reads: Reads) -> str:
     """The report (Telegram Markdown): the window in the header, the team's figures, then one block
-    per person. Only what was read: a part that was not is said so, never shown as 0."""
+    per person, and a last line naming what was read. Only what was read: a part that was not is
+    said so, never shown as 0, and never named as read."""
     lines = [f"📈 *Team Performance — {window_title(kind, first, last)}*", RULE]
     lines += _consultation_lines(reads) + [""] + _verified_lines(reads) + [""] + _people_lines(reads)
-    students = reads.verified["students"] if reads.verified is not None else None
-    source = ["_Read live just now, read-only: the consultation page's own date filter for the window "
-              "(statuses as they are now; done and follow-ups by each request's own \"Last updated by\", "
-              "assigned by its Consultant)"]
-    if students is not None:
-        source.append(f", and all {students} students of the student list by their own "
-                      "\"Payment verified by\" stamp")
-    source.append(". Sorted by consultations done + follow-ups + payments verified._")
-    lines += ["", "".join(source)]
+    source = _source_line(reads)
+    if source:
+        lines += ["", source]
     return "\n".join(lines)
 
 

@@ -462,6 +462,8 @@ class HangeulAdminClient:
             "rows": every request of the window (consultation_rows' records), newest first,
             "complete": whether every one is listed (False only when one day holds more requests
                         than the list shows),
+            "consultant_column": whether every page read has a Consultant column (a row's
+                        "Unassigned" is then the portal's "—", not a column that is missing),
             "reads": how many pages were read}
         Raises ValueError for a day that is not a date or a window that ends before it starts, and
         PortalUnavailable when a page cannot be read or does not add up."""
@@ -478,6 +480,7 @@ class HangeulAdminClient:
 
     async def _consultation_window_read(self, first, last) -> Dict[str, Any]:
         reads: List[tuple] = []
+        columns: List[bool] = []
 
         async def window(a, b):
             if len(reads) >= CONSULT_RANGE_MAX_READS:
@@ -485,6 +488,7 @@ class HangeulAdminClient:
                                         f"{CONSULT_RANGE_MAX_READS} pages (the list kept changing)")
             reads.append((a, b))
             view = await self.read_consultation_view({"status": "all", "from": a.isoformat(), "to": b.isoformat()})
+            columns.append("consultant" in (view.get("columns") or ()))
             shown = _span(a, b)
             if view["from"] != a.isoformat() or view["to"] != b.isoformat() or view["status"] != "all":
                 raise PortalUnavailable(f"consult_requests.php did not apply the date filter for {shown} "
@@ -531,7 +535,7 @@ class HangeulAdminClient:
                     raise _ListChanged(why + " (the list changed while it was read)")
                 raise PortalUnavailable(why + " (layout not recognised)")
         return {"first": first, "last": last, "counts": counts, "rows": rows, "complete": complete,
-                "reads": len(reads)}
+                "consultant_column": all(columns), "reads": len(reads)}
 
     async def read_student_pages(self, params: Optional[Dict[str, Any]] = None, *,
                                  all_pages: bool = True) -> List[str]:

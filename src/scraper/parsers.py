@@ -587,15 +587,23 @@ def consultation_view(html: str) -> Dict[str, Any]:
         "from", "to": the dates the page's search form says it filtered on ("" for none; None
                 when it has no search form),
         "listed": the caption's count of listed rows ("<b>500</b> requests · newest first"), or
-                None when it has no such caption}"""
+                None when it has no such caption,
+        "columns": the columns the table's header names, by meaning ("name", "consultant",
+                "status"...; _consult_columns), or None when there is no table. A row's
+                "consultant" is "Unassigned" both for the portal's "—" and for a table with no
+                Consultant column: this tells the two apart}"""
     soup = BeautifulSoup(html, "html.parser")
     tabs, current = _consultation_tabs(soup)
     table = soup.find("table")
     rows: Optional[List[Dict[str, Any]]] = None
+    columns: Optional[List[str]] = None
     if table is not None:
         rows = _consultation_table_rows(table)
         if not rows and _consultation_data_rows(table):
             rows = None                          # rows there, none of them readable
+        header = table.find("tr")
+        columns = sorted(_consult_columns([c.get_text(" ", strip=True) for c in header.find_all(["th", "td"])])
+                         if header is not None else {})
     form = soup.select_one("form.cr-search")
     echo = None
     if form is not None:
@@ -604,7 +612,8 @@ def consultation_view(html: str) -> Dict[str, Any]:
     return {"rows": rows, "tabs": tabs, "status": current,
             "from": None if echo is None else echo.get("from", ""),
             "to": None if echo is None else echo.get("to", ""),
-            "listed": _int_or_none(caption.group(1)) if caption else None}
+            "listed": _int_or_none(caption.group(1)) if caption else None,
+            "columns": columns}
 
 
 def _cf_email(hexstr: str) -> str:
