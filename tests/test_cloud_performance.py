@@ -4,7 +4,8 @@ spec's kinds: parsed data that fits none of them; src/cloud/records.py).
 What is pinned here:
   records     one record per leaderboard row, key "<period>|<first ISO day>|<name>", and one summary
               record per period window, key "<period>|<first ISO day>|summary"; scope
-              "<period>|<first ISO day>|<last ISO day>" and day = the range's last day for both;
+              "<period>|<first ISO day>" (stable while the portal's range grows day by day) and
+              day = the range's last day for both;
               a row's data is its figures exactly as printed plus the period, the range and top;
               the summary's data the tiles, the top performer, the sort note and the Score and
               Points help texts; the text forms the spec's; the portal's "—" is no figure (R1)
@@ -48,8 +49,8 @@ from src.scraper import parsers  # noqa: E402
 from src.scraper.client import admin_client  # noqa: E402
 
 READ_AT = "2026-09-28T18:21:04+06:00"
-MONTH_SCOPE = "month|2026-09-01|2026-09-30"
-TODAY_SCOPE = "today|2026-09-28|2026-09-28"
+MONTH_SCOPE = "month|2026-09-01"
+TODAY_SCOPE = "today|2026-09-28"
 RANGE = "01 Sep – 30 Sep 2026"
 
 ALPHA, BRAVO, CHARLIE = "COUNSELLOR ALPHA", "COUNSELLOR BRAVO", "COUNSELLOR CHARLIE"
@@ -326,3 +327,23 @@ def test_a_period_the_full_picture_cannot_read_is_a_failed_read_and_the_other_st
     batches, failed = asyncio.run(backfill.collect_performance(admin_client))
     assert [b["scope"] for b in batches] == [MONTH_SCOPE] and failed == [
         "consult_performance.php?period=today: its range could not be read as days (layout not recognised)"]
+
+
+
+def test_the_month_scope_stays_the_same_as_the_portals_range_grows():
+    """The portal ends every period at today ("01 Oct – 02 Oct", then "01 Oct – 03 Oct"): the
+    scope is the window's first day only, so the whole month is one (kind, scope) and a complete
+    read on a later day deletes a consultant who is gone (D10), while `day` and data.range move on."""
+    early = records.consultant_performance("month", month_page(dates="01 Sep – 02 Sep 2026"), READ_AT)
+    later = records.consultant_performance("month", month_page(dates="01 Sep – 03 Sep 2026", rows=ROWS[:2]), READ_AT)
+    assert {r["scope"] for r in early} == {r["scope"] for r in later} == {MONTH_SCOPE}
+    assert {r["day"] for r in early} == {"2026-09-02"} and {r["day"] for r in later} == {"2026-09-03"}
+    assert {r["key"] for r in later} < {r["key"] for r in early}          # CHARLIE is the one missing
+    assert f"month|2026-09-01|{CHARLIE}" in {r["key"] for r in early} - {r["key"] for r in later}
+    assert all(r["data"]["range"] == "01 Sep – 03 Sep 2026" for r in later)
+
+
+def test_the_one_time_backfill_reads_the_performance_page_for_both_periods():
+    import inspect
+    source = inspect.getsource(backfill._portal)
+    assert "collect_performance(client)" in source and "consult_performance.php" in source

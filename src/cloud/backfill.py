@@ -564,7 +564,9 @@ async def _portal(args, today: date, say: Callable[[str], None], failed: List[st
                               ("window_applications.php?status=under_review",
                                lambda: collect_window_applications(client)),
                               ("index.php", lambda: collect_dashboard(client)),
-                              ("calendar.php", lambda: collect_calendar(client, today))):
+                              ("calendar.php", lambda: collect_calendar(client, today)),
+                              ("consult_performance.php (today and this month)",
+                               lambda: collect_performance(client))):
             step(what)
             b, f = await collect()
             failed += f

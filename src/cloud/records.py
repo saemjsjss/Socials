@@ -821,8 +821,12 @@ def performance_window(page: Mapping[str, Any]) -> Optional[Tuple[str, str]]:
 
 
 def performance_scope(period: str, window: Tuple[str, str]) -> str:
-    """The unit one complete read of a period covers: "<period>|<first ISO day>|<last ISO day>"."""
-    return f"{period}|{window[0]}|{window[1]}"
+    """The unit one complete read of a period covers: "<period>|<first ISO day>". Not the last day:
+    the portal ends every period at today ("01 Oct – 02 Oct", then "01 Oct – 03 Oct"), so a scope
+    holding it would change every day, and a consultant missing from a later complete read would be
+    left in yesterday's scope, which no read covers again (never deleted, D10). The last day is the
+    records' own `day` and `data.range`."""
+    return f"{period}|{window[0]}"
 
 
 def _performance_title(period: str, page: Mapping[str, Any]) -> str:
@@ -854,7 +858,7 @@ def consultant_performance(period: str, page: Mapping[str, Any], read_at: Any = 
         performer card, the sort note, the Score and Points help texts, the leaderboard's own
         count (and its empty-state words, when it shows no one)
 
-    scope "<period>|<first ISO day>|<last ISO day>" and day = the range's last day for all of
+    scope "<period>|<first ISO day>" (stable through the month) and day = the range's last day for all of
     them; the summary comes first. The portal's "—" for no figure is "" and named in
     blank_on_portal (R1); a row whose name is a stand-in (Cloudflare's "[email protected]") has
     no identity and is left out (R11: performance_complete then says the read is not whole).

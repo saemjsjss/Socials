@@ -502,8 +502,8 @@ FULL_SHAPE = [("student", "all", True), ("verification", None, True), ("pending_
               ("consultation", "2026-09-27", True), ("consultation", "2026-09-28", True),
               ("consultation_day", "all", False), ("consultation_totals", "all", True),
               ("window_application", "all", True), ("dashboard_fact", "all", True), ("calendar_item", "all", False),
-              ("consultant_performance", "today|2026-09-28|2026-09-28", True),
-              ("consultant_performance", "month|2026-09-01|2026-09-30", True)]
+              ("consultant_performance", "today|2026-09-28", True),
+              ("consultant_performance", "month|2026-09-01", True)]
 
 
 def test_the_full_picture_reads_every_page_of_step_4_get_only(portal):
@@ -528,8 +528,8 @@ def test_the_full_picture_publishes_them_in_one_run(cloud, portal, monkeypatch):
     assert cloud.fake.keys("pending_payment") == ["501", "577", "579"]
     assert len(cloud.fake.keys("consultation", "2026-09-28")) == 1 and cloud.fake.keys("consultation_totals") == ["all"]
     assert cloud.fake.keys("window_application") == ["Student 0|Window 0"] and cloud.fake.keys("calendar_item")
-    assert len(cloud.fake.keys("consultant_performance", "today|2026-09-28|2026-09-28")) == 3
-    assert len(cloud.fake.keys("consultant_performance", "month|2026-09-01|2026-09-30")) == 4
+    assert len(cloud.fake.keys("consultant_performance", "today|2026-09-28")) == 3
+    assert len(cloud.fake.keys("consultant_performance", "month|2026-09-01")) == 4
     (run,) = cloud.fake.runs.values()
     assert run["job"] == "full_picture" and run["status"] == "ok"
     # A student gone from a later complete read is deleted (and their verification's day emptied);
