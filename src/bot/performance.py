@@ -15,6 +15,9 @@ links: its Custom range form is never used), parsed by its labels and header tex
                 label, in the header's order), then the Score and Points columns' info tooltips
   footer        the source page and the portal's sort note
 
+A reply too long for one message is cut only between records (message_pieces): a consultant's
+name line and figure lines always travel together (R6).
+
 Every figure is the portal's own, exactly as printed ("17.9", "18%", "149.5"). Where the page
 disagrees with itself (the top card and the leaderboard's crowned row, a tile and its column's
 total, a range that does not end today in Dhaka) a ⚠️ line says so; nothing is corrected. A page
@@ -235,6 +238,40 @@ def format_consult_performance(kind: str, page: Dict[str, Any], today: date) -> 
     if note:
         footer += f" {esc(note)}" + ("" if note.endswith((".", "!", "?")) else ".")
     return "\n".join(lines + ["", footer])
+
+
+def message_pieces(text: str, limit: Optional[int] = None) -> List[str]:
+    """The reply cut into messages of at most `limit` Telegram characters (replies.CHUNK_CHARS),
+    only between records (R6): a consultant's "*N. NAME*" line and its "├ / └" figure lines, and
+    the top performer's name with its figures line, always go in one message. A line indented by
+    three spaces (or a blank line) continues the line above it, so no message starts with one.
+    Joining the pieces with "\\n" gives the text back. A record longer than `limit` on its own
+    (never on the live page) is split between its lines (replies.split_text)."""
+    from src.bot.replies import CHUNK_CHARS, split_text, telegram_len
+    limit = limit or CHUNK_CHARS
+    records: List[str] = []
+    for line in (text or "").split("\n"):
+        if records and (line.startswith("   ") or not line.strip()):
+            records[-1] += "\n" + line
+        else:
+            records.append(line)
+    pieces: List[str] = []
+    current: Optional[str] = None
+    for record in records:
+        if telegram_len(record) > limit:
+            if current is not None:
+                pieces.append(current)
+            parts = split_text(record, limit)
+            pieces.extend(parts[:-1])
+            current = parts[-1] if parts else None
+        elif current is not None and telegram_len(current) + 1 + telegram_len(record) > limit:
+            pieces.append(current)
+            current = record
+        else:
+            current = record if current is None else f"{current}\n{record}"
+    if current is not None and current.strip():
+        pieces.append(current)
+    return [p for p in pieces if p.strip()]
 
 
 async def build_performance_report(kind: str, today: Optional[date] = None) -> str:

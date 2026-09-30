@@ -97,20 +97,42 @@ _APPROVE_RE = _re(r"approv\w*")
 _MOST_RE = _re(r"most|top|biggest|largest|popular|highest|leading|best")
 # Performance (/performance_today, /performance_month: the portal's Consultant Performance page):
 # "performance today", "today's performance", "how did the team do today", "monthly performance",
-# "team activity", "who is the top performer this month".
-_PERFORMANCE_RE = _re(r"performance|productivity|leaderboard|performers?"
+# "team activity", "who is the top performer this month". The words that name performance itself,
+# as the owner writes them too ("performence this month", "perfomance today", "performances"),
+# whole words only, so "outperform" and "performing arts" are none of them.
+_PERFORMANCE_WORDS = (r"perform[ae]nces?|perfom[ae]nces?|performaces?|perfromances?|preformances?"
+                      r"|productivity|leader[\s-]?boards?|performers?")
+_PERFORMANCE_RE = _re(_PERFORMANCE_WORDS +
                       r"|how\s+(?:did|does|do|has|have|is|are|was|were)\s+(?:the\s+|our\s+|my\s+)?(?:whole\s+)?"
                       r"(?:team|staff|everyone|everybody|counsell?ors?|consultants?)\s+"
                       r"(?:do|done|doing|did|perform(?:ed|ing)?|go|going|gone)"
                       r"|(?:team|staff)(?:'s)?\s+(?:activity|stats|statistics|report|summary|scores?|results?)")
+# A question that says "performance" (or "perform", "leaderboard", "top performer") in so many
+# words is about the Consultant Performance page even for another day ("consultant performance
+# yesterday"): never that day's consultations, whose report is not the page.
+_PERFORMANCE_WORD_RE = _re(_PERFORMANCE_WORDS + r"|perform(?:s|ed|ing)?")
 _OTHER_MONTH_RE = _re(r"(?:last|previous|past|next|coming|following)\s+(?:\w+\s+)?months?(?:'s)?|months")
 _THIS_MONTH_RE = _re(r"monthly|month(?:'s)?|mtd")
 # Periods the Consultant Performance page has besides Today and This Month, named without a date
-# ("all time performance", "overall leaderboard", "weekly performance", "yearly", "custom range").
+# ("all time performance", "overall leaderboard", "yearly", "ytd", "this year's", "custom range").
 _OTHER_PERIOD_RE = _re(r"all[\s-]*time|overall|lifetime|ever|in\s+total|altogether"
-                       r"|yearly|annual(?:ly)?|year(?:'s)?|quarter(?:ly)?|custom(?:\s+range)?|range")
-# A week ("this week's performance", "weekly leaderboard", "last 2 weeks"): the page's This Week.
-_WEEK_RE = _re(r"(?:(?:this|current|last|previous|past|next)\s+)?(?:weekly|weeks?(?:'s)?|fortnight(?:ly)?)")
+                       r"|ytd|(?:(?:this|the|current)\s+)?year[\s-]+to[\s-]+date"
+                       r"|(?:last|previous|past|next|coming|following)\s+years?(?:'s)?|(?:a\s+)?years?\s+(?:ago|back)"
+                       r"|yearly|annual(?:ly)?|(?:(?:this|the|current|a)\s+)?year(?:'s)?|quarter(?:ly)?"
+                       r"|custom(?:\s+range)?|range")
+# A week ("this week's performance", "weekly leaderboard", "last 2 weeks", "wtd"): the page's This Week.
+_WEEK_RE = _re(r"(?:(?:this|current|last|previous|past|next)\s+)?(?:weekly|weeks?(?:'s)?|fortnight(?:ly)?)|wtd")
+# The period words as the reply names them back ("ever", "overall" -> "all time"); any other
+# words ("yearly", "last week", "custom range") are said as they were written.
+_PERIOD_NAMES = ((re.compile(r"all time|overall|lifetime|ever|in total|altogether"), "all time"),
+                 (re.compile(r"(?:(?:this|the|current) )?(?:ytd|year to date)"), "the year to date"),
+                 (re.compile(r"(?:this|the|current) year|year"), "this year"),
+                 (re.compile(r"yearly|annual(?:ly)?"), "yearly figures"),
+                 (re.compile(r"quarter(?:ly)?"), "a quarter"),
+                 (re.compile(r"weekly"), "weekly figures"),
+                 (re.compile(r"fortnight(?:ly)?"), "a fortnight"),
+                 (re.compile(r"wtd"), "the week to date"),
+                 (re.compile(r"custom(?: range)?|range"), "a custom range"))
 # "this months performance": the owner writes without apostrophes ("todays", "inquires"), so "this
 # months" and "current months" are this month's, never "another month".
 _THIS_MONTHS_RE = re.compile(r"\b(this|current)\s+months\b")
@@ -374,8 +396,9 @@ def performance_route(text: str, today: Optional[date] = None) -> Route:
     """Which view of the portal's Consultant Performance page the words ask for: topic "today" (no
     day named, or today) or "month" (this month: "this month", "monthly", "month's", the month's
     own name). Anything else, another day or span or month, or another period of the page ("all
-    time", "overall", "weekly", "yearly", "custom range"), has no topic, with the `day`, `window`
-    or `words` it named, or the `problem` of a date that cannot be read: it is answered with
+    time", "overall", "weekly", "yearly", "ytd", "this year", "custom range"), has no topic, with
+    the `day`, `window` or `words` it named (a period by a readable name: "overall" is "all time"),
+    or the `problem` of a date that cannot be read: it is answered with
     performance_other_reply, never with a stand-in period. "This month" is given only when the
     words name no other month and no other year ("performance for the month of august" and
     "month performance 2025" ask about another month)."""
@@ -391,7 +414,7 @@ def performance_route(text: str, today: Optional[date] = None) -> Route:
         # is one day so far.
         window, _ = date_window(low, today, forward=False)
         span = window if window is not None and window.first != window.last else None
-        return Route("performance", window=span, words="" if span else week.group(0))
+        return Route("performance", window=span, words="" if span else _period_name(week.group(0)))
     window, problem = date_window(low, today, forward=False)
     if (window is not None and window.first == today.replace(day=1) and window.last is not None
             and window.last >= today and (window.first != window.last or _THIS_MONTH_RE.search(low))):
@@ -406,13 +429,25 @@ def performance_route(text: str, today: Optional[date] = None) -> Route:
     named_date = problem and (":" in problem or problem.startswith("it names"))
     if _THIS_MONTH_RE.search(low) and not named_date:
         return _this_month_route(low, today)
+    other = _OTHER_PERIOD_RE.search(low)
+    if other and not named_date:
+        # The page's other periods ("all time performance", "ytd", "this year's performance"): not
+        # today's, and no date to be read in them ("year" alone is no date that cannot be read).
+        return Route("performance", words=_period_name(other.group(0)))
+    year = _YEAR_WORD_RE.search(low)
+    if year and not named_date:
+        return Route("performance", words=year.group(0))            # "performance 2025": a year
     if problem:
         return Route("performance", problem=problem)
-    other = _OTHER_PERIOD_RE.search(low)
-    if other:
-        # The page's other periods ("all time performance", "weekly performance"): not today's.
-        return Route("performance", words=other.group(0))
     return Route("performance", topic="today")
+
+
+def _period_name(said: str) -> str:
+    """The period the words named, as the reply says it back: "ever", "overall", "lifetime" ->
+    "all time"; "ytd" -> "the year to date"; "this year's" -> "this year"; "wtd" -> "the week to
+    date"; "custom" -> "a custom range"; anything else as written ("yearly", "last week")."""
+    key = re.sub(r"[\s-]+", " ", said.lower().replace("'s", "")).strip()
+    return next((name for pattern, name in _PERIOD_NAMES if pattern.fullmatch(key)), key)
 
 
 def _other_period_named(low: str, today: date) -> str:
@@ -501,7 +536,8 @@ def classify(text: str, today: Optional[date] = None) -> Route:
                      topic "today" or "month"; another day, span or period has no topic), unless the
                      words name a subject the page does not show (_names_another_topic: pending payments,
                      an intake...), or name another single day and consultations or verifications
-                     ("how did the counsellors do yesterday": that day's own answer)
+                     without saying performance ("how did the counsellors do yesterday": that day's own
+                     answer; "consultant performance yesterday" stays here)
       crosscheck     a cross-check: a day, a student, a range (window: "cross-check last week")
       passports      passport problems: the live passport cross-check for the day named
       pending        pending payments
@@ -533,8 +569,11 @@ def classify(text: str, today: Optional[date] = None) -> Route:
     if _PERFORMANCE_RE.search(low) and not _names_another_topic(low):
         route = performance_route(low, today)
         # "How did the counsellors do yesterday": another day's consultations (or payments
-        # verified) have their own one-day answers, which name who handled each.
-        if route.topic or route.day is None or not (_CONSULT_RE.search(low) or _VERIFY_RE.search(low)):
+        # verified) have their own one-day answers, which name who handled each. Not when the
+        # words say performance ("consultant performance yesterday", "consultant leaderboard on
+        # Monday"): that is the page's, for a day its two commands do not cover.
+        if (route.topic or route.day is None or _PERFORMANCE_WORD_RE.search(low)
+                or not (_CONSULT_RE.search(low) or _VERIFY_RE.search(low))):
             return route
 
     if _CROSS_RE.search(low) or _CROSS_FIELD_RE.search(low) or (_CHECK_RE.search(low) and _VERIFY_RE.search(low)):

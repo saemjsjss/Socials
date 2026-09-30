@@ -482,7 +482,7 @@ def format_inquiries_report(on_day: Dict[str, Any], totals: Optional[Dict[str, i
     split = [f"{c[s]} {s}" for s in ("No Answer", "Wrong Number") if c[s]]
     split += [f"{n} {esc(s)}" for s, n in c.items() if n and s not in _DONE_STATUSES + ("New", "No Answer", "Wrong Number")]
     lines += [
-        f"📅 *Performance on {display_date}:*",
+        f"📅 *Consultations on {display_date}:*",
         f"• *Inquiries Received:* `{received}`",
         f"• *Inquiries Done:* `{done}`",
         f"   ├ ✅ *Consulted:* `{c['Consulted']}`",
@@ -694,7 +694,9 @@ async def crosscheck_date_command(update: Update, context: ContextTypes.DEFAULT_
 async def _send_performance_report(update: Update, kind: str) -> None:
     """The portal's Consultant Performance page for `kind` ("today" or "month"), read live
     (src.bot.performance: only that page's tiles, top performer and leaderboard), as a reply split
-    under Telegram's limit: the "⏳" message becomes its first piece (src.bot.replies.reply_long)."""
+    under Telegram's limit between whole records only (performance.message_pieces: a consultant's
+    lines never straddle two messages); the "⏳" message becomes the first piece, and a piece whose
+    Markdown Telegram refuses goes as plain text (src.bot.replies.reply_long)."""
     from src.bot import performance
     from src.bot.brief import esc
     from src.bot.replies import reply_long
@@ -705,7 +707,8 @@ async def _send_performance_report(update: Update, kind: str) -> None:
     except Exception as e:
         logger.error(f"Error building the {kind} performance report: {type(e).__name__}: {e}")
         report = f"❌ Error building the performance report: {esc(portal_error_reason(e))}"
-    await reply_long(update.message, report, edit=status_msg)
+    for i, piece in enumerate(performance.message_pieces(report)):
+        await reply_long(update.message, piece, edit=status_msg if i == 0 else None)
 
 
 async def performance_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

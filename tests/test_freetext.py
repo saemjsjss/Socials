@@ -558,7 +558,7 @@ VERIFIED_12 = ("✅ *Student Payment Verifications — 12 September 2026*\n• *
                "• *Total Verified Revenue:* `৳ 152,000.00 BDT`\n\n📋 *Verified Student Records:*\n*1. A B*\n"
                "   ├ 💰 *Payment:* `20,000.00 BDT Cash`\n*2. C D*\n   ├ 💰 *Payment:* `8,000.00 BDT Cash`")
 INQUIRIES = ("📞 *Consultancy Inquiries Report — 27 September 2026*\n• *Total Inquiries on Portal:* `999`\n"
-             "📅 *Performance on 27 September 2026:*\n• *Inquiries Received:* `21`\n• *Inquiries Done:* `17`\n"
+             "📅 *Consultations on 27 September 2026:*\n• *Inquiries Received:* `21`\n• *Inquiries Done:* `17`\n"
              "   ├ ✅ *Consulted:* `17`\n• *Consultations Handled by:* Noshin Samad: 7, Fahmid Kaisar: 5")
 
 

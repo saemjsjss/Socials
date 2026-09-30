@@ -8,15 +8,18 @@ tiles, the top performer card and the whole leaderboard parsed by their labels a
 every figure exactly as the portal prints it ("17.9", "18%", "149.5"); columns found by the
 header's words, so a reordered header reads the same and an unknown column is kept with its own
 header; the page must say it shows the period asked (it shows This Month for a period it does not
-take); a recognised empty state is an empty leaderboard, never an error; a page with no tiles, no
-leaderboard header, a missing column, a row or a figure it cannot read, or a count badge that does
-not match its rows is "layout not recognised"; a portal that cannot be read says so, never zeros;
-where the page disagrees with itself a ⚠️ line says so; the reply is the bot's house style, split
-under Telegram's limit and resent as plain text when its Markdown is refused; the menu and the
+take); only the page's own empty state (tr.pf-empty-row, .pf-empty) is an empty leaderboard, never
+an error, and any other one-cell row (a portal error) is not "nobody is listed"; a page with no
+tiles, no leaderboard header, a missing column, a row or a figure it cannot read, or a count badge
+that does not match its rows is "layout not recognised"; a portal that cannot be read says so,
+never zeros; where the page disagrees with itself a ⚠️ line says so; the reply is the bot's house
+style, split under Telegram's limit between whole records only (a consultant's name and figures
+in one message) and resent as plain text when its Markdown is refused; the menu and the
 cheat-sheet name the page; the free-text routes are whole words ("this months performance" is this
-month's, "consultations today" is still the inquiries), and another day, month or period is told
-what the commands cover and what the page itself offers; the root staging copy of telegram_bot.py
-is byte-identical (R24).
+month's, the owner's "performence this month" too, "consultations today" is still the inquiries),
+and another day, month or period ("consultant performance yesterday", "ytd", "this year") is told
+what the commands cover and what the page itself offers, by a readable name; the root staging copy
+of telegram_bot.py is byte-identical (R24).
 
 Every page is synthetic, laid out like the live consult_performance.php (30 Sep 2026); today is
 28 Sep 2026 in Dhaka. Nothing reaches the network or Telegram.
@@ -121,6 +124,9 @@ TODAY_TOP = ("FAHMID KAISAR", "2.3", "100%", "1", "1")
 EMPTY_ROW = ('<tr class="pf-empty-row"><td colspan="8"><div class="pf-empty"><span class="ic">'
              '<i class="fas fa-user-clock"></i></span><b>No consultant activity yet</b>'
              '<span>Nothing was logged in this period.</span></div></td></tr>')
+# A one-cell row that is not the page's empty state (a portal error): never "nobody is listed".
+PORTAL_ERROR_ROW = '<tr><td colspan="8">Could not load the leaderboard (SQL error)</td></tr>'
+ZERO_TILES = (("Consultancies done", "0"), ("Files opened", "0"), ("Conversion (file open)", "0%"), ("Docs ready", "0"))
 
 
 def perf_page(period="month", label="This Month", dates="01 Sep – 30 Sep 2026", tiles=MONTH_TILES,
@@ -317,12 +323,36 @@ def test_a_top_card_with_no_name_is_no_top_performer():
     (perf_page().replace("<span>Score</span>", "<span>Rating</span>"), "top performer card shows no score"),
     (perf_page().replace('<strong class="pf-name">NOSHIN SAMAD</strong>', '<strong class="pf-name"></strong>'),
      "row 2 shows no consultant"),
+    (today_page(tiles=ZERO_TILES, top=None, rows=(), empty=PORTAL_ERROR_ROW),
+     "row 1 is one cell that is not the page's empty state (it reads 'Could not load the leaderboard (SQL error)')"),
+    (today_page(tiles=ZERO_TILES, top=None, rows=(),
+                empty='<tr class="pf-note-row"><td colspan="8"><b>Leaderboard is being rebuilt</b></td></tr>'),
+     "row 1 is one cell that is not the page's empty state"),
 ], ids=["no-tiles", "no-consultant-header", "no-table", "no-points-column", "short-row", "score-not-a-figure",
-        "tile-not-a-figure", "count-badge-mismatch", "top-card-without-score", "row-without-name"])
+        "tile-not-a-figure", "count-badge-mismatch", "top-card-without-score", "row-without-name",
+        "one-cell-portal-error-row", "one-cell-row-of-another-class"])
 def test_a_layout_the_parser_does_not_know_raises(html, why):
     with pytest.raises(parsers.PerformanceLayoutError) as e:
         parsers.parse_consult_performance(html)
     assert why in str(e.value)
+
+
+@pytest.mark.parametrize("empty", [
+    EMPTY_ROW,                                                                   # as the live page has it
+    '<tr class="pf-empty-row"><td colspan="8">No consultant activity yet</td></tr>',
+    '<tr><td colspan="8"><div class="pf-empty"><b>No consultant activity yet</b></div></td></tr>',
+], ids=["row-and-box", "row-class-only", "box-only"])
+def test_only_the_pages_own_empty_state_is_an_empty_leaderboard(empty):
+    got = parsers.parse_consult_performance(today_page(tiles=ZERO_TILES, top=None, rows=(), empty=empty))
+    assert got["leaderboard"] == [] and got["empty_text"].startswith("No consultant activity yet")
+
+
+def test_a_portal_error_row_is_never_nobody_is_listed(portal):
+    portal.pages[TODAY_KEY] = today_page(tiles=ZERO_TILES, top=None, rows=(), empty=PORTAL_ERROR_ROW)
+    text = report_of(run(telegram_bot.performance_today_command, "/performance_today", [])[0])
+    assert text.startswith("❌ Couldn't read the portal: consult\\_performance.php: leaderboard row 1 is one cell "
+                           "that is not the page's empty state")
+    assert "(layout not recognised)" in text and "Nobody is listed" not in text and "`0`" not in text
 
 
 # --------------------------------------------------------------------------- the reader
@@ -540,6 +570,55 @@ def test_a_long_leaderboard_is_split_under_telegrams_limit(portal):
         ok, error, rendered, _ = parse_legacy_markdown(piece)
         assert ok, error
     assert "⚠️" not in text                                                     # 120 × 10 = 1200, 120 × 1 = 120
+    assert_whole_records(chat.shown())
+
+
+def assert_whole_records(pieces):
+    """R6: no consultant's record straddles two messages: no piece starts with a record's figure
+    line, and no piece ends on a record's name line."""
+    for piece in pieces:
+        assert not piece.startswith("   "), piece[:60]
+        last = piece.rstrip("\n").splitlines()[-1]
+        assert not (last.startswith("*") and ". " in last), last
+
+
+def test_a_long_leaderboard_never_splits_a_consultants_record(portal):
+    # The live month page's 7 rows repeated to 56 consultants (8,609 characters): each record keeps
+    # its name line and its three figure lines in one message.
+    rows = [dict(r, rank=str(i), name=f"{r['name']} {i:02d}", top=i == 1)
+            for i, r in enumerate((MONTH_ROWS * 8), 1)]
+    tiles = (("Consultancies done", str(715 * 8)), ("Files opened", str(108 * 8)), ("Conversion (file open)", "15%"),
+             ("Docs ready", str(8 * 8)))
+    portal.pages[MONTH_KEY] = perf_page(rows=rows, tiles=tiles, top=(rows[0]["name"],) + MONTH_TOP[1:])
+    chat, _ = run(telegram_bot.performance_month_command, "/performance_month", [])
+    pieces = chat.shown()
+    assert len(pieces) >= 3 and all(replies.telegram_len(p) <= replies.CHUNK_CHARS for p in pieces)
+    assert_whole_records(pieces)
+    people = blocks(report_of(chat))
+    assert len(people) == 56 and all(len(lines) == 4 for lines in people.values())
+    for piece in pieces:                                                      # every record whole in one piece
+        for name, lines in people.items():
+            if f". {name}*" in piece:
+                assert "\n".join(["   " + line for line in lines[1:]]) in piece, name
+    assert report_of(chat) == performance.format_consult_performance(
+        "month", parsers.parse_consult_performance(portal.pages[MONTH_KEY]), TODAY)
+    assert "⚠️" not in report_of(chat)
+
+
+def test_message_pieces_pack_whole_records_under_the_limit():
+    text = "\n".join(["📈 *Head*", ""] + [f"*{i}. NAME {i}*\n   ├ A `1` · B `2`\n   └ C `3`" for i in range(1, 30)]
+                     + ["", "🔗 footer"])
+    pieces = performance.message_pieces(text, limit=200)
+    assert "\n".join(pieces) == text and all(replies.telegram_len(p) <= 200 for p in pieces)
+    assert len(pieces) > 5
+    assert_whole_records(pieces)
+    # The top performer's figures line stays with its name.
+    top = "🏆 *Top performer · Today:* FAHMID KAISAR\n   Score `2.3` · Conversion `100%`"
+    pieces = performance.message_pieces("x" * 150 + "\n" + top, limit=200)
+    assert pieces == ["x" * 150, top]
+    # A short reply is one piece; a failure reply (no records) is split like any text.
+    assert performance.message_pieces("❌ Couldn't read the portal: x.") == ["❌ Couldn't read the portal: x."]
+    assert performance.message_pieces("") == []
 
 
 def test_every_reply_is_valid_legacy_markdown(portal):
@@ -666,10 +745,43 @@ def test_the_performance_alias_reads_its_words(portal, args, expect):
     ("performance from 1 Sep to 30 Sep", "month"), ("may I see this month's performance", "month"),
     ("how are the consultants doing today", "today"), ("consultant performance today", "today"),
     ("team stats", "today"), ("staff report", "today"), ("team summary today", "today"),
+    # The owner's own spelling ("when i ask for performence this month or today") and its kin.
+    ("performence today", "today"), ("performence this month", "month"), ("this months performence", "month"),
+    ("todays performence", "today"), ("performence", "today"), ("monthly performence", "month"),
+    ("performances today", "today"), ("this months performances", "month"), ("perfomance today", "today"),
+    ("perfomence this month", "month"), ("performace today", "today"), ("perfromance this month", "month"),
+    ("preformance today", "today"), ("leader board this month", "month"), ("consultant performence today", "today"),
 ])
 def test_performance_questions_route_to_the_page(text, topic):
     route = ask.classify(text, TODAY)
     assert (route.kind, route.topic) == ("performance", topic), text
+
+
+@pytest.mark.parametrize("text", ["outperform today", "outperformance this month", "performing arts",
+                                  "who outperformed yesterday", "performancetoday"])
+def test_performance_words_are_whole_words(text):
+    assert ask.classify(text, TODAY).kind != "performance", text
+
+
+@pytest.mark.parametrize("text, day", [
+    ("performence yesterday", date(2026, 9, 27)),
+    ("consultant performance yesterday", date(2026, 9, 27)),
+    ("counsellor performance yesterday", date(2026, 9, 27)),
+    ("consultants performance 27 sep", date(2026, 9, 27)),
+    ("consultant performance on friday", date(2026, 9, 25)),
+    ("consultant leaderboard yesterday", date(2026, 9, 27)),
+    ("consultant top performer yesterday", date(2026, 9, 27)),
+    ("performance of the consultants on 12 sep", date(2026, 9, 12)),
+    ("how did the counsellors perform yesterday", date(2026, 9, 27)),
+    ("verification performance yesterday", date(2026, 9, 27)),
+    ("consultant performence yesterday", date(2026, 9, 27)),
+])
+def test_performance_said_in_so_many_words_for_another_day_is_never_that_days_consultations(text, day):
+    # "Consultant performance yesterday" asks about the page, for a day its commands do not cover:
+    # never the inquiries report and its self-computed per-staff counts.
+    route = ask.classify(text, TODAY)
+    assert (route.kind, route.topic, route.day) == ("performance", "", day), text
+    assert f"you asked about {day:%a %d %b %Y}." in ask.performance_other_reply(route)
 
 
 @pytest.mark.parametrize("text, first, last, words", [
@@ -692,13 +804,24 @@ def test_another_month_or_year_named_with_this_month_is_never_this_months_page(t
 
 
 @pytest.mark.parametrize("text, words", [
-    ("all time performance", "all time"), ("overall performance", "overall"), ("weekly performance", "weekly"),
-    ("yearly performance", "yearly"), ("performance custom range", "custom range"),
-    ("all-time leaderboard", "all-time"), ("best performer ever", "ever"),
+    # Said back by a readable name: never the bare word matched ("you asked about ever.").
+    ("all time performance", "all time"), ("overall performance", "all time"), ("weekly performance", "weekly figures"),
+    ("yearly performance", "yearly figures"), ("performance custom range", "a custom range"),
+    ("all-time leaderboard", "all time"), ("best performer ever", "all time"), ("lifetime leaderboard", "all time"),
+    ("annual performance", "yearly figures"), ("quarterly performance", "a quarter"),
+    # Year to date, this year and another year: never Today's page, never "no date in it".
+    ("ytd performance", "the year to date"), ("performance ytd", "the year to date"),
+    ("performance year to date", "the year to date"), ("performance the year to date", "the year to date"),
+    ("performance this year", "this year"), ("this year's performance", "this year"),
+    ("performance of the year", "this year"), ("performance last year", "last year"),
+    ("performance a year ago", "a year ago"), ("performance 2025", "2025"),
+    ("wtd performance", "the week to date"),
 ])
 def test_the_pages_other_periods_are_never_todays(text, words):
     route = ask.classify(text, TODAY)
-    assert (route.kind, route.topic, route.words) == ("performance", "", words), text
+    assert (route.kind, route.topic, route.words, route.problem) == ("performance", "", words, None), text
+    reply = ask.performance_other_reply(route)
+    assert f", and you asked about {words}." in reply and "couldn't read the date" not in reply
 
 
 def test_on_the_first_of_a_month_this_month_is_the_month_and_another_month_is_not():
@@ -740,7 +863,7 @@ def test_this_week_is_the_pages_this_week_never_today_even_on_a_monday():
     assert (route.kind, route.topic, route.window, route.words) == ("performance", "", None, "this week")
     route = ask.classify("this week's leaderboard", date(2026, 9, 30))
     assert route.topic == "" and (route.window.first, route.window.last) == (date(2026, 9, 28), date(2026, 9, 30))
-    assert ask.classify("weekly performance", TODAY).words == "weekly"
+    assert ask.classify("weekly performance", TODAY).words == "weekly figures"
     reply = ask.performance_other_reply(ask.classify("performance this week", TODAY))
     assert ", and you asked about this week." in reply and "This Week, All Time and a custom range" in reply
 
@@ -785,7 +908,7 @@ def recorded(monkeypatch):
             await update.message.reply_text(f"{name} answered")
         return command
     for name in ("performance_today_command", "performance_month_command", "inquiries_today_command",
-                 "verified_today_command", "report_command"):
+                 "inquiries_date_command", "verified_today_command", "verified_date_command", "report_command"):
         monkeypatch.setattr(telegram_bot, name, recorder(name))
     return ran
 
@@ -798,11 +921,41 @@ def recorded(monkeypatch):
     ("this months performance", "performance_month_command"),
     ("current months performance", "performance_month_command"),
     ("who is the top performer this month", "performance_month_command"),
+    # The owner's spelling reaches the page, not "I can't answer that" or the dashboard's facts.
+    ("performence this month", "performance_month_command"), ("performence today", "performance_today_command"),
+    ("this months performence", "performance_month_command"), ("todays performence", "performance_today_command"),
+    ("perfomance today", "performance_today_command"), ("performances today", "performance_today_command"),
     ("consultations today", "inquiries_today_command"), ("verified students today", "verified_today_command"),
+    ("how did the counsellors do yesterday", "inquiries_date_command"),       # no performance word: that day's
 ])
 def test_free_text_reaches_the_right_command(portal, recorded, said, command):
     run(telegram_bot.handle_natural_language_message, said, None)
     assert recorded == [command]
+
+
+@pytest.mark.parametrize("said, day", [
+    ("performence yesterday", "Sun 27 Sep 2026"), ("consultant performance yesterday", "Sun 27 Sep 2026"),
+    ("counsellor performance yesterday", "Sun 27 Sep 2026"), ("consultant leaderboard yesterday", "Sun 27 Sep 2026"),
+    ("consultant top performer yesterday", "Sun 27 Sep 2026"), ("consultant performance on friday", "Fri 25 Sep 2026"),
+])
+def test_free_text_performance_for_another_day_is_never_the_inquiries_report(portal, recorded, said, day):
+    chat, _ = run(telegram_bot.handle_natural_language_message, said, None)
+    assert recorded == [] and portal.asked == []                     # no inquiries_date, nothing read
+    assert chat.shown() == [
+        "📈 /performance\\_today and /performance\\_month show the portal's Consultant Performance page for "
+        f"*today* and for *this month*, and you asked about {day}.\n"
+        "The page itself (Leads › Performance, consult\\_performance.php) also offers This Week, All Time and a "
+        "custom range: open it on the portal for those."]
+
+
+def test_the_inquiries_report_is_headed_consultations_not_performance():
+    # "Performance" is the portal's Consultant Performance page: the inquiries report no longer
+    # heads its day's figures "Performance on <date>".
+    on_day = {"counts": {"All": 3, "Consulted": 1, "File Opened": 1, "New": 1}, "rows": [], "complete": True}
+    text = telegram_bot.format_inquiries_report(on_day, {"All": 10, "Consulted": 5, "File Opened": 2, "New": 3},
+                                                "27 September 2026")
+    assert "📅 *Consultations on 27 September 2026:*\n• *Inquiries Received:* `3`" in text
+    assert "Performance" not in text
 
 
 def test_free_text_performance_reads_the_page_live(portal):
@@ -826,7 +979,11 @@ def test_free_text_about_another_day_is_told_what_can_be_read(portal, recorded):
     ("month performance 2025", "you asked about 2025."),
     ("this months performance last year", "you asked about last year."),
     ("all time performance", "you asked about all time."),
-    ("weekly performance", "you asked about weekly."),
+    ("weekly performance", "you asked about weekly figures."),
+    ("best performer ever", "you asked about all time."),
+    ("ytd performance", "you asked about the year to date."),         # was Today's page
+    ("performance this year", "you asked about this year."),          # was "there is no date in it"
+    ("performence last month", "you asked about last month, August 2026 (Sat 01 Aug – Mon 31 Aug 2026)."),
 ])
 def test_free_text_about_another_period_is_never_answered_with_this_months_page(portal, recorded, said, asked):
     chat, _ = run(telegram_bot.handle_natural_language_message, said, None)

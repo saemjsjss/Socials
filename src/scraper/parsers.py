@@ -1028,10 +1028,12 @@ def parse_consult_performance(html: str) -> Dict[str, Any]:
                   legend for them, else "")}
 
     Every figure is kept exactly as the portal prints it ("17.9", "18%", "149.5"). A recognised
-    empty state (the table's one "pf-empty-row") is an empty leaderboard. Raises
-    PerformanceLayoutError when the tiles or the leaderboard's header cannot be found, a column
-    the page has always shown is missing, a row cannot be read, a figure is not a figure, or the
-    count badge does not match the rows."""
+    empty state (the table's one "pf-empty-row", with its ".pf-empty" box) is an empty
+    leaderboard; any other one-cell row (a portal error such as "Could not load the leaderboard")
+    is not. Raises PerformanceLayoutError when the tiles or the leaderboard's header cannot be
+    found, a column the page has always shown is missing, a row cannot be read (a one-cell row
+    that is not the empty state included), a figure is not a figure, or the count badge does not
+    match the rows."""
     soup = BeautifulSoup(html, "html.parser")
 
     tiles: Dict[str, str] = {}
@@ -1065,9 +1067,14 @@ def parse_consult_performance(html: str) -> Dict[str, Any]:
         if not tds or not _perf_text(tr):
             continue
         classes = tr.get("class") or []
-        if "pf-empty-row" in classes or (len(tds) == 1 and (tds[0].get("colspan") or tr.select_one(".pf-empty"))):
+        if "pf-empty-row" in classes or (len(tds) == 1 and tr.select_one(".pf-empty") is not None):
+            # The page's own empty state only (tr.pf-empty-row, or its one cell's .pf-empty box):
+            # any other one-cell row ("Could not load the leaderboard") is no "nobody is listed".
             empty_text = _perf_text(tr.select_one(".pf-empty") or tr)
             continue
+        if len(tds) == 1 and len(cells) > 1:
+            raise PerformanceLayoutError(f"leaderboard row {n + 1} is one cell that is not the page's empty "
+                                         f"state (it reads {_perf_text(tr)[:60]!r})")
         if len(tds) != len(cells):
             raise PerformanceLayoutError(f"leaderboard row {n + 1} has {len(tds)} cells, its header {len(cells)}")
         entry: Dict[str, Any] = {"extra": {}}
