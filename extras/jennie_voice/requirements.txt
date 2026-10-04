@@ -1,0 +1,46 @@
+# Jennie voice service - Python 3.12 venv in .venv (py -3.12 -m venv .venv).
+# Same CosyVoice recipe as C:\Hangeul\JARVIS\voice-trials\cosyvoice (torch cu128 for the RTX 5060 / sm_120),
+# plus faster-whisper and the HTTP server. Install (torch first, from the cu128 index):
+#   .venv\Scripts\python.exe -m pip install "setuptools<81" wheel
+#   .venv\Scripts\python.exe -m pip install torch==2.7.1+cu128 torchaudio==2.7.1+cu128 --index-url https://download.pytorch.org/whl/cu128
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt -c constraints.txt
+# pyworld has no cp312 Windows wheel; stubs\pyworld.py stands in for it (inference never calls it).
+
+# --- CosyVoice2 inference (voice-trials\cosyvoice\req-infer.txt) ---
+conformer==0.3.2
+diffusers==0.29.0
+einops
+HyperPyYAML==1.2.3
+inflect==7.3.1
+librosa==0.10.2
+scipy
+lightning==2.2.4
+hydra-core==1.3.2
+omegaconf==2.3.0
+rich==13.7.1
+onnx
+onnxruntime
+openai-whisper==20250625
+protobuf
+soundfile
+transformers==4.51.3
+x-transformers==2.11.24
+tiktoken
+regex
+huggingface_hub
+modelscope==1.20.0
+tqdm
+pyarrow
+# imported by third_party/Matcha-TTS (the flow decoder) at load time
+gdown==5.1.0
+matplotlib
+wget
+rootutils
+
+# --- speech-to-text ---
+faster-whisper==1.2.1
+
+# --- HTTP service ---
+fastapi
+uvicorn
+python-multipart

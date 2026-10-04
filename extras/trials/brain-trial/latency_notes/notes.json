@@ -1,0 +1,26 @@
+{
+ "ko_today": {
+  "text": "제니야, 오늘 서류 검증된 학생 몇 명이야?",
+  "language": "ko",
+  "duration_s": 5.16,
+  "render_s": 5.0
+ },
+ "ko_followup": {
+  "text": "그럼 어제는?",
+  "language": "ko",
+  "duration_s": 1.87,
+  "render_s": 2.1
+ },
+ "en_deadlines": {
+  "text": "Jennie, what deadlines are coming up?",
+  "language": "en",
+  "duration_s": 2.18,
+  "render_s": 2.41
+ },
+ "en_thanks": {
+  "text": "Thanks Jennie, you're the best!",
+  "language": "en",
+  "duration_s": 1.64,
+  "render_s": 1.99
+ }
+}

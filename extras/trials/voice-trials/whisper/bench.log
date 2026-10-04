@@ -1,0 +1,29 @@
+﻿.\venv\Scripts\python.exe : 
+At line:1 char:386
++ ... ONIOENCODING='utf-8'; .\venv\Scripts\python.exe bench.py 2>&1 | Where ...
++                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+{"model": "medium", "device": "cpu", "compute": "int8", "beam": 5, "clip": "real__chatterbox__default-cfg0__kr-neutral.wav", "clip_s": 11.8, "load_s": 3.87, "median_s": 7.4, "rtf": 0.627, "lang": "ko"}
+{"model": "medium", "device": "cpu", "compute": "int8", "beam": 5, "clip": "real__cosyvoice__v3-crosslingual-krfemale__en.wav", "clip_s": 11.92, "load_s": 3.87, "median_s": 7.3, "rtf": 0.612, "lang": "en"}
+
+{"model": "large-v3", "device": "cpu", "compute": "int8", "beam": 5, "clip": "real__chatterbox__default-cfg0__kr-neutral.wav", "clip_s": 11.8, "load_s": 6.81, "median_s": 12.83, "rtf": 1.087, "lang": "ko"}
+{"model": "large-v3", "device": "cpu", "compute": "int8", "beam": 5, "clip": "real__cosyvoice__v3-crosslingual-krfemale__en.wav", "clip_s": 11.92, "load_s": 6.81, "median_s": 12.84, "rtf": 1.077, "lang": "en"}
+
+{"model": "large-v3", "device": "cpu", "compute": "int8", "beam": 1, "clip": "real__chatterbox__default-cfg0__kr-neutral.wav", "clip_s": 11.8, "load_s": 5.96, "median_s": 12.65, "rtf": 1.072, "lang": "ko"}
+{"model": "large-v3", "device": "cpu", "compute": "int8", "beam": 1, "clip": "real__cosyvoice__v3-crosslingual-krfemale__en.wav", "clip_s": 11.92, "load_s": 5.96, "median_s": 12.29, "rtf": 1.031, "lang": "en"}
+GPU: 6980 MiB free, lock acquired
+
+{"model": "medium", "device": "cuda", "compute": "float16", "beam": 5, "clip": "real__chatterbox__default-cfg0__kr-neutral.wav", "clip_s": 11.8, "load_s": 2.76, "median_s": 1.02, "rtf": 0.086, "lang": "ko"}
+{"model": "medium", "device": "cuda", "compute": "float16", "beam": 5, "clip": "real__cosyvoice__v3-crosslingual-krfemale__en.wav", "clip_s": 11.92, "load_s": 2.76, "median_s": 0.99, "rtf": 0.083, "lang": "en"}
+
+{"model": "large-v3", "device": "cuda", "compute": "float16", "beam": 5, "clip": "real__chatterbox__default-cfg0__kr-neutral.wav", "clip_s": 11.8, "load_s": 4.86, "median_s": 1.45, "rtf": 0.123, "lang": "ko"}
+{"model": "large-v3", "device": "cuda", "compute": "float16", "beam": 5, "clip": "real__cosyvoice__v3-crosslingual-krfemale__en.wav", "clip_s": 11.92, "load_s": 4.86, "median_s": 1.35, "rtf": 0.113, "lang": "en"}
+
+{"model": "large-v3", "device": "cuda", "compute": "float16", "beam": 1, "clip": "real__chatterbox__default-cfg0__kr-neutral.wav", "clip_s": 11.8, "load_s": 3.78, "median_s": 1.28, "rtf": 0.108, "lang": "ko"}
+{"model": "large-v3", "device": "cuda", "compute": "float16", "beam": 1, "clip": "real__cosyvoice__v3-crosslingual-krfemale__en.wav", "clip_s": 11.92, "load_s": 3.78, "median_s": 1.2, "rtf": 0.101, "lang": "en"}
+
+{"model": "large-v3", "device": "cuda", "compute": "int8_float16", "beam": 5, "clip": "real__chatterbox__default-cfg0__kr-neutral.wav", "clip_s": 11.8, "load_s": 5.81, "median_s": 1.69, "rtf": 0.143, "lang": "ko"}
+{"model": "large-v3", "device": "cuda", "compute": "int8_float16", "beam": 5, "clip": "real__cosyvoice__v3-crosslingual-krfemale__en.wav", "clip_s": 11.92, "load_s": 5.81, "median_s": 1.59, "rtf": 0.134, "lang": "en"}
+wrote bench.json

@@ -1,0 +1,57 @@
+[
+  {
+    "file": "real__chatterbox__default-cfg0__kr-neutral.wav",
+    "cer": 0.041,
+    "asr": "안녕하세요. 방금 포털 동기화가 끝났습니다. 새로 서류 검증된 학생이 한 명 있고, 진행 시트 7개가 모두 최신 상태입니다."
+  },
+  {
+    "file": "real__chatterbox__default-ex0.5-cfg0.5__kr-aegyo.wav",
+    "cer": 0.119,
+    "asr": "나잔 제니에요 방금 포털 동기화가 끝났어요 새로 서류 검증된 학생이 한 명 있구요 진행 시트 7개 모두 최신 상태에요 헤헤 또 궁금한 거 있으세요?"
+  },
+  {
+    "file": "real__chatterbox__default-ex0.8-cfg0.3__kr-aegyo.wav",
+    "cer": 0.136,
+    "asr": "나잔, 재미예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있고요. 진행 시트 7개 모두 최신 상태예요. 헤헤, 또 궁금한 거 있으세요?"
+  },
+  {
+    "file": "real__chatterbox__default-ex1.1-cfg0.2__kr-aegyo.wav",
+    "cer": 0.119,
+    "asr": "나잔, 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있고요. 진행 시트 7개 모두 퇴신 상태예요. 헤헤 또 궁금한 거 있으세요?"
+  },
+  {
+    "file": "real__chatterbox__default__en.wav",
+    "cer": 0.0,
+    "asr": "Good evening. The portal sync just finished. One new student was document verified and all seven progress sheets are up to date. Anything else I can check for you?"
+  },
+  {
+    "file": "real__chatterbox__default__kr-neutral.wav",
+    "cer": 0.061,
+    "asr": "안녕하세요. 방금 포털 동지화가 끝났습니다. 새로 서류 검증된 학생이 한 명 있고, 진행 시트 7개가 모두 최신 상태입니다."
+  },
+  {
+    "file": "real__chatterbox__meloref-ex0.5-cfg0.5__kr-aegyo.wav",
+    "cer": 0.102,
+    "asr": "자잔, 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있고요, 진행 시트 7개 모두 최신 상태예요. 헤헤, 또 궁금한 거 있으세요?"
+  },
+  {
+    "file": "real__chatterbox__meloref-ex0.8-cfg0.3__kr-aegyo.wav",
+    "cer": 0.085,
+    "asr": "짜잔, 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있고요. 진행 시트 7개 모두 최신 상태예요. 헤헤, 또 궁금한 거 있으세요?"
+  },
+  {
+    "file": "real__chatterbox__meloref-ex1.1-cfg0.2__kr-aegyo.wav",
+    "cer": 0.102,
+    "asr": "짜잔, 제니예요, 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있고요, 진행 시틀 7개 모두 최신 상태예요. 헤헤, 또 궁금한 거 있으세요?"
+  },
+  {
+    "file": "real__chatterbox__meloref__en.wav",
+    "cer": 0.0,
+    "asr": "Good evening. The portal sync just finished. One new student was document verified and all seven progress sheets are up to date. Anything else I can check for you?"
+  },
+  {
+    "file": "real__chatterbox__meloref__kr-neutral.wav",
+    "cer": 0.041,
+    "asr": "안녕하세요. 방금 포털 동기화가 끝났습니다. 새로 서류 검증된 학생이 한 명 있고 진행 시트 7개가 모두 최신 상태입니다."
+  }
+]

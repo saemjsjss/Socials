@@ -1,0 +1,112 @@
+[
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__default-cfg0__kr-neutral.wav",
+    "sr": 24000,
+    "channels": 1,
+    "duration_s": 11.8,
+    "peak": 0.974,
+    "rms_dbfs": -16.0,
+    "silent_frac": 0.19,
+    "ok": true
+  },
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__default-ex0.5-cfg0.5__kr-aegyo.wav",
+    "sr": 24000,
+    "channels": 1,
+    "duration_s": 9.08,
+    "peak": 1.0,
+    "rms_dbfs": -16.1,
+    "silent_frac": 0.11,
+    "ok": true
+  },
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__default-ex0.8-cfg0.3__kr-aegyo.wav",
+    "sr": 24000,
+    "channels": 1,
+    "duration_s": 9.88,
+    "peak": 0.995,
+    "rms_dbfs": -15.6,
+    "silent_frac": 0.12,
+    "ok": true
+  },
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__default-ex1.1-cfg0.2__kr-aegyo.wav",
+    "sr": 24000,
+    "channels": 1,
+    "duration_s": 10.92,
+    "peak": 0.993,
+    "rms_dbfs": -15.9,
+    "silent_frac": 0.11,
+    "ok": true
+  },
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__default__en.wav",
+    "sr": 24000,
+    "channels": 1,
+    "duration_s": 7.52,
+    "peak": 1.0,
+    "rms_dbfs": -18.0,
+    "silent_frac": 0.14,
+    "ok": true
+  },
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__default__kr-neutral.wav",
+    "sr": 24000,
+    "channels": 1,
+    "duration_s": 8.28,
+    "peak": 0.908,
+    "rms_dbfs": -16.8,
+    "silent_frac": 0.15,
+    "ok": true
+  },
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__meloref-ex0.5-cfg0.5__kr-aegyo.wav",
+    "sr": 24000,
+    "channels": 1,
+    "duration_s": 12.72,
+    "peak": 0.913,
+    "rms_dbfs": -15.6,
+    "silent_frac": 0.16,
+    "ok": true
+  },
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__meloref-ex0.8-cfg0.3__kr-aegyo.wav",
+    "sr": 24000,
+    "channels": 1,
+    "duration_s": 14.52,
+    "peak": 0.94,
+    "rms_dbfs": -15.7,
+    "silent_frac": 0.25,
+    "ok": true
+  },
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__meloref-ex1.1-cfg0.2__kr-aegyo.wav",
+    "sr": 24000,
+    "channels": 1,
+    "duration_s": 14.6,
+    "peak": 0.989,
+    "rms_dbfs": -15.3,
+    "silent_frac": 0.2,
+    "ok": true
+  },
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__meloref__en.wav",
+    "sr": 24000,
+    "channels": 1,
+    "duration_s": 10.4,
+    "peak": 1.0,
+    "rms_dbfs": -15.9,
+    "silent_frac": 0.1,
+    "ok": true
+  },
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__meloref__kr-neutral.wav",
+    "sr": 24000,
+    "channels": 1,
+    "duration_s": 11.72,
+    "peak": 1.0,
+    "rms_dbfs": -15.6,
+    "silent_frac": 0.19,
+    "ok": true
+  }
+]

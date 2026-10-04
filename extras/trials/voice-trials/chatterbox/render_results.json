@@ -1,0 +1,140 @@
+{
+  "device": "cuda",
+  "t3_model": "v3",
+  "load_s": 19.5,
+  "peak_vram_gb": 4.3,
+  "samples": [
+    {
+      "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__default__en.wav",
+      "voice": "default",
+      "kind": "en",
+      "lang": "en",
+      "exaggeration": 0.5,
+      "cfg_weight": 0.5,
+      "device": "cuda",
+      "synth_s": 20.67,
+      "duration_s": 7.52,
+      "rtf": 2.749
+    },
+    {
+      "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__default__kr-neutral.wav",
+      "voice": "default",
+      "kind": "kr-neutral",
+      "lang": "ko",
+      "exaggeration": 0.5,
+      "cfg_weight": 0.5,
+      "device": "cuda",
+      "synth_s": 4.27,
+      "duration_s": 8.28,
+      "rtf": 0.515
+    },
+    {
+      "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__default-ex0.5-cfg0.5__kr-aegyo.wav",
+      "voice": "default",
+      "kind": "kr-aegyo",
+      "lang": "ko",
+      "exaggeration": 0.5,
+      "cfg_weight": 0.5,
+      "device": "cuda",
+      "synth_s": 4.61,
+      "duration_s": 9.08,
+      "rtf": 0.507
+    },
+    {
+      "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__default-ex0.8-cfg0.3__kr-aegyo.wav",
+      "voice": "default",
+      "kind": "kr-aegyo",
+      "lang": "ko",
+      "exaggeration": 0.8,
+      "cfg_weight": 0.3,
+      "device": "cuda",
+      "synth_s": 4.97,
+      "duration_s": 9.88,
+      "rtf": 0.503
+    },
+    {
+      "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__default-ex1.1-cfg0.2__kr-aegyo.wav",
+      "voice": "default",
+      "kind": "kr-aegyo",
+      "lang": "ko",
+      "exaggeration": 1.1,
+      "cfg_weight": 0.2,
+      "device": "cuda",
+      "synth_s": 5.64,
+      "duration_s": 10.92,
+      "rtf": 0.516
+    },
+    {
+      "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__meloref__en.wav",
+      "voice": "meloref",
+      "kind": "en",
+      "lang": "en",
+      "exaggeration": 0.5,
+      "cfg_weight": 0.5,
+      "device": "cuda",
+      "synth_s": 6.22,
+      "duration_s": 10.4,
+      "rtf": 0.598
+    },
+    {
+      "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__meloref__kr-neutral.wav",
+      "voice": "meloref",
+      "kind": "kr-neutral",
+      "lang": "ko",
+      "exaggeration": 0.5,
+      "cfg_weight": 0.5,
+      "device": "cuda",
+      "synth_s": 6.08,
+      "duration_s": 11.72,
+      "rtf": 0.519
+    },
+    {
+      "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__meloref-ex0.5-cfg0.5__kr-aegyo.wav",
+      "voice": "meloref",
+      "kind": "kr-aegyo",
+      "lang": "ko",
+      "exaggeration": 0.5,
+      "cfg_weight": 0.5,
+      "device": "cuda",
+      "synth_s": 6.84,
+      "duration_s": 12.72,
+      "rtf": 0.538
+    },
+    {
+      "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__meloref-ex0.8-cfg0.3__kr-aegyo.wav",
+      "voice": "meloref",
+      "kind": "kr-aegyo",
+      "lang": "ko",
+      "exaggeration": 0.8,
+      "cfg_weight": 0.3,
+      "device": "cuda",
+      "synth_s": 7.72,
+      "duration_s": 14.52,
+      "rtf": 0.532
+    },
+    {
+      "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__meloref-ex1.1-cfg0.2__kr-aegyo.wav",
+      "voice": "meloref",
+      "kind": "kr-aegyo",
+      "lang": "ko",
+      "exaggeration": 1.1,
+      "cfg_weight": 0.2,
+      "device": "cuda",
+      "synth_s": 7.81,
+      "duration_s": 14.6,
+      "rtf": 0.535
+    },
+    {
+      "file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__chatterbox__default-cfg0__kr-neutral.wav",
+      "voice": "default",
+      "kind": "kr-neutral",
+      "lang": "ko",
+      "exaggeration": 0.5,
+      "cfg_weight": 0.0,
+      "device": "cuda",
+      "synth_s": 6.09,
+      "duration_s": 11.8,
+      "rtf": 0.516
+    }
+  ]
+}

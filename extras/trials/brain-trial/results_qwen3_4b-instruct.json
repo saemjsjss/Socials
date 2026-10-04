@@ -1,0 +1,357 @@
+{
+  "model": "qwen3:4b-instruct",
+  "load_wall_s": 2.77,
+  "load_ollama_s": 0.0,
+  "size_gb": 2.96,
+  "size_vram_gb": 2.96,
+  "context_length": 4096,
+  "fully_on_gpu": true,
+  "fits_budget": true,
+  "routing": [
+    {
+      "id": 1,
+      "utterance": "제니야 오늘 서류 검증된 학생 몇 명이야?",
+      "expected": [
+        "verified_today",
+        null
+      ],
+      "raw": "{\"command\": \"verified_today\", \"date\": null, \"english_query\": \"How many students had their documents verified today?\", \"language\": \"ko\"}",
+      "json_valid": true,
+      "command_ok": true,
+      "date_ok": true,
+      "lang_ok": true,
+      "wall_s": 0.4,
+      "ollama_s": 0.4,
+      "prompt_tokens": 408,
+      "gen_tokens": 33,
+      "gen_tok_s": 118.6,
+      "prompt_tok_s": 4463.7
+    },
+    {
+      "id": 2,
+      "utterance": "제니야 오늘 수료 검증된 학생 몇 명이야?",
+      "expected": [
+        "verified_today",
+        null
+      ],
+      "raw": "{\"command\": \"verified_today\", \"date\": null, \"english_query\": \"How many students were verified today for completion?\", \"language\": \"ko\"}",
+      "json_valid": true,
+      "command_ok": true,
+      "date_ok": true,
+      "lang_ok": true,
+      "wall_s": 0.314,
+      "ollama_s": 0.313,
+      "prompt_tokens": 408,
+      "gen_tokens": 33,
+      "gen_tok_s": 119.3,
+      "prompt_tok_s": 19806.8
+    },
+    {
+      "id": 3,
+      "utterance": "그럼 어제는?",
+      "expected": [
+        "verified_date",
+        "2026-09-26"
+      ],
+      "raw": "{\"command\": \"verified_date\", \"date\": \"2026-09-26\", \"english_query\": \"How many students had their documents verified yesterday?\", \"language\": \"ko\"}",
+      "json_valid": true,
+      "command_ok": true,
+      "date_ok": true,
+      "lang_ok": true,
+      "wall_s": 0.428,
+      "ollama_s": 0.427,
+      "prompt_tokens": 449,
+      "gen_tokens": 43,
+      "gen_tok_s": 119.1,
+      "prompt_tok_s": 17773.7
+    },
+    {
+      "id": 4,
+      "utterance": "이번 주 일정이나 마감 있어?",
+      "expected": [
+        "calendar",
+        null
+      ],
+      "raw": "{\"command\": \"calendar\", \"date\": null, \"english_query\": \"What are the schedule or deadlines this week?\", \"language\": \"ko\"}",
+      "json_valid": true,
+      "command_ok": true,
+      "date_ok": true,
+      "lang_ok": true,
+      "wall_s": 0.328,
+      "ollama_s": 0.311,
+      "prompt_tokens": 399,
+      "gen_tokens": 32,
+      "gen_tok_s": 119.5,
+      "prompt_tok_s": 15002.8
+    },
+    {
+      "id": 5,
+      "utterance": "여권 정보 틀린 학생 있어?",
+      "expected": [
+        "passports",
+        null
+      ],
+      "raw": "{\"command\": \"passports\", \"date\": null, \"english_query\": \"Are there any students with incorrect passport information?\", \"language\": \"ko\"}",
+      "json_valid": true,
+      "command_ok": true,
+      "date_ok": true,
+      "lang_ok": true,
+      "wall_s": 0.327,
+      "ollama_s": 0.326,
+      "prompt_tokens": 402,
+      "gen_tokens": 33,
+      "gen_tok_s": 120.0,
+      "prompt_tok_s": 24951.9
+    },
+    {
+      "id": 6,
+      "utterance": "오늘 상담 몇 건 했어?",
+      "expected": [
+        "inquiries_today",
+        null
+      ],
+      "raw": "{\"command\": \"inquiries_today\", \"date\": null, \"english_query\": \"How many consultations were handled today?\", \"language\": \"ko\"}",
+      "json_valid": true,
+      "command_ok": true,
+      "date_ok": true,
+      "lang_ok": true,
+      "wall_s": 0.325,
+      "ollama_s": 0.325,
+      "prompt_tokens": 401,
+      "gen_tokens": 32,
+      "gen_tok_s": 120.0,
+      "prompt_tok_s": 25685.4
+    },
+    {
+      "id": 7,
+      "utterance": "Jennie, how many students were verified today?",
+      "expected": [
+        "verified_today",
+        null
+      ],
+      "raw": "{\"command\": \"verified_today\", \"date\": null, \"english_query\": \"How many students were verified today?\", \"language\": \"en\"}",
+      "json_valid": true,
+      "command_ok": true,
+      "date_ok": true,
+      "lang_ok": true,
+      "wall_s": 0.332,
+      "ollama_s": 0.314,
+      "prompt_tokens": 400,
+      "gen_tokens": 31,
+      "gen_tok_s": 120.4,
+      "prompt_tok_s": 25706.9
+    },
+    {
+      "id": 8,
+      "utterance": "and yesterday?",
+      "expected": [
+        "verified_date",
+        "2026-09-26"
+      ],
+      "raw": "{\"command\": \"verified_date\", \"date\": \"2026-09-26\", \"english_query\": \"How many students were verified yesterday?\", \"language\": \"en\"}",
+      "json_valid": true,
+      "command_ok": true,
+      "date_ok": true,
+      "lang_ok": true,
+      "wall_s": 0.38,
+      "ollama_s": 0.379,
+      "prompt_tokens": 426,
+      "gen_tokens": 41,
+      "gen_tok_s": 119.4,
+      "prompt_tok_s": 21050.6
+    },
+    {
+      "id": 9,
+      "utterance": "What deadlines are coming up?",
+      "expected": [
+        "calendar",
+        null
+      ],
+      "raw": "{\"command\": \"calendar\", \"date\": null, \"english_query\": \"What deadlines are coming up?\", \"language\": \"en\"}",
+      "json_valid": true,
+      "command_ok": true,
+      "date_ok": true,
+      "lang_ok": true,
+      "wall_s": 0.296,
+      "ollama_s": 0.296,
+      "prompt_tokens": 396,
+      "gen_tokens": 29,
+      "gen_tok_s": 119.2,
+      "prompt_tok_s": 23728.2
+    },
+    {
+      "id": 10,
+      "utterance": "Thanks Jennie, you're the best!",
+      "expected": [
+        "chat",
+        null
+      ],
+      "raw": "{\"command\": \"chat\", \"date\": null, \"english_query\": \"Thanks Jennie, you're the best!\", \"language\": \"en\"}",
+      "json_valid": true,
+      "command_ok": true,
+      "date_ok": true,
+      "lang_ok": true,
+      "wall_s": 0.326,
+      "ollama_s": 0.326,
+      "prompt_tokens": 399,
+      "gen_tokens": 32,
+      "gen_tok_s": 119.2,
+      "prompt_tok_s": 26068.2
+    },
+    {
+      "id": 11,
+      "utterance": "고마워 제니야, 수고했어!",
+      "expected": [
+        "chat",
+        null
+      ],
+      "raw": "{\"command\": \"chat\", \"date\": null, \"english_query\": \"Thank you so much, Jenny! You're great!\", \"language\": \"en\"}",
+      "json_valid": true,
+      "command_ok": true,
+      "date_ok": true,
+      "lang_ok": false,
+      "wall_s": 0.325,
+      "ollama_s": 0.325,
+      "prompt_tokens": 402,
+      "gen_tokens": 34,
+      "gen_tok_s": 119.3,
+      "prompt_tok_s": 19822.5
+    },
+    {
+      "id": 12,
+      "utterance": "Give me the overall stats",
+      "expected": [
+        "stats",
+        null
+      ],
+      "raw": "{\"command\": \"stats\", \"date\": null, \"english_query\": \"Give me the overall stats\", \"language\": \"en\"}",
+      "json_valid": true,
+      "command_ok": true,
+      "date_ok": true,
+      "lang_ok": true,
+      "wall_s": 0.303,
+      "ollama_s": 0.302,
+      "prompt_tokens": 395,
+      "gen_tokens": 29,
+      "gen_tok_s": 119.6,
+      "prompt_tok_s": 26007.4
+    }
+  ],
+  "replies": [
+    {
+      "id": 1,
+      "utterance": "제니야 오늘 서류 검증된 학생 몇 명이야?",
+      "reply": "짜잔! 오늘 서류 검증된 학생은 두 명이에요용~ 💖",
+      "checks": {
+        "len": 28,
+        "len_ok": true,
+        "sentences": 2,
+        "no_markdown": true,
+        "no_emoji": false,
+        "no_url": true,
+        "sentences_ok": true,
+        "hangul": true,
+        "no_latin_sentence": true,
+        "latin_words": [],
+        "no_ascii_digits": true,
+        "lang_ok": true,
+        "fact_two": true,
+        "fact_28000": false,
+        "passed": [
+          "len_ok",
+          "sentences_ok",
+          "no_markdown",
+          "no_url",
+          "lang_ok",
+          "no_ascii_digits",
+          "fact_two"
+        ],
+        "failed": [
+          "no_emoji",
+          "fact_28000"
+        ]
+      },
+      "wall_s": 0.378,
+      "ollama_s": 0.377,
+      "prompt_tokens": 427,
+      "gen_tokens": 23,
+      "gen_tok_s": 119.6,
+      "prompt_tok_s": 4653.5
+    },
+    {
+      "id": 7,
+      "utterance": "Jennie, how many students were verified today?",
+      "reply": "Yay! Today, 2 students were verified, hehe! 🎉",
+      "checks": {
+        "len": 45,
+        "len_ok": true,
+        "sentences": 3,
+        "no_markdown": true,
+        "no_emoji": false,
+        "no_url": true,
+        "sentences_ok": false,
+        "lang_ok": true,
+        "fact_two": true,
+        "fact_28000": false,
+        "passed": [
+          "len_ok",
+          "no_markdown",
+          "no_url",
+          "lang_ok",
+          "fact_two"
+        ],
+        "failed": [
+          "sentences_ok",
+          "no_emoji",
+          "fact_28000"
+        ]
+      },
+      "wall_s": 0.28,
+      "ollama_s": 0.279,
+      "prompt_tokens": 365,
+      "gen_tokens": 18,
+      "gen_tok_s": 122.7,
+      "prompt_tok_s": 4742.3
+    },
+    {
+      "id": 10,
+      "utterance": "Thanks Jennie, you're the best!",
+      "reply": "Yay! Thanks so much, you're the best too, hehe! 😊",
+      "checks": {
+        "len": 49,
+        "len_ok": true,
+        "sentences": 3,
+        "no_markdown": true,
+        "no_emoji": false,
+        "no_url": true,
+        "sentences_ok": false,
+        "lang_ok": true,
+        "passed": [
+          "len_ok",
+          "no_markdown",
+          "no_url",
+          "lang_ok"
+        ],
+        "failed": [
+          "sentences_ok",
+          "no_emoji"
+        ]
+      },
+      "wall_s": 0.214,
+      "ollama_s": 0.213,
+      "prompt_tokens": 280,
+      "gen_tokens": 19,
+      "gen_tok_s": 121.0,
+      "prompt_tok_s": 11333.3
+    }
+  ],
+  "routing_command_acc": "12/12",
+  "routing_date_acc": "12/12",
+  "json_valid": "12/12",
+  "route_latency_s": 0.34,
+  "reply_latency_s": 0.29,
+  "gen_tok_s": 119.8,
+  "prompt_tok_s": 18053.1,
+  "route_plus_reply_s": 0.63,
+  "available": true
+}

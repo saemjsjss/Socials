@@ -1,0 +1,26 @@
+ok FunAudioLLM/CosyVoice-300M-SFT/campplus.onnx 28303423
+ok FunAudioLLM/CosyVoice-300M-SFT/config.json 2
+ok FunAudioLLM/CosyVoice-300M-SFT/configuration.json 47
+ok FunAudioLLM/CosyVoice-300M-SFT/cosyvoice.yaml 6421
+ok FunAudioLLM/CosyVoice-300M-SFT/flow.pt 419900943
+ok FunAudioLLM/CosyVoice-300M-SFT/hift.pt 81896716
+ok FunAudioLLM/CosyVoice-300M-SFT/llm.pt 1242994835
+ok FunAudioLLM/CosyVoice-300M-SFT/speech_tokenizer_v1.onnx 522624269
+ok FunAudioLLM/CosyVoice-300M-SFT/spk2info.pt 7772
+ok FunAudioLLM/CosyVoice-300M-SFT/README.md 9741
+ok FunAudioLLM/CosyVoice2-0.5B/CosyVoice-BlankEN/config.json 659
+ok FunAudioLLM/CosyVoice2-0.5B/CosyVoice-BlankEN/generation_config.json 242
+ok FunAudioLLM/CosyVoice2-0.5B/CosyVoice-BlankEN/merges.txt 1402109
+ok FunAudioLLM/CosyVoice2-0.5B/CosyVoice-BlankEN/model.safetensors 988097824
+ok FunAudioLLM/CosyVoice2-0.5B/CosyVoice-BlankEN/tokenizer_config.json 1287
+ok FunAudioLLM/CosyVoice2-0.5B/CosyVoice-BlankEN/vocab.json 2776833
+ok FunAudioLLM/CosyVoice2-0.5B/campplus.onnx 28303423
+ok FunAudioLLM/CosyVoice2-0.5B/config.json 2
+ok FunAudioLLM/CosyVoice2-0.5B/configuration.json 47
+ok FunAudioLLM/CosyVoice2-0.5B/cosyvoice2.yaml 7330
+ok FunAudioLLM/CosyVoice2-0.5B/flow.pt 450575567
+ok FunAudioLLM/CosyVoice2-0.5B/hift.pt 83390254
+ok FunAudioLLM/CosyVoice2-0.5B/llm.pt 2023316821
+ok FunAudioLLM/CosyVoice2-0.5B/speech_tokenizer_v2.onnx 496082973
+ok FunAudioLLM/CosyVoice2-0.5B/README.md 12073
+DONE

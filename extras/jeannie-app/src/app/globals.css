@@ -1,0 +1,750 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─────────────────────────────────────────────────────────────
+   Jeannie HUD · "Pink Overdrive"
+   void #0A050A / #120712 · neon #FF007F / #FF1493 / #FF69B4
+   petal #F472B6 / #FBCFE8 · glow rgba(255, 0, 127, 0.4)
+   ───────────────────────────────────────────────────────────── */
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --void: #0a050a;
+    --void-800: #120712;
+    --neon: #ff007f;
+    --neon-deep: #ff1493;
+    --neon-hot: #ff69b4;
+    --petal: #f472b6;
+    --petal-soft: #fbcfe8;
+    --glow: rgba(255, 0, 127, 0.4);
+    --panel: rgba(18, 7, 18, 0.72);
+    --bracket: #ff69b4;
+  }
+
+  html {
+    background-color: var(--void);
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    min-height: 100vh;
+    min-height: 100dvh;
+    overflow-x: hidden;
+    /* Layered over the bg-void colour: two soft pink nebulae behind everything. */
+    background-image:
+      radial-gradient(ellipse 70% 55% at 50% 38%, rgba(255, 0, 127, 0.14), transparent 70%),
+      radial-gradient(ellipse 45% 40% at 8% 100%, rgba(255, 20, 147, 0.1), transparent 70%),
+      radial-gradient(ellipse 40% 35% at 100% 0%, rgba(244, 114, 182, 0.08), transparent 70%);
+    background-attachment: fixed;
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Faint tactical grid, fading out toward the edges. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(255, 0, 127, 0.055) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 0, 127, 0.055) 1px, transparent 1px);
+    background-size: 44px 44px;
+    background-position: center center;
+    -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 45%, #000 20%, transparent 85%);
+    mask-image: radial-gradient(ellipse 80% 70% at 50% 45%, #000 20%, transparent 85%);
+  }
+
+  /* CRT scanlines over the whole HUD. */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.022) 0,
+      rgba(255, 255, 255, 0.022) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    mix-blend-mode: overlay;
+  }
+
+  ::selection {
+    background: rgba(255, 0, 127, 0.45);
+    color: #fff;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 0, 127, 0.55) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgba(255, 0, 127, 0.7), rgba(255, 105, 180, 0.45));
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, #ff007f, #ff69b4);
+    background-clip: padding-box;
+  }
+
+  :focus {
+    outline: none;
+  }
+  :focus-visible {
+    outline: 2px solid var(--neon-hot);
+    outline-offset: 2px;
+    box-shadow:
+      0 0 0 4px rgba(255, 0, 127, 0.22),
+      0 0 18px rgba(255, 0, 127, 0.55);
+  }
+
+  button,
+  [role="button"],
+  a {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  input,
+  textarea {
+    caret-color: var(--neon-hot);
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: rgba(251, 207, 232, 0.42);
+  }
+}
+
+@layer components {
+  /* Translucent HUD panel with inner glow and four corner brackets. */
+  .hud-panel {
+    position: relative;
+    isolation: isolate;
+    background: linear-gradient(180deg, rgba(255, 0, 127, 0.05), transparent 38%), var(--panel);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    backdrop-filter: blur(14px) saturate(140%);
+    border: 1px solid rgba(255, 0, 127, 0.4);
+    border-radius: 6px;
+    box-shadow:
+      inset 0 0 24px rgba(255, 0, 127, 0.12),
+      inset 0 1px 0 rgba(255, 105, 180, 0.12),
+      0 0 28px rgba(255, 0, 127, 0.08);
+  }
+  .hud-panel::before {
+    content: "";
+    position: absolute;
+    inset: -2px;
+    z-index: 1;
+    pointer-events: none;
+    border-radius: 7px;
+    --len: 14px;
+    --thick: 2px;
+    background:
+      linear-gradient(var(--bracket), var(--bracket)) top left / var(--len) var(--thick),
+      linear-gradient(var(--bracket), var(--bracket)) top left / var(--thick) var(--len),
+      linear-gradient(var(--bracket), var(--bracket)) top right / var(--len) var(--thick),
+      linear-gradient(var(--bracket), var(--bracket)) top right / var(--thick) var(--len),
+      linear-gradient(var(--bracket), var(--bracket)) bottom left / var(--len) var(--thick),
+      linear-gradient(var(--bracket), var(--bracket)) bottom left / var(--thick) var(--len),
+      linear-gradient(var(--bracket), var(--bracket)) bottom right / var(--len) var(--thick),
+      linear-gradient(var(--bracket), var(--bracket)) bottom right / var(--thick) var(--len);
+    background-repeat: no-repeat;
+    filter: drop-shadow(0 0 4px rgba(255, 0, 127, 0.8));
+  }
+
+  .hud-title {
+    font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--neon-hot);
+  }
+
+  .hud-label {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 0.625rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: rgba(251, 207, 232, 0.62);
+  }
+
+  .hud-divider {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(255, 0, 127, 0.55), transparent);
+  }
+
+  .text-glow {
+    text-shadow:
+      0 0 6px rgba(255, 0, 127, 0.85),
+      0 0 22px rgba(255, 0, 127, 0.45);
+  }
+  .text-glow-soft {
+    text-shadow: 0 0 10px rgba(255, 0, 127, 0.45);
+  }
+
+  /* Icon / control button. min 40px touch target. */
+  .hud-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    min-width: 40px;
+    min-height: 40px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 0, 127, 0.35);
+    background: rgba(255, 0, 127, 0.06);
+    color: var(--petal-soft);
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease,
+      box-shadow 160ms ease,
+      color 160ms ease,
+      transform 120ms ease;
+  }
+  .hud-btn:hover:not(:disabled) {
+    border-color: rgba(255, 105, 180, 0.8);
+    background: rgba(255, 0, 127, 0.14);
+    box-shadow: 0 0 14px rgba(255, 0, 127, 0.35);
+    color: #fff;
+  }
+  .hud-btn:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+  .hud-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .hud-btn[data-active="true"] {
+    border-color: var(--neon);
+    background: rgba(255, 0, 127, 0.22);
+    color: #fff;
+    box-shadow:
+      0 0 16px rgba(255, 0, 127, 0.55),
+      inset 0 0 10px rgba(255, 0, 127, 0.35);
+  }
+
+  .hud-btn-primary {
+    border-color: var(--neon);
+    background: linear-gradient(135deg, #ff007f, #ff1493 60%, #ff69b4);
+    color: #fff;
+    box-shadow: 0 0 18px rgba(255, 0, 127, 0.5);
+  }
+  .hud-btn-primary:hover:not(:disabled) {
+    background: linear-gradient(135deg, #ff1493, #ff69b4);
+    box-shadow: 0 0 26px rgba(255, 0, 127, 0.75);
+  }
+
+  .hud-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-height: 40px;
+    padding: 0.35rem 0.8rem;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 0, 127, 0.35);
+    background: rgba(255, 0, 127, 0.07);
+    font-size: 0.78rem;
+    color: var(--petal-soft);
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease,
+      box-shadow 160ms ease;
+  }
+  .hud-chip:hover {
+    border-color: var(--neon-hot);
+    background: rgba(255, 0, 127, 0.16);
+    box-shadow: 0 0 14px rgba(255, 0, 127, 0.35);
+  }
+
+  .hud-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: 3px;
+    border: 1px solid rgba(255, 0, 127, 0.3);
+    background: rgba(255, 0, 127, 0.06);
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 0.625rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: rgba(251, 207, 232, 0.85);
+    white-space: nowrap;
+  }
+
+  /* Status LEDs. */
+  .led {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    flex: none;
+    border-radius: 999px;
+    background: rgba(251, 207, 232, 0.2);
+    box-shadow: inset 0 0 0 1px rgba(251, 207, 232, 0.25);
+  }
+  .led-on {
+    background: var(--neon);
+    box-shadow:
+      0 0 6px var(--neon),
+      0 0 14px rgba(255, 0, 127, 0.7);
+    animation: led-pulse 2.4s ease-in-out infinite;
+  }
+  .led-warn {
+    background: #fbbf24;
+    box-shadow: 0 0 8px rgba(251, 191, 36, 0.8);
+  }
+  .led-idle {
+    background: var(--petal);
+    box-shadow: 0 0 6px rgba(244, 114, 182, 0.6);
+  }
+
+  .hud-input {
+    width: 100%;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 0, 127, 0.35);
+    background: rgba(10, 5, 10, 0.7);
+    color: var(--petal-soft);
+    transition:
+      border-color 160ms ease,
+      box-shadow 160ms ease;
+  }
+  .hud-input:focus-visible,
+  .hud-input:focus {
+    outline: none;
+    border-color: var(--neon-hot);
+    box-shadow:
+      0 0 0 3px rgba(255, 0, 127, 0.18),
+      0 0 18px rgba(255, 0, 127, 0.35);
+  }
+
+  .streaming-cursor {
+    display: inline-block;
+    width: 0.55em;
+    height: 1.05em;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    background: var(--neon);
+    box-shadow: 0 0 8px var(--neon);
+    animation: cursor-blink 1s steps(2, start) infinite;
+  }
+
+  /* Camera reticle + scan line. */
+  .scan-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--neon-hot), transparent);
+    box-shadow: 0 0 16px 2px rgba(255, 0, 127, 0.7);
+    animation: scan-sweep 2.6s ease-in-out infinite;
+  }
+}
+
+@layer utilities {
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+  .mask-fade-x {
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 16px, #000 calc(100% - 16px), transparent);
+    mask-image: linear-gradient(90deg, transparent, #000 16px, #000 calc(100% - 16px), transparent);
+  }
+  .touch-hold {
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+  }
+  .pad-safe {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+  }
+}
+
+@keyframes led-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@keyframes cursor-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+@keyframes scan-sweep {
+  0% {
+    top: 4%;
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  50% {
+    top: 94%;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    top: 4%;
+    opacity: 0;
+  }
+}
+
+@keyframes hud-glitch {
+  0%,
+  92%,
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+  93% {
+    transform: translateX(1px) skewX(-6deg);
+    opacity: 0.85;
+  }
+  95% {
+    transform: translateX(-1px);
+    opacity: 0.95;
+  }
+}
+
+.animate-glitch {
+  animation: hud-glitch 6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .scan-line {
+    top: 50%;
+    opacity: 0.8;
+  }
+}
+
+/* ── Avatar screen (phones) ──────────────────────────────────────────────────
+   Light backdrop sampled from the clips (see src/lib/avatar/clips.ts). */
+
+/* Until the view mode is known, phones show only the backdrop, never a flash of the HUD.
+   Media query = PHONE_QUERY in src/lib/avatar/view-mode.ts. */
+@media (orientation: portrait) and (min-width: 360px) and (max-width: 480px) and (pointer: coarse) {
+  .view-pending {
+    visibility: hidden;
+  }
+  .view-pending-backdrop {
+    position: fixed;
+    inset: 0;
+    background: #dbc7c7;
+  }
+}
+
+.avatar-screen {
+  background: #dbc7c7;
+  color: #3b1f2b;
+  overscroll-behavior: none;
+  touch-action: manipulation;
+}
+
+.avatar-stage {
+  overflow: hidden;
+  /* Own stacking context: the videos' z-index must not lift them over the subtitle and buttons. */
+  isolation: isolate;
+}
+
+.avatar-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center bottom;
+  opacity: 0;
+  transform-origin: 50% 30%;
+  /* Matches FADE_MS in AvatarStage.tsx. */
+  transition:
+    opacity 400ms ease-in-out,
+    transform 600ms ease;
+  pointer-events: none;
+}
+.avatar-video[data-front="true"] {
+  opacity: 1;
+  z-index: 1;
+}
+
+/* Listening: a slight push-in and a soft vignette. */
+.avatar-vignette {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 35%, transparent 45%, rgba(59, 31, 43, 0.28) 100%);
+  opacity: 0;
+  transition: opacity 400ms ease;
+}
+.avatar-stage[data-focus="true"] .avatar-video {
+  transform: scale(1.04);
+}
+.avatar-stage[data-focus="true"] .avatar-vignette {
+  opacity: 1;
+}
+
+/* The last two lines of her reply; older lines scroll off the top and fade. */
+.avatar-subtitle {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  max-width: 26rem;
+  max-height: calc(2 * 1.5em + 1rem);
+  overflow: hidden;
+  padding: 0.5rem 0.9rem;
+  border-radius: 1rem;
+  background: rgba(35, 16, 26, 0.5);
+  color: #fff;
+  font-size: 1.0625rem;
+  line-height: 1.5;
+  text-align: center;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 0.55rem);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 0.55rem);
+  opacity: 0;
+  transform: translateY(6px);
+  transition:
+    opacity 500ms ease,
+    transform 500ms ease;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+.avatar-subtitle[data-visible="true"] {
+  opacity: 1;
+  transform: none;
+}
+
+.avatar-heard {
+  max-width: 22rem;
+  padding: 0.3rem 0.8rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #5b2a40;
+  font-size: 0.875rem;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.avatar-fab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(35, 16, 26, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  box-shadow: 0 6px 20px rgba(59, 31, 43, 0.25);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    transform 150ms ease,
+    background-color 150ms ease,
+    box-shadow 150ms ease;
+}
+.avatar-fab:focus-visible {
+  outline: 2px solid #ff007f;
+  outline-offset: 3px;
+}
+.avatar-fab:disabled {
+  opacity: 0.5;
+}
+.avatar-fab-sm {
+  width: 3.25rem;
+  height: 3.25rem;
+}
+.avatar-fab-lg {
+  width: 5rem;
+  height: 5rem;
+  background: rgba(255, 0, 127, 0.78);
+}
+.avatar-fab-live {
+  transform: scale(1.1);
+  background: #ff007f;
+  box-shadow:
+    0 0 0 8px rgba(255, 0, 127, 0.22),
+    0 0 32px rgba(255, 0, 127, 0.55);
+  animation: avatar-mic-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes avatar-mic-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 6px rgba(255, 0, 127, 0.22),
+      0 0 24px rgba(255, 0, 127, 0.5);
+  }
+  50% {
+    box-shadow:
+      0 0 0 14px rgba(255, 0, 127, 0.12),
+      0 0 40px rgba(255, 0, 127, 0.6);
+  }
+}
+
+/* Back to the avatar from the phone HUD: a round crop of her face. */
+.avatar-return {
+  width: 3.25rem;
+  height: 3.25rem;
+  padding: 0;
+  border-radius: 999px;
+  border: 2px solid #ff007f;
+  background: #dbc7c7;
+  box-shadow: 0 0 16px rgba(255, 0, 127, 0.45);
+  overflow: hidden;
+}
+.avatar-return:focus-visible {
+  outline: 2px solid #fbcfe8;
+  outline-offset: 3px;
+}
+.avatar-return-face {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background-image: url("/avatar/idle.jpg");
+  background-size: 234px 416px;
+  background-position: -89px -12px;
+  background-repeat: no-repeat;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .avatar-stage[data-focus="true"] .avatar-video {
+    transform: none;
+  }
+}
+
+/* "Offline: Jeannie needs a connection" (OfflineBanner), over both views. */
+.offline-banner-region {
+  position: fixed;
+  top: max(0.75rem, env(safe-area-inset-top));
+  left: 50%;
+  z-index: 50;
+  width: max-content;
+  max-width: calc(100vw - 2rem);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.offline-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0.95rem;
+  border: 1px dashed var(--neon-hot);
+  border-radius: 999px;
+  background: rgba(10, 5, 10, 0.9);
+  color: #fbcfe8;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  box-shadow: 0 0 16px rgba(255, 0, 127, 0.35);
+  pointer-events: auto;
+}
+.offline-banner[data-variant="avatar"] {
+  border: 1px solid #ff007f;
+  background: rgba(255, 255, 255, 0.9);
+  color: #5b2a40;
+  font-family: var(--font-sans), system-ui, sans-serif;
+  box-shadow: 0 6px 20px rgba(59, 31, 43, 0.25);
+}
+
+/* The avatar screen's Hangeul sync notice (consent on mobile data, first-sync progress). */
+.hg-sync-notice {
+  position: fixed;
+  top: calc(max(0.75rem, env(safe-area-inset-top)) + 3.75rem);
+  left: 50%;
+  z-index: 45;
+  width: min(22rem, calc(100vw - 2rem));
+  transform: translateX(-50%);
+  padding: 0.6rem 0.85rem;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.9);
+  color: #5b2a40;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  box-shadow: 0 6px 20px rgba(59, 31, 43, 0.25);
+}
+.hg-sync-notice button {
+  border-radius: 999px;
+  padding: 0.3rem 0.8rem;
+  font-size: 0.8rem;
+  border: 1px solid #ff007f;
+}
+.hg-sync-notice button[data-primary="true"] {
+  background: #ff007f;
+  color: #fff;
+}
+.hg-sync-bar {
+  height: 4px;
+  margin-top: 0.4rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 0, 127, 0.18);
+}
+.hg-sync-bar > span {
+  display: block;
+  height: 100%;
+  background: #ff007f;
+  transition: width 300ms ease;
+}
+
+/* Preview-only QA emote picker (EmotePicker): never rendered on production. */
+.emote-picker {
+  position: absolute;
+  /* Below her face: the picker must not hide what is being checked. */
+  top: 38%;
+  right: 0.5rem;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
+  max-width: 42vw;
+}
+.emote-picker button {
+  border-radius: 999px;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.75rem;
+  color: #fff;
+  background: rgba(35, 16, 26, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+.emote-picker-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}

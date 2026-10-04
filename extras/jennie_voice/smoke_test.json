@@ -1,0 +1,322 @@
+{
+ "when": "2026-09-27 19:55:25",
+ "checks": [
+  {
+   "check": "health 200 + contract keys",
+   "pass": true,
+   "detail": "{'ok': True, 'stt': 'large-v3-turbo', 'tts': 'cosyvoice2', 'device': 'cuda', 'tts_on_gpu': False, 'busy_s': 0.0} in 0.003 s"
+  },
+  {
+   "check": "stt real__cosyvoice__v2-zeroshot-krfemale__kr-aegyo.wav",
+   "pass": true,
+   "detail": "lang=ko cer=0.051 dur=17.2 stt=3.93s wall=4.11s vram_peak=3434 MiB :: 짜잔 제니예요 방금 포털 동기화가 끝났어요 새로 서류 검증된 학생이 한 명 있고요 진행 시트 일곱 개 모두 최신 상태예요 헤헤 또 궁금한 거 있으세요"
+  },
+  {
+   "check": "stt test_in_ko.ogg",
+   "pass": true,
+   "detail": "lang=ko cer=0.085 dur=17.2 stt=3.44s wall=3.72s vram_peak=3410 MiB :: 짜잔! 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있고요. 진행 시트 7개 모두 최신 상태예요. 헤헤, 또 궁금한 거 있으세요?"
+  },
+  {
+   "check": "stt real__cosyvoice__v2-crosslingual-krfemale__en.wav",
+   "pass": true,
+   "detail": "lang=en cer=0.0 dur=9.08 stt=2.89s wall=3.06s vram_peak=3406 MiB :: Good evening. The portal sync just finished. One new student was document verified, and all seven progress sheets are up to date. Anything else I can check for you?"
+  },
+  {
+   "check": "stt kokoro__bm_george__en.wav",
+   "pass": true,
+   "detail": "lang=en cer=0.0 dur=12.3 stt=2.59s wall=2.79s vram_peak=3406 MiB :: Good evening. The portal sync finished a minute ago, one new student was document verified, and all seven progress sheets are up to date. Shall I read you today's missing information report?"
+  },
+  {
+   "check": "stt 3 s of silence",
+   "pass": true,
+   "detail": "{\"text\": \"\", \"language\": \"en\", \"duration_s\": 3.0, \"seconds\": 2.14}"
+  },
+  {
+   "check": "tts ko/aegyo 87 chars",
+   "pass": true,
+   "detail": "render=10.76s wall=10.77s audio=16.48s sr=48000 voiced=-19.0dBFS peak=-6.8dBFS lead/trail=0.08/0.15s vram_peak=4751 MiB health_max=0.026s cer=0.119 :: 짜잔, 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 3명 있고요. 진행 시트 7개 모두 출신 상태예요. 헤헤, 또 궁금한 거 있으세요?"
+  },
+  {
+   "check": "tts en/neutral 166 chars",
+   "pass": true,
+   "detail": "render=7.15s wall=7.16s audio=11.32s sr=48000 voiced=-19.0dBFS peak=-4.8dBFS lead/trail=0.03/0.09s vram_peak=4338 MiB health_max=0.022s cer=0.0 :: Good evening, the portal sync. Just finished, three new students were document verified today, and all seven progress sheets are up to date. Anything else I can check for you."
+  },
+  {
+   "check": "tts ko/aegyo 20 chars",
+   "pass": true,
+   "detail": "render=3.42s wall=3.43s audio=3.83s sr=48000 voiced=-19.0dBFS peak=-7.4dBFS lead/trail=0.08/0.15s vram_peak=4324 MiB health_max=0.016s cer=0.0 :: 네, 알겠어요. 바로 확인해 볼게요."
+  },
+  {
+   "check": "tts ko/aegyo 87 chars",
+   "pass": true,
+   "detail": "render=10.63s wall=10.64s audio=16.48s sr=48000 voiced=-19.0dBFS peak=-6.8dBFS lead/trail=0.08/0.15s vram_peak=4852 MiB health_max=0.021s cer=0.119 :: 짜잔, 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 3명 있고요. 진행 시트 7개 모두 출신 상태예요. 헤헤, 또 궁금한 거 있으세요?"
+  },
+  {
+   "check": "test_out_ko.ogg decodes",
+   "pass": true,
+   "detail": "48000 Hz, 1 ch, 16.48 s, OPUS"
+  },
+  {
+   "check": "test_out_en.ogg decodes",
+   "pass": true,
+   "detail": "48000 Hz, 1 ch, 11.32 s, OPUS"
+  },
+  {
+   "check": "tts particles '브리핑은 18:05에 보내드려요~'",
+   "pass": true,
+   "detail": "audio=4.62s render=4.19s :: 브리핑은 오후 6시 5분에 보내드려요."
+  },
+  {
+   "check": "tts particles '마감일은 2026-09-27까지예요!'",
+   "pass": true,
+   "detail": "audio=4.82s render=4.98s :: 마감일은 2026년 9월 27일까지예요."
+  },
+  {
+   "check": "client gives up after 3 s -> render stops, lock free",
+   "pass": true,
+   "detail": "lock free 3.3 s after the request was sent (215 chars)"
+  },
+  {
+   "check": "tts 601 chars -> 413",
+   "pass": true,
+   "detail": "{\"error\":\"text is 601 characters; the limit is 600\"}"
+  },
+  {
+   "check": "tts bad language -> 400",
+   "pass": true,
+   "detail": "{\"error\":\"\\\"language\\\" must be \\\"en\\\" or \\\"ko\\\"\"}"
+  },
+  {
+   "check": "tts not JSON -> 400",
+   "pass": true,
+   "detail": "{\"error\":\"body must be JSON: {\\\"text\\\": ..., \\\"language\\\": \\\"en\\\"|\\\"ko\\\", \\\"style\\\": \\\"aegyo\\\"|\\\"neutral\\\"}\"}"
+  },
+  {
+   "check": "tts without JSON Content-Type -> 415",
+   "pass": true,
+   "detail": "{\"error\":\"Content-Type must be application/json\"}"
+  },
+  {
+   "check": "tts from a web page (Origin) -> 403",
+   "pass": true,
+   "detail": "{\"error\":\"requests from web pages are not accepted\"}"
+  },
+  {
+   "check": "foreign Host (DNS rebinding) -> 403",
+   "pass": true,
+   "detail": "{\"error\":\"Host must be 127.0.0.1:8765 or localhost:8765\"}"
+  },
+  {
+   "check": "stt without 'audio' field -> 422",
+   "pass": true,
+   "detail": "{\"error\":\"invalid request: body.audio: Field required\"}"
+  },
+  {
+   "check": "stt garbage -> 400",
+   "pass": true,
+   "detail": "{\"error\":\"could not decode the audio: InvalidDataError\"}"
+  },
+  {
+   "check": "unknown path -> 404 JSON",
+   "pass": true,
+   "detail": "{\"error\":\"Not Found\"}"
+  }
+ ],
+ "health_before": {
+  "ok": true,
+  "stt": "large-v3-turbo",
+  "tts": "cosyvoice2",
+  "device": "cuda",
+  "tts_on_gpu": false,
+  "busy_s": 0.0
+ },
+ "vram_idle_mib": 1292,
+ "stt": [
+  {
+   "file": "real__cosyvoice__v2-zeroshot-krfemale__kr-aegyo.wav",
+   "status": 200,
+   "text": "짜잔 제니예요 방금 포털 동기화가 끝났어요 새로 서류 검증된 학생이 한 명 있고요 진행 시트 일곱 개 모두 최신 상태예요 헤헤 또 궁금한 거 있으세요",
+   "language": "ko",
+   "duration_s": 17.2,
+   "seconds": 3.93,
+   "wall_s": 4.11,
+   "cer": 0.051,
+   "vram_peak_mib": 3434
+  },
+  {
+   "file": "test_in_ko.ogg",
+   "status": 200,
+   "text": "짜잔! 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있고요. 진행 시트 7개 모두 최신 상태예요. 헤헤, 또 궁금한 거 있으세요?",
+   "language": "ko",
+   "duration_s": 17.2,
+   "seconds": 3.44,
+   "wall_s": 3.72,
+   "cer": 0.085,
+   "vram_peak_mib": 3410
+  },
+  {
+   "file": "real__cosyvoice__v2-crosslingual-krfemale__en.wav",
+   "status": 200,
+   "text": "Good evening. The portal sync just finished. One new student was document verified, and all seven progress sheets are up to date. Anything else I can check for you?",
+   "language": "en",
+   "duration_s": 9.08,
+   "seconds": 2.89,
+   "wall_s": 3.06,
+   "cer": 0.0,
+   "vram_peak_mib": 3406
+  },
+  {
+   "file": "kokoro__bm_george__en.wav",
+   "status": 200,
+   "text": "Good evening. The portal sync finished a minute ago, one new student was document verified, and all seven progress sheets are up to date. Shall I read you today's missing information report?",
+   "language": "en",
+   "duration_s": 12.3,
+   "seconds": 2.59,
+   "wall_s": 2.79,
+   "cer": 0.0,
+   "vram_peak_mib": 3406
+  }
+ ],
+ "stt_silence": {
+  "text": "",
+  "language": "en",
+  "duration_s": 3.0,
+  "seconds": 2.14
+ },
+ "tts": [
+  {
+   "language": "ko",
+   "style": "aegyo",
+   "chars": 87,
+   "status": 200,
+   "wall_s": 10.77,
+   "x_duration": "16.48",
+   "x_seconds": "10.76",
+   "content_type": "audio/ogg",
+   "bytes": 126658,
+   "vram_peak_mib": 4751,
+   "health_during_max_s": 0.026,
+   "health_during_failures": 0,
+   "health_busy_max_s": 10.7,
+   "sr": 48000,
+   "duration_s": 16.48,
+   "channels": 1,
+   "rms_dbfs": -20.5,
+   "voiced_rms_dbfs": -19.0,
+   "peak_dbfs": -6.8,
+   "lead_silence_s": 0.08,
+   "trail_silence_s": 0.15,
+   "saved": "test_out_ko.ogg",
+   "heard": "짜잔, 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 3명 있고요. 진행 시트 7개 모두 출신 상태예요. 헤헤, 또 궁금한 거 있으세요?",
+   "heard_language": "ko",
+   "roundtrip_cer": 0.119
+  },
+  {
+   "language": "en",
+   "style": "neutral",
+   "chars": 166,
+   "status": 200,
+   "wall_s": 7.16,
+   "x_duration": "11.32",
+   "x_seconds": "7.15",
+   "content_type": "audio/ogg",
+   "bytes": 87308,
+   "vram_peak_mib": 4338,
+   "health_during_max_s": 0.022,
+   "health_during_failures": 0,
+   "health_busy_max_s": 7.1,
+   "sr": 48000,
+   "duration_s": 11.32,
+   "channels": 1,
+   "rms_dbfs": -20.7,
+   "voiced_rms_dbfs": -19.0,
+   "peak_dbfs": -4.8,
+   "lead_silence_s": 0.03,
+   "trail_silence_s": 0.09,
+   "saved": "test_out_en.ogg",
+   "heard": "Good evening, the portal sync. Just finished, three new students were document verified today, and all seven progress sheets are up to date. Anything else I can check for you.",
+   "heard_language": "en",
+   "roundtrip_cer": 0.0
+  },
+  {
+   "language": "ko",
+   "style": "aegyo",
+   "chars": 20,
+   "status": 200,
+   "wall_s": 3.43,
+   "x_duration": "3.83",
+   "x_seconds": "3.42",
+   "content_type": "audio/ogg",
+   "bytes": 30212,
+   "vram_peak_mib": 4324,
+   "health_during_max_s": 0.016,
+   "health_during_failures": 0,
+   "health_busy_max_s": 3.0,
+   "sr": 48000,
+   "duration_s": 3.83,
+   "channels": 1,
+   "rms_dbfs": -20.4,
+   "voiced_rms_dbfs": -19.0,
+   "peak_dbfs": -7.4,
+   "lead_silence_s": 0.08,
+   "trail_silence_s": 0.15,
+   "heard": "네, 알겠어요. 바로 확인해 볼게요.",
+   "heard_language": "ko",
+   "roundtrip_cer": 0.0
+  },
+  {
+   "language": "ko",
+   "style": "aegyo",
+   "chars": 87,
+   "status": 200,
+   "wall_s": 10.64,
+   "x_duration": "16.48",
+   "x_seconds": "10.63",
+   "content_type": "audio/ogg",
+   "bytes": 126658,
+   "vram_peak_mib": 4852,
+   "health_during_max_s": 0.021,
+   "health_during_failures": 0,
+   "health_busy_max_s": 10.6,
+   "sr": 48000,
+   "duration_s": 16.48,
+   "channels": 1,
+   "rms_dbfs": -20.5,
+   "voiced_rms_dbfs": -19.0,
+   "peak_dbfs": -6.8,
+   "lead_silence_s": 0.08,
+   "trail_silence_s": 0.15,
+   "heard": "짜잔, 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 3명 있고요. 진행 시트 7개 모두 출신 상태예요. 헤헤, 또 궁금한 거 있으세요?",
+   "heard_language": "ko",
+   "roundtrip_cer": 0.119
+  }
+ ],
+ "tts_particles": [
+  {
+   "text": "브리핑은 18:05에 보내드려요~",
+   "status": 200,
+   "x_duration": "4.62",
+   "heard": "브리핑은 오후 6시 5분에 보내드려요."
+  },
+  {
+   "text": "마감일은 2026-09-27까지예요!",
+   "status": 200,
+   "x_duration": "4.82",
+   "heard": "마감일은 2026년 9월 27일까지예요."
+  }
+ ],
+ "client_gone": {
+  "gave_up": true,
+  "lock_free_after_s": 3.287877800001297
+ },
+ "health_after": {
+  "ok": true,
+  "stt": "large-v3-turbo",
+  "tts": "cosyvoice2",
+  "device": "cuda",
+  "tts_on_gpu": true,
+  "busy_s": 0.0
+ },
+ "vram_after_mib": 4517,
+ "all_pass": true
+}

@@ -1,0 +1,62 @@
+[
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\piper__en_gb-cori-high__en.wav",
+    "voice_id": "en_gb-cori-high",
+    "language": "en",
+    "sample_rate": 22050,
+    "channels": 1,
+    "sample_width_bytes": 2,
+    "duration_s": 10.12,
+    "load_s": 2.54,
+    "synth_s": 1.61,
+    "rtf": 0.159,
+    "peak": 1.0,
+    "size_bytes": 446508,
+    "verified": true
+  },
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\piper__en_gb-northern_english_male-medium__en.wav",
+    "voice_id": "en_gb-northern_english_male-medium",
+    "language": "en",
+    "sample_rate": 22050,
+    "channels": 1,
+    "sample_width_bytes": 2,
+    "duration_s": 10.08,
+    "load_s": 2.21,
+    "synth_s": 0.35,
+    "rtf": 0.035,
+    "peak": 1.0,
+    "size_bytes": 444460,
+    "verified": true
+  },
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\piper__en_gb-vctk-medium-p226__en.wav",
+    "voice_id": "en_gb-vctk-medium-p226",
+    "language": "en",
+    "sample_rate": 22050,
+    "channels": 1,
+    "sample_width_bytes": 2,
+    "duration_s": 11.42,
+    "load_s": 2.15,
+    "synth_s": 0.43,
+    "rtf": 0.038,
+    "peak": 1.0,
+    "size_bytes": 503852,
+    "verified": true
+  },
+  {
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\piper__ko_kr-kss-medium__kr.wav",
+    "voice_id": "ko_kr-kss-medium",
+    "language": "kr",
+    "sample_rate": 22050,
+    "channels": 1,
+    "sample_width_bytes": 2,
+    "duration_s": 9.71,
+    "load_s": 1.57,
+    "synth_s": 0.33,
+    "rtf": 0.034,
+    "peak": 1.0,
+    "size_bytes": 428076,
+    "verified": true
+  }
+]

@@ -1,0 +1,41 @@
+{
+ "load_s": 2.23,
+ "results": [
+  {
+   "voice": "af_heart",
+   "file": "C:\\Hangeul\\JARVIS\\voice-samples\\kokoro__af_heart__en.wav",
+   "sample_rate": 24000,
+   "channels": 1,
+   "duration_s": 11.65,
+   "synth_s": 4.89,
+   "rtf": 0.42,
+   "peak": 0.453,
+   "chunks": 1,
+   "ok": true
+  },
+  {
+   "voice": "af_bella",
+   "file": "C:\\Hangeul\\JARVIS\\voice-samples\\kokoro__af_bella__en.wav",
+   "sample_rate": 24000,
+   "channels": 1,
+   "duration_s": 12.25,
+   "synth_s": 4.66,
+   "rtf": 0.38,
+   "peak": 0.596,
+   "chunks": 1,
+   "ok": true
+  },
+  {
+   "voice": "bf_isabella",
+   "file": "C:\\Hangeul\\JARVIS\\voice-samples\\kokoro__bf_isabella__en.wav",
+   "sample_rate": 24000,
+   "channels": 1,
+   "duration_s": 11.43,
+   "synth_s": 4.73,
+   "rtf": 0.414,
+   "peak": 0.79,
+   "chunks": 1,
+   "ok": true
+  }
+ ]
+}

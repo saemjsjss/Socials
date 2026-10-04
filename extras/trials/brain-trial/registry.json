@@ -1,0 +1,50 @@
+{
+  "qwen2.5:7b": {
+    "tag": "qwen2.5:7b",
+    "exists": true,
+    "weights_gb": 4.68,
+    "license_heads": [
+      "Apache License Version 2.0, January 2004 http://www.apache.org/licenses/ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION 1. Definitions. \"License\" shall mean the terms and conditions for use, reproduction, and distribution as defined by Sections 1 through 9 of this document. \"Licensor\" "
+    ],
+    "total_gb": 4.68
+  },
+  "qwen2.5:3b": {
+    "tag": "qwen2.5:3b",
+    "exists": true,
+    "weights_gb": 1.93,
+    "license_heads": [
+      "Qwen RESEARCH LICENSE AGREEMENT Qwen RESEARCH LICENSE AGREEMENT Release Date: September 19, 2024 By clicking to agree or by using or distributing any portion or element of the Qwen Materials, you will be deemed to have recognized and accepted the content of this Agreement, which is effective immedia"
+    ],
+    "total_gb": 1.93
+  },
+  "qwen3:4b": {
+    "tag": "qwen3:4b",
+    "exists": true,
+    "weights_gb": 2.5,
+    "license_heads": [
+      "Apache License Version 2.0, January 2004 http://www.apache.org/licenses/ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION 1. Definitions. \"License\" shall mean the terms and conditions for use, reproduction, and distribution as defined by Sections 1 through 9 of this document. \"Licensor\" "
+    ],
+    "params": "{\"repeat_penalty\":1,\"stop\":[\"\\u003c|im_start|\\u003e\",\"\\u003c|im_end|\\u003e\"],\"temperature\":0.6,\"top_k\":20,\"top_p\":0.95}",
+    "total_gb": 2.5
+  },
+  "gemma3:4b": {
+    "tag": "gemma3:4b",
+    "exists": true,
+    "weights_gb": 3.34,
+    "license_heads": [
+      "Gemma Terms of Use Last modified: February 21, 2024 By using, reproducing, modifying, distributing, performing or displaying any portion or element of Gemma, Model Derivatives including via any Hosted Service, (each as defined below) (collectively, the \"Gemma Services\") or otherwise accepting the te"
+    ],
+    "params": "{\"stop\":[\"\\u003cend_of_turn\\u003e\"],\"temperature\":1,\"top_k\":64,\"top_p\":0.95}",
+    "total_gb": 3.34
+  },
+  "qwen3:1.7b": {
+    "tag": "qwen3:1.7b",
+    "exists": true,
+    "weights_gb": 1.36,
+    "license_heads": [
+      "Apache License Version 2.0, January 2004 http://www.apache.org/licenses/ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION 1. Definitions. \"License\" shall mean the terms and conditions for use, reproduction, and distribution as defined by Sections 1 through 9 of this document. \"Licensor\" "
+    ],
+    "params": "{\"repeat_penalty\":1,\"stop\":[\"\\u003c|im_start|\\u003e\",\"\\u003c|im_end|\\u003e\"],\"temperature\":0.6,\"top_k\":20,\"top_p\":0.95}",
+    "total_gb": 1.36
+  }
+}

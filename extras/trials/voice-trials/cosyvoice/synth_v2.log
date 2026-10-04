@@ -1,0 +1,85 @@
+﻿[gpulock] free VRAM 6.87 / 7.93 GB (need 4.5)
+[gpulock] lock acquired
+torch 2.7.1+cu128 cuda available: True
+.\venv\Scripts\python.exe : Sliding Window Attention is enabled but not implemented for `sdpa`; unexpected results may 
+be encountered.
+At line:1 char:388
++ ... NG="utf-8"; .\venv\Scripts\python.exe synth.py v2 *> synth_v2.log; "e ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Sliding Window ...be encountered.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+C:\Hangeul\JARVIS\voice-trials\cosyvoice\venv\Lib\site-packages\lightning\fabric\__init__.py:41: pkg_resources is 
+deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated 
+for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+C:\Hangeul\JARVIS\voice-trials\cosyvoice\venv\Lib\site-packages\diffusers\models\lora.py:393: FutureWarning: 
+`LoRACompatibleLinear` is deprecated and will be removed in version 1.0.0. Use of `LoRACompatibleLinear` is 
+deprecated. Please switch to PEFT backend by installing PEFT: `pip install peft`.
+  deprecate("LoRACompatibleLinear", "1.0.0", deprecation_message)
+2026-09-27 16:44:08,085 INFO input frame rate=25
+C:\Hangeul\JARVIS\voice-trials\cosyvoice\venv\Lib\site-packages\torch\nn\utils\weight_norm.py:143: FutureWarning: 
+`torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+C:\Hangeul\JARVIS\voice-trials\cosyvoice\venv\Lib\site-packages\onnxruntime\capi\onnxruntime_inference_collection.py:19
+7: UserWarning: Specified provider 'CUDAExecutionProvider' is not in available provider names.Available providers: 
+'AzureExecutionProvider, CPUExecutionProvider'
+  warnings.warn(
+2026-09-27 16:44:10,782 INFO no frontend is avaliable
+
+  0%|          | 0/1 [00:00<?, ?it/s]2026-09-27 16:44:15,953 INFO synthesis text 안녕하세요. 방금 포털 동기화가 끝났습니다. 새로 서류 검증된 
+학생이 한 명 있고, 진행 시트 일곱 개가 모두 최신 상태입니다.
+C:\Hangeul\JARVIS\voice-trials\cosyvoice\repo\cosyvoice\cli\model.py:103: FutureWarning: 
+`torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with self.llm_context, torch.cuda.amp.autocast(self.fp16 is True and hasattr(self.llm, 'vllm') is False):
+C:\Hangeul\JARVIS\voice-trials\cosyvoice\repo\cosyvoice\cli\model.py:293: FutureWarning: 
+`torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(self.fp16):
+2026-09-27 16:44:39,744 INFO yield speech len 12.36, rtf 1.924869871448159
+
+100%|██████████| 1/1 [00:24<00:00, 24.38s/it]
+100%|██████████| 1/1 [00:24<00:00, 24.38s/it]
+{"file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__cosyvoice__v2-zeroshot-krfemale__kr-neutral.wav", "synth_s": 24.39, "device": "cuda", "sr": 24000, "dur_s": 12.36, "peak_alloc_gb": 2.67, "segments": 1, "model": "CosyVoice2-0.5B", "mode": "zero_shot", "ref": "ref_sft_ko_female"}
+
+  0%|          | 0/1 [00:00<?, ?it/s]2026-09-27 16:44:40,223 INFO synthesis text 짜잔! 제니예요! 방금 포털 동기화가 끝났어용. 새로 서류 검증된 
+학생이 한 명 있구요, 진행 시트 일곱 개 모두 최신 상태예요! 헤헤, 또 궁금한 거 있으세용?
+2026-09-27 16:44:49,843 INFO yield speech len 15.72, rtf 0.6119921158894934
+
+100%|██████████| 1/1 [00:10<00:00, 10.09s/it]
+100%|██████████| 1/1 [00:10<00:00, 10.09s/it]
+{"file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__cosyvoice__v2-zeroshot-krfemale__kr-aegyo.wav", "synth_s": 10.09, "device": "cuda", "sr": 24000, "dur_s": 15.72, "peak_alloc_gb": 2.75, "segments": 1, "model": "CosyVoice2-0.5B", "mode": "zero_shot", "ref": "ref_sft_ko_female"}
+
+  0%|          | 0/1 [00:00<?, ?it/s]2026-09-27 16:44:50,316 INFO synthesis text 짜잔! 제니예요! 방금 포털 동기화가 끝났어용. 새로 서류 검증된 
+학생이 한 명 있구요, 진행 시트 일곱 개 모두 최신 상태예요! 헤헤, 또 궁금한 거 있으세용?
+2026-09-27 16:45:02,343 INFO yield speech len 20.36, rtf 0.5906943956386363
+
+100%|██████████| 1/1 [00:12<00:00, 12.49s/it]
+100%|██████████| 1/1 [00:12<00:00, 12.49s/it]
+{"file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__cosyvoice__v2-instruct-sajiao-krfemale__kr-aegyo.wav", "synth_s": 12.49, "device": "cuda", "sr": 24000, "dur_s": 20.36, "peak_alloc_gb": 2.88, "segments": 1, "model": "CosyVoice2-0.5B", "mode": "instruct2", "instruct": "用撒娇可爱的语气说这句话<|endofprompt|>", "ref": "ref_sft_ko_female"}
+
+  0%|          | 0/1 [00:00<?, ?it/s]2026-09-27 16:45:02,816 INFO synthesis text 짜잔! 제니예요! 방금 포털 동기화가 끝났어용. 새로 서류 검증된 
+학생이 한 명 있구요, 진행 시트 일곱 개 모두 최신 상태예요! 헤헤, 또 궁금한 거 있으세용?
+2026-09-27 16:45:12,293 INFO yield speech len 16.04, rtf 0.5908171434949462
+
+100%|██████████| 1/1 [00:09<00:00,  9.94s/it]
+100%|██████████| 1/1 [00:09<00:00,  9.94s/it]
+{"file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__cosyvoice__v2-instruct-happy-krfemale__kr-aegyo.wav", "synth_s": 9.94, "device": "cuda", "sr": 24000, "dur_s": 16.04, "peak_alloc_gb": 2.76, "segments": 1, "model": "CosyVoice2-0.5B", "mode": "instruct2", "instruct": "用非常开心的语气说这句话<|endofprompt|>", "ref": "ref_sft_ko_female"}
+
+  0%|          | 0/1 [00:00<?, ?it/s]2026-09-27 16:45:12,766 INFO synthesis text Good evening! The portal sync just 
+finished. One new student was document-verified, and all seven progress sheets are up to date. Anything else I can 
+check for you?
+2026-09-27 16:45:17,903 INFO yield speech len 9.08, rtf 0.5658336935589492
+
+100%|██████████| 1/1 [00:05<00:00,  5.60s/it]
+100%|██████████| 1/1 [00:05<00:00,  5.60s/it]
+{"file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__cosyvoice__v2-crosslingual-krfemale__en.wav", "synth_s": 5.6, "device": "cuda", "sr": 24000, "dur_s": 9.08, "peak_alloc_gb": 2.61, "segments": 1, "model": "CosyVoice2-0.5B", "mode": "cross_lingual", "ref": "ref_sft_ko_female"}
+
+  0%|          | 0/1 [00:00<?, ?it/s]2026-09-27 16:45:18,298 INFO synthesis text Good evening! The portal sync just 
+finished. One new student was document-verified, and all seven progress sheets are up to date. Anything else I can 
+check for you?
+2026-09-27 16:45:24,432 INFO yield speech len 10.84, rtf 0.5658122666207627
+
+100%|██████████| 1/1 [00:06<00:00,  6.52s/it]
+100%|██████████| 1/1 [00:06<00:00,  6.52s/it]
+max value is  tensor(1.0452)
+{"file": "C:\\Hangeul\\JARVIS\\voice-samples\\real__cosyvoice__v2-zeroshot-enfemale__en.wav", "synth_s": 6.52, "device": "cuda", "sr": 24000, "dur_s": 10.84, "peak_alloc_gb": 2.61, "segments": 1, "model": "CosyVoice2-0.5B", "mode": "zero_shot", "ref": "ref_sft_en_female"}
+[gpulock] lock released

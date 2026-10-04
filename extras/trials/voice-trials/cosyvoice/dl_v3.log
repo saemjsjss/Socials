@@ -1,0 +1,16 @@
+ok CosyVoice-BlankEN/config.json 659
+ok CosyVoice-BlankEN/generation_config.json 242
+ok CosyVoice-BlankEN/merges.txt 1402109
+ok CosyVoice-BlankEN/model.safetensors 988097824
+ok CosyVoice-BlankEN/tokenizer_config.json 1287
+ok CosyVoice-BlankEN/vocab.json 2776833
+ok campplus.onnx 28303423
+ok config.json 2
+ok configuration.json 47
+ok cosyvoice3.yaml 6934
+ok hift.pt 83202622
+ok speech_tokenizer_v3.onnx 969451503
+ok flow.pt 1329116148
+ok llm.pt 2024669519
+ok README.md 11982
+DONE

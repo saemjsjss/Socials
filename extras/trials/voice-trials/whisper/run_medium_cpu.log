@@ -1,0 +1,64 @@
+﻿.\venv\Scripts\python.exe : 
+At line:1 char:437
++ ... NG='utf-8'; .\venv\Scripts\python.exe transcribe_all.py --device cpu  ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ 0.000  en(1.00)    7.5s  real__chatterbox__default__en.wav
+        Good evening. The portal sync just finished. One new student was document verified and all seven progress sheets are up to date. Anything else I can check for you?
+ 0.000  en(0.99)   10.4s  real__chatterbox__meloref__en.wav
+        Good evening. The portal sync just finished. One new student was document verified and all seven progress sheets are up to date. Anything else I can check for you?
+ 0.020  ko(1.00)    8.3s  real__chatterbox__default__kr-neutral.wav
+        안녕하세요. 방금 포털 동지화가 끝났습니다. 새로 서류 검증된 학생이 한 명 있고 진행 시트 7개가 모두 최신 상태입니다.
+ 0.020  ko(0.99)   11.8s  real__chatterbox__default-cfg0__kr-neutral.wav
+        안녕하세요 방금 포털 동기화가 끝났습니다 새로 서류 검증된 학생이 한명 있고 진행 시트 7개가 모두 출신 상태입니다
+ 0.000  ko(0.99)   11.7s  real__chatterbox__meloref__kr-neutral.wav
+        안녕하세요 방금 포털 동기화가 끝났습니다 새로 서류 검증된 학생이 1명 있고 진행 시트 7개가 모두 최신 상태입니다
+ 0.119  ko(0.99)    9.1s  real__chatterbox__default-ex0.5-cfg0.5__kr-aegyo.wav
+        따잔! 제니에요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있고요. 진행 시트 7개 모두 추신 상태에요. 헤헤 또 궁금한 거 있으세요?
+ 0.119  ko(0.99)    9.9s  real__chatterbox__default-ex0.8-cfg0.3__kr-aegyo.wav
+        나잔! 재미에요! 방금 포털 동기화가 끝났어요 새로 서류 검증된 학생이 한 명 있구요 진행 시트 7개 모두 최신 상태에요 헤헤 또 궁금한 거 있으세요?
+ 0.136  ko(0.99)   10.9s  real__chatterbox__default-ex1.1-cfg0.2__kr-aegyo.wav
+        나잔, 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있고요. 진행 시트 7개 모두 퇴신 상태예요. 해해도 궁금한 거 있으세요?
+ 0.051  ko(0.99)   12.7s  real__chatterbox__meloref-ex0.5-cfg0.5__kr-aegyo.wav
+        짜잔! 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있고요. 진행 시트 일곱 개 모두 최신 상태예요. 헤헤, 또 궁금한 거 있으세요?
+ 0.068  ko(0.99)   14.5s  real__chatterbox__meloref-ex0.8-cfg0.3__kr-aegyo.wav
+        짜잔! 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한병 있고요. 진행 시트 일곱 개 모두 최신 상태예요. 헤헤, 또 궁금한 거 있으세요?
+ 0.068  ko(0.99)   14.6s  real__chatterbox__meloref-ex1.1-cfg0.2__kr-aegyo.wav
+        짜잔! 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있고요. 진행 시틀 일곱 개 모두 최신 상태예요. 헤헤, 또 궁금한 거 있으세요?
+ 0.571  ko(0.99)   10.3s  real__cosyvoice__300m-sft-korean-female__kr-neutral.wav
+        아는 저도 방금부터 동기화가 있습니다. 소매 학교 건증 면항 학생이 한 명이고 미남 시츠 인구 개가 무지 부신 챙깁니다.
+ 0.644  ko(0.99)   12.7s  real__cosyvoice__300m-sft-korean-female__kr-aegyo.wav
+        자잔, 댄이에요. 방금 푸톰 기화가 8주와 쏘와근이 언증된 악생이 한명있죠. 이럼태치 요곱 개오므치 신상세요. 앉은 젯도 임원한거리 마세요.
+ 0.025  en(0.99)    9.8s  real__cosyvoice__300m-sft-english-female__en.wav
+        Good evening. The portal seeing just finished one new student was document verified and all seven progress sheets are up to date. Anything else I can check for you.
+ 0.000  ko(1.00)   13.3s  real__cosyvoice__v2-zeroshot-krfemale__kr-neutral.wav
+        안녕하세요. 방금 포털 동기화가 끝났습니다. 새로 서류 검증된 학생이 1명 있고, 진행 시트 7개가 모두 최신 상태입니다.
+ 0.068  ko(1.00)   17.2s  real__cosyvoice__v2-zeroshot-krfemale__kr-aegyo.wav
+        짜잔! 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 1명 있고요. 진행 시트 7개 모두 최신 상태예요. 에헤, 또 궁금한 거 있으세요?
+ 0.000  ko(0.99)   11.6s  real__cosyvoice__v2-crosslingual-krfemale__kr-neutral.wav
+        안녕하세요. 방금 포털 동기화가 끝났습니다. 새로 서류 검증된 학생이 1명 있고 진행 시트 7개가 모두 최신 상태입니다.
+ 0.051  ko(1.00)   20.8s  real__cosyvoice__v2-crosslingual-krfemale__kr-aegyo.wav
+        짜잔! 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 1명 있고요. 진행 시트 7개 모두 최신 상태예요. 헤헤, 또 궁금한 거 있으세요?
+ 0.136  ko(1.00)   20.4s  real__cosyvoice__v2-instruct-sajiao-krfemale__kr-aegyo.wav
+        짜잔! 재미예요. 방금 포떨 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있구요. 진행 시트 일곱 개 모두 캐신 상태예요. 해해, 또 궁금한 거 있으세요?
+ 0.085  ko(0.99)   16.0s  real__cosyvoice__v2-instruct-happy-krfemale__kr-aegyo.wav
+        짜잔! 제니예요! 방금 노털 동기화가 끝났어요. 새로 서류 검진된 학생이 한 명 있고요. 진행 시트 7개 모두 최신 상태예요. 헤헤, 또 궁금한 거 있으세요?
+ 0.102  ko(1.00)   17.5s  real__cosyvoice__v2-instruct-happy-laugh-krfemale__kr-aegyo.wav
+        짜잔! 제니예요. 방금 포털 동기어가 끝났어요. 새로 서류 검증된 학생이 1명 있고요. 진행 시트 7개 모두 최신 상태예요. 해! 해! 또 궁금한 거 있으세요?
+ 0.000  en(0.99)    9.1s  real__cosyvoice__v2-crosslingual-krfemale__en.wav
+        Good evening, the portal sync just finished. One new student was document verified and all seven progress sheets are up to date. Anything else I can check for you?
+ 0.000  en(0.98)   10.8s  real__cosyvoice__v2-zeroshot-enfemale__en.wav
+        Good evening. The portal sync just finished. One new student was document verified and all seven progress sheets are up to date. Anything else I can check for you?
+ 0.020  ko(1.00)   12.2s  real__cosyvoice__v3-zeroshot-krfemale__kr-neutral.wav
+        안녕하세요. 방금 포털 동기화가 끝났습니다. 새로 서류 검증된 학생이 1명 있고, 진행 시태 7개가 모두 최신 상태입니다.
+ 0.051  ko(1.00)   16.7s  real__cosyvoice__v3-zeroshot-krfemale__kr-aegyo.wav
+        짜잔! 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있고요. 진행 시트 7개 모두 최신 상태예요. 헤헤, 또 궁금한 거 있으세요?
+ 0.051  ko(0.99)   13.1s  real__cosyvoice__v3-instruct-happy-krfemale__kr-aegyo.wav
+        짜잔! 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 한 명 있고요. 진행 시트 일곱 개 모두 최신 상태예요. 헤헤! 또 궁금한 거 있으세요?
+ 0.119  ko(0.99)   13.5s  real__cosyvoice__v3-instruct-sajiao-krfemale__kr-aegyo.wav
+        짜잔, 제니예요. 당근 포털 동기화가 끝났어요. 새로 설이 검증된 학생이 1명 있고요. 진행 시트 7개 모두 최신 상태예요. 헤헤, 또 궁금한 거 있으세요?
+ 0.000  en(0.98)   11.9s  real__cosyvoice__v3-crosslingual-krfemale__en.wav
+        Good evening. The portal sync just finished. One new student was document verified, and all seven progress sheets are up to date. Anything else I can check for you?
+wrote C:\Hangeul\JARVIS\voice-trials\whisper\results_medium_cpu.json

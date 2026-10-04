@@ -1,0 +1,56 @@
+{
+ "ko_5s.mp3": {
+  "status": 200,
+  "text": "짜잔! 제니예요. 방금 포털 동기와...",
+  "language": "ko",
+  "duration_s": 5.0,
+  "seconds": 6.94
+ },
+ "ko_5s.m4a": {
+  "status": 200,
+  "text": "짜잔! 제니예요. 방금 포털 동기화가",
+  "language": "ko",
+  "duration_s": 5.08,
+  "seconds": 6.95
+ },
+ "ko_17s.wav": {
+  "status": 200,
+  "text": "짜잔! 제니예요. 방금 포털 동기화가 끝났어요. 새로 서류 검증된 학생이 1명 있고요. 진행 시트 7개 모두 최신 상태예요. 에헤, 또 궁금한 거 있으세요?",
+  "language": "ko",
+  "duration_s": 17.2,
+  "seconds": 8.91
+ },
+ "test_out_en.ogg": {
+  "status": 200,
+  "text": "Good evening, the portal sink. Just finished, three new students were document verified today, and all seven progress sheets are up to date. Anything else I can check for you.",
+  "language": "en",
+  "duration_s": 11.32,
+  "seconds": 7.86
+ },
+ "tts_ko": {
+  "status": 200,
+  "duration": "10.50",
+  "seconds": "63.29"
+ },
+ "tts_en": {
+  "status": 200,
+  "duration": "4.60",
+  "seconds": "29.29"
+ },
+ "busy_503": {
+  "status": 503,
+  "body": "{\"error\":\"busy: waited 10 s for the previous request\"}",
+  "first": {
+   "status": 200,
+   "wall": 95.63,
+   "duration": "16.43"
+  }
+ },
+ "note": "tts_ko was rendered before the trim fix: 10.5 s of audio for a 3.8 s phrase (silence + faint noise after the words). Re-run after the fix (same CPU-only service, same text): X-Duration 3.77 s, X-Seconds 64.06 s, heard back as the exact text.",
+ "tts_ko_after_trim_fix": {
+  "status": 200,
+  "duration": "3.77",
+  "seconds": "64.06",
+  "heard": "네, 알겠어요. 바로 확인해 볼게요"
+ }
+}

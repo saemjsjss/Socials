@@ -1,0 +1,9 @@
+torch==2.7.1+cu128
+torchaudio==2.7.1+cu128
+numpy<2
+setuptools<81
+transformers==4.51.3
+huggingface_hub<1.0
+tokenizers<0.22
+faster-whisper==1.2.1
+ctranslate2==4.8.2

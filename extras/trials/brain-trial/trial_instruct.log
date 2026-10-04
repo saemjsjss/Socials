@@ -1,0 +1,38 @@
+qwen3:4b-instruct: load 2.77s, VRAM 2.96 GiB of 2.96 GiB
+  A 1 OK  0.40s {"command": "verified_today", "date": null, "english_query": "How many students had their documents verified today?", "language": "ko"}
+  A 2 OK  0.31s {"command": "verified_today", "date": null, "english_query": "How many students were verified today for completion?", "language": "ko"}
+  A 3 OK  0.43s {"command": "verified_date", "date": "2026-09-26", "english_query": "How many students had their documents verified yesterday?", "language": "ko"}
+  A 4 OK  0.33s {"command": "calendar", "date": null, "english_query": "What are the schedule or deadlines this week?", "language": "ko"}
+  A 5 OK  0.33s {"command": "passports", "date": null, "english_query": "Are there any students with incorrect passport information?", "language": "ko"}
+  A 6 OK  0.33s {"command": "inquiries_today", "date": null, "english_query": "How many consultations were handled today?", "language": "ko"}
+  A 7 OK  0.33s {"command": "verified_today", "date": null, "english_query": "How many students were verified today?", "language": "en"}
+  A 8 OK  0.38s {"command": "verified_date", "date": "2026-09-26", "english_query": "How many students were verified yesterday?", "language": "en"}
+  A 9 OK  0.30s {"command": "calendar", "date": null, "english_query": "What deadlines are coming up?", "language": "en"}
+  A10 OK  0.33s {"command": "chat", "date": null, "english_query": "Thanks Jennie, you're the best!", "language": "en"}
+  A11 OK  0.33s {"command": "chat", "date": null, "english_query": "Thank you so much, Jenny! You're great!", "language": "en"}
+  A12 OK  0.30s {"command": "stats", "date": null, "english_query": "Give me the overall stats", "language": "en"}
+  B 1 0.38s fail=['no_emoji', 'fact_28000'] :: 짜잔! 오늘 서류 검증된 학생은 두 명이에요용~ 💖
+  B 7 0.28s fail=['sentences_ok', 'no_emoji', 'fact_28000'] :: Yay! Today, 2 students were verified, hehe! 🎉
+  B10 0.21s fail=['sentences_ok', 'no_emoji'] :: Yay! Thanks so much, you're the best too, hehe! 😊
+[
+  {
+    "model": "qwen3:4b-instruct",
+    "load_wall_s": 2.77,
+    "load_ollama_s": 0.0,
+    "size_gb": 2.96,
+    "size_vram_gb": 2.96,
+    "context_length": 4096,
+    "fully_on_gpu": true,
+    "fits_budget": true,
+    "routing_command_acc": "12/12",
+    "routing_date_acc": "12/12",
+    "json_valid": "12/12",
+    "route_latency_s": 0.34,
+    "reply_latency_s": 0.29,
+    "gen_tok_s": 119.8,
+    "prompt_tok_s": 18053.1,
+    "route_plus_reply_s": 0.63,
+    "available": true
+  }
+]
+still loaded: []

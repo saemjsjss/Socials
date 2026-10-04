@@ -1,0 +1,80 @@
+[
+  {
+    "voice_id": "en-br",
+    "speaker": "EN-BR",
+    "language": "en",
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\melotts__en-br__en.wav",
+    "sample_rate": 44100,
+    "duration_s": 10.65,
+    "channels": 1,
+    "sampwidth": 2,
+    "synth_s": 3.23,
+    "rtf": 0.303,
+    "peak": 0.659
+  },
+  {
+    "voice_id": "en-us",
+    "speaker": "EN-US",
+    "language": "en",
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\melotts__en-us__en.wav",
+    "sample_rate": 44100,
+    "duration_s": 11.37,
+    "channels": 1,
+    "sampwidth": 2,
+    "synth_s": 12.09,
+    "rtf": 1.063,
+    "peak": 0.341
+  },
+  {
+    "voice_id": "en-default",
+    "speaker": "EN-Default",
+    "language": "en",
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\melotts__en-default__en.wav",
+    "sample_rate": 44100,
+    "duration_s": 10.12,
+    "channels": 1,
+    "sampwidth": 2,
+    "synth_s": 10.78,
+    "rtf": 1.065,
+    "peak": 0.484
+  },
+  {
+    "voice_id": "en-au",
+    "speaker": "EN-AU",
+    "language": "en",
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\melotts__en-au__en.wav",
+    "sample_rate": 44100,
+    "duration_s": 11.3,
+    "channels": 1,
+    "sampwidth": 2,
+    "synth_s": 11.72,
+    "rtf": 1.037,
+    "peak": 0.652
+  },
+  {
+    "voice_id": "en-india",
+    "speaker": "EN_INDIA",
+    "language": "en",
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\melotts__en-india__en.wav",
+    "sample_rate": 44100,
+    "duration_s": 11.0,
+    "channels": 1,
+    "sampwidth": 2,
+    "synth_s": 2.9,
+    "rtf": 0.264,
+    "peak": 0.444
+  },
+  {
+    "voice_id": "kr",
+    "speaker": "KR",
+    "language": "kr",
+    "file": "C:\\Hangeul\\JARVIS\\voice-samples\\melotts__kr__kr.wav",
+    "sample_rate": 44100,
+    "duration_s": 12.77,
+    "channels": 1,
+    "sampwidth": 2,
+    "synth_s": 4.21,
+    "rtf": 0.329,
+    "peak": 0.717
+  }
+]
