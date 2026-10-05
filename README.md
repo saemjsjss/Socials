@@ -95,11 +95,13 @@ What the picture shows:
 | How is the code built underneath: layers, processes, flows, rules, state? | [docs/CODEBASE_GUIDE.md](docs/CODEBASE_GUIDE.md) |
 | How do I build, configure, start, stop and test it? | [docs/BUILD_AND_RUN.md](docs/BUILD_AND_RUN.md) |
 | What is the phone app, and how does it read the bot's data? | [docs/JEANNIE_APP.md](docs/JEANNIE_APP.md) |
+| What is planned for the OCR document check (a separate desktop checker)? | [docs/ocr-checker/](docs/ocr-checker/README.md) |
 | What is under `extras/`, and where did it come from? | [extras/README.md](extras/README.md) |
 | The long reference, function by function | [docs/reference/00_INDEX.md](docs/reference/00_INDEX.md) |
 | How did the project get here? | [docs/reference/08_HISTORY_STAGE_BY_STAGE.md](docs/reference/08_HISTORY_STAGE_BY_STAGE.md), and the 48 commits (`git log`) |
 | Which rules must a coding agent follow? | [.agents/rules/hangeul_operational_guardrails.md](.agents/rules/hangeul_operational_guardrails.md), [docs/reference/09_BLUEPRINT_RULES_AND_LESSONS.md](docs/reference/09_BLUEPRINT_RULES_AND_LESSONS.md) |
 | What is still open, and what are the known limits? | [docs/reference/11_OPEN_ITEMS_AND_KNOWN_LIMITS.md](docs/reference/11_OPEN_ITEMS_AND_KNOWN_LIMITS.md), [docs/DATA_FLOW.md section 7](docs/DATA_FLOW.md#7-gaps-and-risks-the-code-itself-shows) |
+| What did the 5 Oct 2026 code review find? | [docs/CODE_REVIEW_2026-10-05.md](docs/CODE_REVIEW_2026-10-05.md) |
 | What was replaced or removed before publishing? | [docs/SCRUB_NOTES.md](docs/SCRUB_NOTES.md), [docs/COMMIT_ID_MAP.md](docs/COMMIT_ID_MAP.md) |
 
 ## Suggested reading order for an AI assistant
