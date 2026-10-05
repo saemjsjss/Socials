@@ -25,6 +25,19 @@ Left out because the owner already decided them: `API_HOST` stays `0.0.0.0`, the
 | 9 | `auto_sync.py:237-242`, `progress_builder.py:236-274` | An export that parses but has no Direct rows empties every progress sheet and resets change tracking. | plausible |
 | 10 | `telegram_bot.py:1446` | `/sendmail` sends SMTP inside the event loop, which freezes the bot for up to about 90 s. | confirmed |
 
+## Added by the final pass
+
+| # | Where | Defect | Confidence |
+|---|---|---|---|
+| 11 | `verified_docs.py:383-392` with `doc_verifier.py:1064-1085` | A re-download only adds files, and portal file names carry the upload time, so a replacement sits beside the old file. The check takes the worst result across all files of that type, so a student who replaced an expired passport stays FAIL. | confirmed |
+| 12 | `auto_verify.py:154-164` | A student is re-queued only when a file or portal field changes. Passport validity, bank statement age and certificate age depend on today's date, so an old PASS is never revisited when it should become FAIL or FLAG. | confirmed |
+| 13 | `auto_verify.py:477-504`, `auto_sync.py:460-466` | The queue runs oldest folder first, 6 per pass, and a student whose checker raises stays at the front. A `TypeError` (and similar) ends the run on purpose, and `auto_sync` only logs it. One bad document can stop all checking with no Telegram message. | mechanism confirmed, trigger plausible |
+| 14 | `doc_verifier.py:1100-1126` | Folders are matched to portal records by passport number without filtering placeholders like "PENDING", so a student can be checked against another student's record. `auto_sync._passport_no` already filters these. | plausible |
+| 15 | `passport_issue.py:109`, read at `auto_verify.py:127-131` | The issue-date file is written in place while a sync may read it. A half-written file makes every student look changed. | plausible, low |
+| 16 | `auto_verify.py:468-484` | The lock is created before the `try` whose `finally` removes it, so a failed lookup leaves the lock behind until the next run. | confirmed, low |
+| 17 | `scheduler.py:409-414` | After `proc.kill()` at the 1-hour limit the code doesn't wait for the process, so the log says "exit None". | confirmed, minor |
+| 18 | `doc_verifier.py:132-150` | If OCR raises partway, the PDF is left open, which can block renames on Windows. | confirmed, low |
+
 ## Telegram and scheduler
 
 - `telegram_bot.py:2374`: the bot handles one update at a time, so `/crosscheck_range` (up to about 92 days of OCR) holds every other command for minutes. *confirmed*
